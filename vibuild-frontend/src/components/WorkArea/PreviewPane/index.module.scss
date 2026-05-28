@@ -274,70 +274,6 @@
         }
       }
     }
-
-    .meta {
-      position: absolute;
-      left: $space-4;
-      bottom: $space-4;
-      max-width: 340px;
-      padding: $space-3 $space-4;
-      background: rgba(11, 10, 13, 0.6);
-      backdrop-filter: blur(16px) saturate(180%);
-      border: 1px solid var(--color-border);
-      border-radius: $radius-md;
-      font-family: var(--font-mono);
-      animation: fade-up 0.8s $ease-out;
-      z-index: 2;
-
-      .metaRow {
-        display: flex;
-        gap: $space-3;
-        font-size: $fs-10;
-        line-height: 1.6;
-        align-items: baseline;
-
-        .metaKey {
-          color: var(--color-text-faint);
-          text-transform: uppercase;
-          letter-spacing: 0.1em;
-          min-width: 56px;
-        }
-
-        .metaVal {
-          color: var(--color-text-dim);
-          @include truncate;
-
-          strong {
-            color: var(--color-text);
-            font-weight: $fw-semibold;
-          }
-
-          i {
-            color: var(--color-text-faint);
-            font-style: normal;
-            margin: 0 4px;
-          }
-        }
-      }
-
-      .runtimeLive {
-        display: inline-flex;
-        align-items: center;
-        gap: 5px;
-        color: var(--color-success);
-
-        // Radio 图标用作"直播中"指示
-        svg {
-          animation: pulse 2s ease-in-out infinite;
-        }
-      }
-    }
-  }
-
-  @include light {
-    .frame .meta {
-      background: rgba(255, 255, 255, 0.75);
-    }
   }
 }
 
@@ -347,8 +283,3 @@
   }
 }
 
-@include mobile {
-  .preview .frame .meta {
-    display: none;
-  }
-}

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { Loader2, AlertTriangle, Radio } from 'lucide-react'
+import { Loader2, AlertTriangle } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
 import { useUIStore, type WCStatus } from '@/store/ui'
 import { bootAndRun, syncFiles, isBooted, isDevRunning } from '@/lib/webcontainer'
@@ -13,7 +13,6 @@ import styles from './index.module.scss'
 // - 失败时回落到拟态占位（保留原视觉作为背景）
 // ============================================
 export default function PreviewPane() {
-  const session = useSessionStore((s) => s.session)
   const currentVersion = useSessionStore((s) => s.currentVersion())
 
   const wcStatus = useUIStore((s) => s.wcStatus)
@@ -60,11 +59,6 @@ export default function PreviewPane() {
       })
   }, [currentVersion.id, currentVersion.files, setWCStatus, setWCLog, setWCError])
 
-  const fileCount = Object.keys(currentVersion.files).length
-  const componentCount = Object.keys(currentVersion.files).filter((p) =>
-    p.startsWith('src/components/'),
-  ).length
-
   const showIframe = wcUrl && (wcStatus === 'ready' || wcStatus === 'syncing')
   const isErrored = wcStatus === 'error'
 
@@ -105,29 +99,6 @@ export default function PreviewPane() {
                 )}
               </div>
             )}
-          </div>
-        </div>
-
-        <div className={styles.meta}>
-          <div className={styles.metaRow}>
-            <span className={styles.metaKey}>项目</span>
-            <span className={styles.metaVal}>{session.name}</span>
-          </div>
-          <div className={styles.metaRow}>
-            <span className={styles.metaKey}>版本</span>
-            <span className={styles.metaVal}>{currentVersion.id} — {currentVersion.label}</span>
-          </div>
-          <div className={styles.metaRow}>
-            <span className={styles.metaKey}>文件</span>
-            <span className={styles.metaVal}>
-              共 <strong>{fileCount}</strong> 个 <i>·</i> 组件 <strong>{componentCount}</strong> 个
-            </span>
-          </div>
-          <div className={styles.metaRow}>
-            <span className={styles.metaKey}>运行</span>
-            <span className={styles.metaVal}>
-              <RuntimeLabel status={wcStatus} url={wcUrl} />
-            </span>
           </div>
         </div>
       </div>
@@ -194,23 +165,6 @@ function ErrorBlock({ error }: { error: string | null }) {
       </p>
     </div>
   )
-}
-
-// ============================================
-// runtime 行：根据 status 展示不同文案
-// ============================================
-function RuntimeLabel({ status, url }: { status: WCStatus; url: string | null }) {
-  if (status === 'ready' && url) {
-    return (
-      <span className={styles.runtimeLive}>
-        <Radio size={10} /> 运行中 · {new URL(url).host}
-      </span>
-    )
-  }
-  if (status === 'syncing') return <span>同步文件中…</span>
-  if (status === 'error') return <span style={{ color: 'var(--color-danger)' }}>启动失败</span>
-  if (status === 'idle') return <span style={{ color: 'var(--color-text-mute)' }}>未启动</span>
-  return <span>{STATUS_LABELS[status]}…</span>
 }
 
 const STATUS_LABELS: Record<WCStatus, string> = {

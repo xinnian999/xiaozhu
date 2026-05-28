@@ -1,0 +1,114 @@
+@use '@/styles/variables' as *;
+@use '@/styles/common' as *;
+
+.bubble {
+  display: flex;
+  gap: $space-2;
+  margin-bottom: $space-4;
+
+  &.user {
+    flex-direction: row-reverse;
+
+    .content {
+      align-items: flex-end;
+      background: var(--color-bg-elev);
+      border: 1px solid var(--color-border);
+      border-radius: $radius-lg $radius-lg $radius-xs $radius-lg;
+    }
+
+    .text {
+      color: var(--color-text);
+    }
+
+    .time {
+      text-align: right;
+    }
+  }
+
+  &.assistant {
+    .content {
+      background: var(--color-bg-soft);
+      border: 1px solid var(--color-border-soft);
+      border-radius: $radius-lg $radius-lg $radius-lg $radius-xs;
+    }
+  }
+
+  .avatar {
+    flex-shrink: 0;
+    width: 24px;
+    height: 24px;
+    margin-top: 2px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: $radius-sm;
+    background: var(--color-accent-fade);
+    color: var(--color-accent);
+    border: 1px solid var(--color-accent-fade);
+  }
+
+  .content {
+    display: flex;
+    flex-direction: column;
+    gap: $space-2;
+    max-width: calc(100% - 32px);
+    padding: $space-3 $space-3;
+    min-width: 0;
+  }
+
+  .text {
+    margin: 0;
+    font-size: $fs-13;
+    line-height: $lh-snug;
+    color: var(--color-text-dim);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .versionChip {
+    @include button-reset;
+    display: inline-flex;
+    align-items: center;
+    gap: $space-2;
+    align-self: flex-start;
+    padding: 3px $space-2;
+    border-radius: $radius-sm;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg);
+    font-family: var(--font-mono);
+    font-size: $fs-10;
+    transition: border-color $dur-base $ease-out, background $dur-base $ease-out;
+
+    &:hover {
+      border-color: var(--color-border-strong);
+      background: var(--color-bg-hover);
+    }
+
+    &.versionChipCurrent {
+      border-color: var(--color-accent);
+      background: var(--color-accent-fade);
+
+      .versionId {
+        color: var(--color-accent);
+      }
+    }
+
+    .versionId {
+      font-weight: $fw-semibold;
+      letter-spacing: 0.05em;
+      color: var(--color-text-dim);
+    }
+
+    .versionLabel {
+      color: var(--color-text-mute);
+      @include truncate;
+      max-width: 160px;
+    }
+  }
+
+  .time {
+    font-family: var(--font-mono);
+    font-size: $fs-10;
+    color: var(--color-text-faint);
+  }
+}

@@ -51,7 +51,6 @@
     display: flex;
     justify-content: center;
 
-    // 时间线
     &::before {
       content: '';
       position: absolute;
@@ -95,6 +94,17 @@
         font-size: $fs-13;
         font-weight: $fw-medium;
         color: var(--color-text-dim);
+      }
+
+      .branchTag {
+        flex-shrink: 0;
+        font-size: 9px;
+        padding: 2px 5px;
+        border-radius: $radius-xs;
+        background: var(--color-accent-fade);
+        color: var(--color-accent);
+        @include truncate;
+        max-width: 88px;
       }
 
       .versionTag {
@@ -187,7 +197,6 @@
 
 @include mobile {
   .card .body .actions {
-    // 移动端无悬浮，常驻显示
     opacity: 1;
     transform: translateX(0);
     position: static;

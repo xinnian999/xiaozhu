@@ -4,7 +4,7 @@ import { create } from 'zustand'
 // UI store：跨组件的瞬时 UI 状态
 // ============================================
 
-export type WorkTab = 'preview' | 'code' | 'data'
+export type WorkTab = 'preview' | 'code'
 
 /** WebContainer 生命周期状态 */
 export type WCStatus =

@@ -1,15 +1,14 @@
-import { Eye, Code2, Database, ChevronLeft, RotateCw, ExternalLink, Terminal, MoreVertical } from 'lucide-react'
+import { Eye, Code2, ChevronLeft, RotateCw, ExternalLink, Terminal, MoreVertical } from 'lucide-react'
 import { useUIStore, type WorkTab } from '@/store/ui'
 import { useSessionStore } from '@/store/session'
 import styles from './index.module.scss'
 
 // ============================================
-// 工作区顶部 Tab 栏：切换 预览 / 代码 / 数据 + URL 栏
+// 工作区顶部 Tab 栏：切换 预览 / 代码 + URL 栏
 // ============================================
 const TABS: { key: WorkTab; label: string; Icon: typeof Eye }[] = [
   { key: 'preview', label: '预览', Icon: Eye },
   { key: 'code', label: '代码', Icon: Code2 },
-  { key: 'data', label: '数据', Icon: Database },
 ]
 
 export default function TabBar() {

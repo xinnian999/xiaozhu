@@ -1,0 +1,43 @@
+@use '@/styles/variables' as *;
+@use '@/styles/common' as *;
+
+.list {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+
+  .listEnd {
+    height: 1px;
+    flex-shrink: 0;
+  }
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100%;
+  padding: $space-8 $space-4;
+  text-align: center;
+
+  .emptyIcon {
+    color: var(--color-text-faint);
+    margin-bottom: $space-3;
+  }
+
+  .emptyTitle {
+    margin: 0 0 $space-2;
+    font-size: $fs-13;
+    font-weight: $fw-medium;
+    color: var(--color-text-dim);
+  }
+
+  .emptyHint {
+    margin: 0;
+    font-size: $fs-12;
+    line-height: $lh-snug;
+    color: var(--color-text-mute);
+    max-width: 220px;
+  }
+}

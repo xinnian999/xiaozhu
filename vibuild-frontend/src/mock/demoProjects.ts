@@ -15,6 +15,10 @@ export type Version = {
   files: FileMap
   /** 与上一版的 diff 概览 */
   diff: { added: number; removed: number }
+  /** 所属对话分支（默认 main 为主线） */
+  branchId?: string
+  /** 从哪个版本分出版本树 */
+  parentVersionId?: string
 }
 
 export type Message = {
@@ -25,18 +29,16 @@ export type Message = {
   producedVersionId?: string
   /** 此条消息发送时刻 */
   ts: number
+  /** 所属对话分支，与 Version.branchId 对齐 */
+  branchId?: string
 }
 
 export type Session = {
   id: string
   name: string
-  /** 复制自哪个项目（可选，用于顶部说明文案） */
-  duplicatedFrom?: string
   messages: Message[]
   versions: Version[]
   currentVersionId: string
-  /** 累计工作时长（秒） */
-  workedSeconds: number
 }
 
 // ============================================
@@ -304,6 +306,7 @@ const v1: Version = {
   id: 'v1',
   label: '初始化项目',
   summary: '初始化一个深色风格的个人主页',
+  branchId: 'main',
   createdAt: Date.now() - 1000 * 60 * 60 * 4,
   diff: { added: 680, removed: 0 },
   files: {
@@ -322,6 +325,8 @@ const v2: Version = {
   id: 'v2',
   label: '增加导航与 CTA',
   summary: '增加顶部导航和 hero 区的 CTA 按钮',
+  branchId: 'main',
+  parentVersionId: 'v1',
   createdAt: Date.now() - 1000 * 60 * 60 * 2,
   diff: { added: 92, removed: 8 },
   files: {
@@ -336,6 +341,8 @@ const v3: Version = {
   id: 'v3',
   label: '增加项目展示',
   summary: '加上"近期项目"列表区块',
+  branchId: 'main',
+  parentVersionId: 'v2',
   createdAt: Date.now() - 1000 * 60 * 25,
   diff: { added: 64, removed: 4 },
   files: {
@@ -346,27 +353,77 @@ const v3: Version = {
   },
 }
 
+// 从 v2 分出的实验分支（演示：历史版本后续仍有其它探索，不会被截断）
+const v2b: Version = {
+  id: 'v2b',
+  label: '尝试浅色 Hero',
+  summary: '在 v2 基础上试验更亮的 hero 配色',
+  branchId: 'branch-light-hero',
+  parentVersionId: 'v2',
+  createdAt: Date.now() - 1000 * 60 * 40,
+  diff: { added: 18, removed: 6 },
+  files: {
+    ...v2.files,
+    'src/index.css': INDEX_CSS.replace(
+      'background: #0b0a0d',
+      'background: #f5f3ef',
+    ),
+  },
+}
+
 // ============================================
 // Demo session
 // ============================================
 
+/** 空白项目模板（新建项目时使用） */
+export function createBlankProject(name = '未命名项目'): Session {
+  const now = Date.now()
+  return {
+    id: `project-${now}`,
+    name,
+    currentVersionId: 'v1',
+    versions: [
+      {
+        id: 'v1',
+        label: '初始版本',
+        summary: '新建项目',
+        branchId: 'main',
+        createdAt: now,
+        diff: { added: 0, removed: 0 },
+        files: {
+          'package.json': PACKAGE_JSON_V1,
+          'vite.config.ts': VITE_CONFIG,
+          'index.html': INDEX_HTML,
+          'README.md': README,
+          '.gitignore': GITIGNORE,
+          'src/main.tsx': MAIN_TSX,
+          'src/index.css': INDEX_CSS,
+          'src/App.tsx': APP_TSX_V1,
+        },
+      },
+    ],
+    messages: [],
+  }
+}
+
+/** 当前唯一的 demo 项目（单机本地应用） */
 export const demoSession: Session = {
-  id: 'cool-personal-blog-2',
-  name: '个人主页（副本）',
-  duplicatedFrom: '个人主页',
+  id: 'cool-personal-blog',
+  name: '个人主页',
   currentVersionId: 'v3',
-  workedSeconds: 3 * 3600 + 44 * 60,
-  versions: [v1, v2, v3],
+  versions: [v1, v2, v3, v2b],
   messages: [
     {
       id: 'm1',
       role: 'user',
+      branchId: 'main',
       text: '帮我做一个深色风格的个人主页，要简洁高级一点',
       ts: v1.createdAt - 1000 * 60,
     },
     {
       id: 'm2',
       role: 'assistant',
+      branchId: 'main',
       text: '好的，我先初始化一个 React + Vite 项目，做一个全屏的 hero 区域，深色基调配少量洋红强调色。',
       producedVersionId: 'v1',
       ts: v1.createdAt,
@@ -374,12 +431,14 @@ export const demoSession: Session = {
     {
       id: 'm3',
       role: 'user',
+      branchId: 'main',
       text: '在顶部加个导航，hero 区下面加两个按钮',
       ts: v2.createdAt - 1000 * 60,
     },
     {
       id: 'm4',
       role: 'assistant',
+      branchId: 'main',
       text: '已加上一个毛玻璃质感的固定导航条，以及"联系我 / 查看作品"两个按钮，主按钮用洋红色突出。',
       producedVersionId: 'v2',
       ts: v2.createdAt,
@@ -387,15 +446,35 @@ export const demoSession: Session = {
     {
       id: 'm5',
       role: 'user',
+      branchId: 'main',
       text: '再加一个项目展示区块，用卡片排版',
       ts: v3.createdAt - 1000 * 60,
     },
     {
       id: 'm6',
       role: 'assistant',
+      branchId: 'main',
       text: '在 hero 下方新增"近期项目"区块，使用响应式网格布局展示三个示例项目卡片。',
       producedVersionId: 'v3',
       ts: v3.createdAt,
     },
+    {
+      id: 'm5b',
+      role: 'user',
+      branchId: 'branch-light-hero',
+      text: '试一下把 hero 背景改成浅色会不会更干净',
+      ts: v2b.createdAt - 1000 * 60,
+    },
+    {
+      id: 'm6b',
+      role: 'assistant',
+      branchId: 'branch-light-hero',
+      text: '已在实验分支调整全局背景为浅暖色，hero 对比度保持不变，方便与主线对比。',
+      producedVersionId: 'v2b',
+      ts: v2b.createdAt,
+    },
   ],
 }
+
+/** @deprecated 使用 demoSession；保留别名便于迁移 */
+export const demoProject = demoSession

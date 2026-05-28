@@ -79,7 +79,7 @@
         z-index: 0;
         top: 2px;
         bottom: 2px;
-        width: calc((100% - 4px) / 3);
+        width: calc((100% - 4px) / 2);
         background: var(--color-bg-elev);
         border-radius: $radius-sm;
         box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03);
@@ -90,9 +90,6 @@
         }
         &[data-active='code'] {
           transform: translateX(100%);
-        }
-        &[data-active='data'] {
-          transform: translateX(200%);
         }
       }
     }

@@ -1,7 +1,6 @@
 import { useUIStore } from '@/store/ui'
 import TabBar from './TabBar'
 import PreviewPane from './PreviewPane'
-import DataPane from './DataPane'
 import CodePane from './CodePane'
 import styles from './index.module.scss'
 
@@ -22,9 +21,6 @@ export default function WorkArea() {
         </div>
         <div className={styles.pane} style={{ display: workTab === 'code' ? 'flex' : 'none' }}>
           <CodePane />
-        </div>
-        <div className={styles.pane} style={{ display: workTab === 'data' ? 'block' : 'none' }}>
-          <DataPane />
         </div>
       </div>
     </section>

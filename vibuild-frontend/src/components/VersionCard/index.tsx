@@ -8,24 +8,37 @@ import type { Version } from '@/mock/demoProjects'
 import styles from './index.module.scss'
 
 // ============================================
-// 版本卡片：左侧版本列表中的单元
+// 版本卡片：版本历史列表中的单元
 // ============================================
 type Props = {
   version: Version
   isCurrent: boolean
   projectName: string
+  /** 非主线时展示分支名 */
+  branchLabel?: string
+  /** 选中后回调（用于关闭下拉菜单） */
+  onSelect?: () => void
 }
 
-export default function VersionCard({ version, isCurrent, projectName }: Props) {
+export default function VersionCard({
+  version,
+  isCurrent,
+  projectName,
+  branchLabel,
+  onSelect,
+}: Props) {
   const setCurrentVersion = useSessionStore((s) => s.setCurrentVersion)
   const resetEditor = useEditorStore((s) => s.reset)
   const pushToast = useUIStore((s) => s.pushToast)
 
   const select = () => {
-    if (isCurrent) return
+    if (isCurrent) {
+      onSelect?.()
+      return
+    }
     setCurrentVersion(version.id)
-    // 切版本时清空打开的 tab，避免引用到不存在的文件
     resetEditor()
+    onSelect?.()
   }
 
   const onDownload = async (e: React.MouseEvent) => {
@@ -39,6 +52,7 @@ export default function VersionCard({ version, isCurrent, projectName }: Props) 
     setCurrentVersion(version.id)
     resetEditor()
     pushToast(`已切换到 ${version.id}`)
+    onSelect?.()
   }
 
   return (
@@ -54,7 +68,6 @@ export default function VersionCard({ version, isCurrent, projectName }: Props) 
         }
       }}
     >
-      {/* 左侧版本指示器：当前显示横线 + 圆点，非当前仅圆点 */}
       <span className={styles.rail} aria-hidden>
         <span className={styles.railDot}>
           {isCurrent && <Check size={9} strokeWidth={3} />}
@@ -64,6 +77,7 @@ export default function VersionCard({ version, isCurrent, projectName }: Props) 
       <div className={styles.body}>
         <div className={styles.headRow}>
           <span className={styles.label}>{version.label}</span>
+          {branchLabel && <span className={styles.branchTag}>{branchLabel}</span>}
           <span className={styles.versionTag}>{version.id}</span>
         </div>
 
@@ -78,7 +92,6 @@ export default function VersionCard({ version, isCurrent, projectName }: Props) 
           <span className={styles.clock}>{formatClock(version.createdAt)}</span>
         </div>
 
-        {/* 悬浮态显示的操作按钮 */}
         <div className={styles.actions}>
           <button
             className={styles.actionBtn}

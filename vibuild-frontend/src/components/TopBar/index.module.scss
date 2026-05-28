@@ -100,54 +100,10 @@
     align-items: center;
     gap: $space-2;
 
-    .crumb,
-    .project {
-      @include button-reset;
-      display: flex;
-      align-items: center;
-      gap: $space-2;
-      padding: $space-1 $space-3;
-      border-radius: $radius-md;
-      color: var(--color-text-dim);
-      font-size: $fs-13;
-      transition: color $dur-base $ease-out, background $dur-base $ease-out;
-
-      &:hover {
-        color: var(--color-text);
-        background: var(--color-bg-hover);
-      }
-    }
-
-    .crumbDots {
-      // 4 个小点构成虚线圆环图标
-      display: inline-grid;
-      grid-template-columns: repeat(2, 4px);
-      grid-template-rows: repeat(2, 4px);
-      gap: 2px;
-
-      i {
-        background: var(--color-text-mute);
-        border-radius: 50%;
-      }
-    }
-
     .crumbSep {
       color: var(--color-text-faint);
       font-size: $fs-13;
-    }
-
-    .project {
-      color: var(--color-text);
-      font-weight: $fw-medium;
-
-      .projectName {
-        @include truncate;
-        max-width: 240px;
-      }
-
-      .caret {
-        color: var(--color-text-mute);
-      }
+      user-select: none;
     }
   }
 
@@ -203,18 +159,7 @@
     }
 
     .center {
-      .crumb {
-        display: none;
-      }
-
-      .crumbSep {
-        display: none;
-      }
-
-      .project .projectName {
-        max-width: 120px;
-        font-size: $fs-12;
-      }
+      gap: $space-1;
     }
 
     .right {

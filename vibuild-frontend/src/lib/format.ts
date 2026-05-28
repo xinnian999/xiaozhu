@@ -2,14 +2,6 @@
 // 通用格式化工具
 // ============================================
 
-/** 把秒数转成"3h 44m"形式 */
-export function formatDuration(totalSeconds: number): string {
-  const h = Math.floor(totalSeconds / 3600)
-  const m = Math.floor((totalSeconds % 3600) / 60)
-  if (h === 0) return `${m}m`
-  return `${h}h ${m}m`
-}
-
 /** 格式化时间为 11:13 AM 风格 */
 export function formatClock(ts: number): string {
   const d = new Date(ts)

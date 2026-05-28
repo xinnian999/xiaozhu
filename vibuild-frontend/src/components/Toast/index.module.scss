@@ -1,0 +1,45 @@
+@use '@/styles/variables' as *;
+@use '@/styles/common' as *;
+
+.toast {
+  position: fixed;
+  bottom: $space-6;
+  right: $space-6;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: $space-3;
+  padding: $space-3 $space-4;
+  background: var(--color-bg-elev);
+  border: 1px solid var(--color-border-strong);
+  border-radius: $radius-md;
+  box-shadow: var(--shadow-pop);
+  animation: fade-up $dur-base $ease-out;
+  max-width: 320px;
+
+  .icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--color-accent);
+    color: white;
+    flex-shrink: 0;
+  }
+
+  .text {
+    font-size: $fs-13;
+    color: var(--color-text);
+  }
+}
+
+@include mobile {
+  .toast {
+    left: $space-4;
+    right: $space-4;
+    bottom: $space-4;
+    max-width: none;
+  }
+}

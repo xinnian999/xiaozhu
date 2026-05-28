@@ -1,0 +1,196 @@
+@use '@/styles/variables' as *;
+@use '@/styles/common' as *;
+
+.card {
+  @include button-reset;
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: $space-3;
+  padding: $space-3 $space-3 $space-3 0;
+  border-radius: $radius-md;
+  text-align: left;
+  width: 100%;
+  cursor: pointer;
+  transition: background $dur-base $ease-out;
+  overflow: hidden;
+
+  &:hover {
+    background: var(--color-bg-soft);
+
+    .body .actions {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+
+  &.current {
+    background: var(--color-bg-soft);
+
+    .rail {
+      &::before {
+        background: var(--color-accent);
+      }
+
+      .railDot {
+        background: var(--color-accent);
+        color: white;
+        box-shadow: 0 0 0 3px var(--color-accent-fade), 0 0 12px var(--color-accent-glow);
+      }
+    }
+
+    .body .headRow .label {
+      color: var(--color-text);
+    }
+  }
+
+  .rail {
+    position: relative;
+    width: $space-4;
+    flex-shrink: 0;
+    display: flex;
+    justify-content: center;
+
+    // 时间线
+    &::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 50%;
+      width: 1px;
+      background: var(--color-border);
+      transform: translateX(-50%);
+    }
+
+    .railDot {
+      position: relative;
+      z-index: 1;
+      width: 12px;
+      height: 12px;
+      margin-top: 5px;
+      border-radius: 50%;
+      background: var(--color-bg-elev);
+      border: 1px solid var(--color-border-strong);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: all $dur-base $ease-out;
+    }
+  }
+
+  .body {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+
+    .headRow {
+      display: flex;
+      align-items: center;
+      gap: $space-2;
+      margin-bottom: 5px;
+
+      .label {
+        @include truncate;
+        font-size: $fs-13;
+        font-weight: $fw-medium;
+        color: var(--color-text-dim);
+      }
+
+      .versionTag {
+        font-family: var(--font-mono);
+        font-size: $fs-10;
+        font-weight: $fw-semibold;
+        letter-spacing: 0.05em;
+        padding: 2px $space-2;
+        background: var(--color-bg-elev);
+        color: var(--color-text-dim);
+        border-radius: $radius-xs;
+        margin-left: auto;
+        flex-shrink: 0;
+      }
+    }
+
+    .meta {
+      display: flex;
+      align-items: center;
+      gap: $space-2;
+      font-family: var(--font-mono);
+      font-size: $fs-10;
+      color: var(--color-text-mute);
+
+      .hash {
+        color: var(--color-text-faint);
+        letter-spacing: 0.05em;
+      }
+
+      .diff {
+        display: inline-flex;
+        gap: $space-1;
+
+        .added {
+          color: var(--color-success);
+          opacity: 0.85;
+        }
+
+        .removed {
+          color: var(--color-danger);
+          opacity: 0.85;
+        }
+      }
+
+      .clock {
+        margin-left: auto;
+        color: var(--color-text-faint);
+      }
+    }
+
+    .actions {
+      position: absolute;
+      top: -2px;
+      right: -4px;
+      display: flex;
+      gap: 2px;
+      padding: 2px;
+      background: var(--color-bg-elev);
+      border: 1px solid var(--color-border);
+      border-radius: $radius-sm;
+      opacity: 0;
+      transform: translateX(4px);
+      transition: opacity $dur-base $ease-out, transform $dur-base $ease-out;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+
+      .actionBtn {
+        @include button-reset;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 22px;
+        height: 22px;
+        border-radius: $radius-xs;
+        color: var(--color-text-dim);
+
+        &:hover {
+          background: var(--color-bg-hover);
+          color: var(--color-text);
+        }
+      }
+    }
+  }
+
+  @include light {
+    .body .actions {
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+    }
+  }
+}
+
+@include mobile {
+  .card .body .actions {
+    // 移动端无悬浮，常驻显示
+    opacity: 1;
+    transform: translateX(0);
+    position: static;
+    margin-top: $space-2;
+  }
+}

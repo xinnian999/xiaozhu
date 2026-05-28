@@ -1,0 +1,81 @@
+// ============================================
+// 主题色变量（CSS 自定义属性）
+// ============================================
+// 颜色用 CSS 变量管理，切换 html[data-theme] 自动生效
+// 组件中通过 var(--color-xxx) 引用，主题切换零成本
+
+:root,
+html[data-theme='dark'] {
+  // —— 基础色系（偏暖深色，比纯黑更高级）——
+  --color-bg:           #0b0a0d;       // 全局背景
+  --color-bg-soft:      #111014;       // 卡片/面板背景
+  --color-bg-elev:      #16151a;       // 悬浮态背景
+  --color-bg-hover:     #1c1b22;       // 强 hover 背景
+  --color-bg-mute:      #08080a;       // 凹陷区（如代码区）
+
+  // —— 描边 ——
+  --color-border:       #1f1d24;       // 主描边
+  --color-border-soft:  #161519;       // 弱描边
+  --color-border-strong:#2a282f;       // 强描边/激活态
+
+  // —— 文本 ——
+  --color-text:         #f3f1ed;       // 主要文本（略带暖色，不刺眼）
+  --color-text-dim:     #a8a4ad;       // 次要文本
+  --color-text-mute:    #66626c;       // 弱化文本
+  --color-text-faint:   #3f3c44;       // 极弱文本/占位
+
+  // —— 强调色（洋红，仅在关键操作和品牌位使用）——
+  --color-accent:       #ff3d6e;
+  --color-accent-soft:  #ff5c84;
+  --color-accent-glow:  rgba(255, 61, 110, 0.18);
+  --color-accent-fade:  rgba(255, 61, 110, 0.08);
+
+  // —— 语义色 ——
+  --color-success:      #4ade80;
+  --color-warning:      #facc15;
+  --color-danger:       #ef4444;
+  --color-info:         #38bdf8;
+
+  // —— 装饰 ——
+  --color-grid:         rgba(255, 255, 255, 0.025); // 网格底纹
+  --color-noise-opacity: 0.04;                       // 噪点强度
+  --shadow-card:        0 1px 0 rgba(255, 255, 255, 0.03), 0 0 0 1px rgba(255, 255, 255, 0.02);
+  --shadow-pop:         0 12px 32px -8px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  --shadow-accent:      0 0 24px var(--color-accent-glow);
+
+  // —— 字体 ——
+  --font-sans:  'Bricolage Grotesque', system-ui, -apple-system, 'PingFang SC', sans-serif;
+  --font-serif: 'Instrument Serif', 'Songti SC', Georgia, serif;
+  --font-mono:  'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+// ============================================
+// 浅色主题（带温度感的奶白，非纯白）
+// ============================================
+html[data-theme='light'] {
+  --color-bg:           #f7f5f0;
+  --color-bg-soft:      #ffffff;
+  --color-bg-elev:      #fbfaf6;
+  --color-bg-hover:     #efece5;
+  --color-bg-mute:      #ede9df;
+
+  --color-border:       #e0dbcf;
+  --color-border-soft:  #ece8de;
+  --color-border-strong:#c8c2b3;
+
+  --color-text:         #15131a;
+  --color-text-dim:     #5c5860;
+  --color-text-mute:    #8e8a90;
+  --color-text-faint:   #c0bcc4;
+
+  --color-accent:       #e11d48;
+  --color-accent-soft:  #be1640;
+  --color-accent-glow:  rgba(225, 29, 72, 0.15);
+  --color-accent-fade:  rgba(225, 29, 72, 0.06);
+
+  --color-grid:         rgba(0, 0, 0, 0.03);
+  --color-noise-opacity: 0.025;
+  --shadow-card:        0 1px 2px rgba(0, 0, 0, 0.04), 0 0 0 1px rgba(0, 0, 0, 0.04);
+  --shadow-pop:         0 12px 32px -8px rgba(0, 0, 0, 0.18), 0 0 0 1px rgba(0, 0, 0, 0.06);
+  --shadow-accent:      0 0 24px var(--color-accent-glow);
+}

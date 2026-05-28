@@ -1,0 +1,232 @@
+@use '@/styles/variables' as *;
+@use '@/styles/common' as *;
+
+.tabbar {
+  height: $tab-h + 8px;
+  display: flex;
+  align-items: center;
+  padding: 0 $space-3;
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-border);
+  gap: $space-3;
+  flex-shrink: 0;
+
+  .left {
+    display: flex;
+    align-items: center;
+    gap: $space-2;
+
+    .collapseBtn {
+      @include button-reset;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      height: 26px;
+      border-radius: $radius-sm;
+      color: var(--color-text-mute);
+      transition: background $dur-base $ease-out, transform $dur-base $ease-out;
+
+      &:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text);
+      }
+
+      &.isCollapsed {
+        transform: rotate(180deg);
+      }
+    }
+
+    .tabs {
+      position: relative;
+      display: flex;
+      background: var(--color-bg-soft);
+      border: 1px solid var(--color-border);
+      border-radius: $radius-md;
+      padding: 2px;
+      isolation: isolate;
+
+      .tab {
+        @include button-reset;
+        position: relative;
+        z-index: 1;
+        display: inline-flex;
+        align-items: center;
+        gap: $space-2;
+        height: 26px;
+        padding: 0 $space-3;
+        border-radius: $radius-sm;
+        color: var(--color-text-mute);
+        font-size: $fs-12;
+        font-weight: $fw-medium;
+        transition: color $dur-base $ease-out;
+
+        span {
+          display: inline-block;
+        }
+
+        &:hover:not(.active) {
+          color: var(--color-text-dim);
+        }
+
+        &.active {
+          color: var(--color-text);
+        }
+      }
+
+      .tabIndicator {
+        position: absolute;
+        z-index: 0;
+        top: 2px;
+        bottom: 2px;
+        width: calc((100% - 4px) / 3);
+        background: var(--color-bg-elev);
+        border-radius: $radius-sm;
+        box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03);
+        transition: transform $dur-base $ease-out;
+
+        &[data-active='preview'] {
+          transform: translateX(0);
+        }
+        &[data-active='code'] {
+          transform: translateX(100%);
+        }
+        &[data-active='data'] {
+          transform: translateX(200%);
+        }
+      }
+    }
+  }
+
+  .center {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+    min-width: 0;
+
+    .urlBar {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      height: 28px;
+      width: min(560px, 100%);
+      padding: 0 4px;
+      background: var(--color-bg-soft);
+      border: 1px solid var(--color-border);
+      border-radius: $radius-md;
+
+      .urlIconBtn {
+        @include button-reset;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 22px;
+        height: 22px;
+        border-radius: $radius-xs;
+        color: var(--color-text-mute);
+
+        &:hover {
+          color: var(--color-text);
+          background: var(--color-bg-hover);
+        }
+      }
+
+      .urlInput {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: $space-2;
+        height: 22px;
+        padding: 0 $space-2;
+        margin: 0 2px;
+        background: var(--color-bg);
+        border-radius: $radius-xs;
+        font-family: var(--font-mono);
+        font-size: $fs-11;
+        color: var(--color-text-dim);
+        min-width: 0;
+
+        .urlBrand {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 14px;
+          height: 14px;
+          background: var(--color-text);
+          color: var(--color-bg);
+          border-radius: 2px;
+          font-size: 9px;
+          font-weight: $fw-bold;
+          flex-shrink: 0;
+        }
+
+        .urlPath {
+          @include truncate;
+          flex: 1;
+        }
+
+        .urlVersionTag {
+          font-size: $fs-10;
+          color: var(--color-text-mute);
+          padding: 1px 5px;
+          background: var(--color-bg-elev);
+          border-radius: 3px;
+          letter-spacing: 0.05em;
+          flex-shrink: 0;
+        }
+      }
+    }
+  }
+
+  .right {
+    display: flex;
+    align-items: center;
+    gap: $space-1;
+
+    .iconBtn {
+      @include button-reset;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      border-radius: $radius-sm;
+      color: var(--color-text-mute);
+
+      &:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text);
+      }
+    }
+  }
+}
+
+@include mobile {
+  .tabbar {
+    padding: 0 $space-2;
+    gap: $space-2;
+
+    .left .collapseBtn {
+      display: none;
+    }
+
+    .left .tabs .tab span {
+      display: none;
+    }
+
+    .center .urlBar {
+      .urlIconBtn:nth-child(1),
+      .urlIconBtn:nth-child(2) {
+        display: none;
+      }
+
+      .urlInput .urlBrand {
+        display: none;
+      }
+    }
+
+    .right .iconBtn:nth-child(2) {
+      display: none;
+    }
+  }
+}

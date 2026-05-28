@@ -1,0 +1,106 @@
+@use 'variables' as *;
+
+// ============================================
+// 通用 mixin
+// ============================================
+
+// —— 浅色主题覆盖（仅用于颜色以外的差异）——
+// 颜色已由 CSS 变量自动切换；此 mixin 用于阴影/边框结构等需要主题专属差异的场景
+@mixin light {
+  :global(html[data-theme='light']) & {
+    @content;
+  }
+}
+
+// —— 响应式断点 ——
+@mixin mobile {
+  @media (max-width: #{$bp-mobile - 1px}) {
+    @content;
+  }
+}
+
+@mixin tablet {
+  @media (max-width: #{$bp-tablet - 1px}) and (min-width: #{$bp-mobile}) {
+    @content;
+  }
+}
+
+// —— 隐藏滚动条但保留滚动能力 ——
+@mixin hide-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-strong) transparent;
+
+  &::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  &::-webkit-scrollbar-thumb {
+    background: var(--color-border-strong);
+    border-radius: $radius-full;
+  }
+  &::-webkit-scrollbar-thumb:hover {
+    background: var(--color-text-mute);
+  }
+}
+
+// —— 文本省略号 ——
+@mixin truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// —— 单行 / 多行截断 ——
+@mixin line-clamp($lines: 2) {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: $lines;
+  overflow: hidden;
+}
+
+// —— 重置按钮 ——
+@mixin button-reset {
+  appearance: none;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  outline: none;
+}
+
+// —— 噪点纹理：给深色界面一点点颗粒感，避免大平面塑料感 ——
+@mixin grain {
+  position: relative;
+
+  &::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: var(--color-noise-opacity);
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.9'/%3E%3C/svg%3E");
+    mix-blend-mode: overlay;
+  }
+}
+
+// —— 网格底纹（蓝图风格）——
+@mixin grid-bg($size: 24px) {
+  background-image:
+    linear-gradient(var(--color-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--color-grid) 1px, transparent 1px);
+  background-size: $size $size;
+}
+
+// —— focus 可见焦点 ——
+@mixin focus-ring {
+  &:focus-visible {
+    outline: 1px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}

@@ -1,0 +1,110 @@
+@use '@/styles/variables' as *;
+@use '@/styles/common' as *;
+
+.tree {
+  width: $tree-w;
+  flex-shrink: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg);
+  border-right: 1px solid var(--color-border);
+
+  .head {
+    padding: $space-3 $space-3 $space-2;
+    border-bottom: 1px solid var(--color-border-soft);
+
+    .projectLabel {
+      display: flex;
+      align-items: center;
+      gap: $space-2;
+      margin-bottom: $space-2;
+
+      .projectDot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--color-accent);
+        box-shadow: 0 0 8px var(--color-accent-glow);
+      }
+
+      .projectName {
+        @include truncate;
+        font-family: var(--font-mono);
+        font-size: $fs-11;
+        font-weight: $fw-semibold;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--color-text-dim);
+      }
+    }
+
+    .tools {
+      display: flex;
+      gap: 2px;
+
+      .toolBtn {
+        @include button-reset;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 22px;
+        height: 22px;
+        border-radius: $radius-xs;
+        color: var(--color-text-mute);
+        transition: all $dur-fast $ease-out;
+
+        &:hover:not(:disabled) {
+          background: var(--color-bg-hover);
+          color: var(--color-text-dim);
+        }
+
+        &:disabled {
+          opacity: 0.35;
+          cursor: not-allowed;
+        }
+      }
+    }
+  }
+
+  .list {
+    flex: 1;
+    overflow-y: auto;
+    padding: $space-2 0;
+  }
+
+  .foot {
+    height: 26px;
+    padding: 0 $space-3;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-top: 1px solid var(--color-border-soft);
+    background: var(--color-bg-soft);
+    font-family: var(--font-mono);
+    font-size: $fs-10;
+
+    .footStat {
+      color: var(--color-text-mute);
+
+      strong {
+        color: var(--color-text-dim);
+        font-weight: $fw-semibold;
+      }
+    }
+
+    .footTag {
+      padding: 1px 6px;
+      background: var(--color-bg-elev);
+      border-radius: $radius-xs;
+      color: var(--color-text-dim);
+      letter-spacing: 0.05em;
+    }
+  }
+}
+
+@include mobile {
+  .tree {
+    width: 200px;
+  }
+}

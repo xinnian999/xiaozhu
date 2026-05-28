@@ -1,0 +1,230 @@
+@use '@/styles/variables' as *;
+@use '@/styles/common' as *;
+
+.topbar {
+  position: relative;
+  z-index: 20;
+  height: $topbar-h;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 $space-4;
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-border);
+  user-select: none;
+
+  // 顶栏底部细微高光线
+  &::after {
+    content: '';
+    position: absolute;
+    inset: auto 0 -1px 0;
+    height: 1px;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      var(--color-accent-fade) 20%,
+      var(--color-accent-fade) 80%,
+      transparent
+    );
+    opacity: 0.6;
+    pointer-events: none;
+  }
+
+  .left {
+    display: flex;
+    align-items: center;
+    gap: $space-3;
+
+    .mobileMenuBtn {
+      @include button-reset;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      border-radius: $radius-sm;
+      color: var(--color-text-dim);
+
+      &:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text);
+      }
+    }
+
+    .brand {
+      display: flex;
+      align-items: baseline;
+      gap: $space-2;
+      cursor: pointer;
+      padding: $space-1 $space-2;
+      border-radius: $radius-sm;
+
+      .brandMark {
+        // 方块小标志
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 22px;
+        height: 22px;
+        background: var(--color-text);
+        color: var(--color-bg);
+        font-family: var(--font-mono);
+        font-size: $fs-11;
+        font-weight: $fw-bold;
+        border-radius: $radius-xs;
+        transform: translateY(2px);
+        letter-spacing: -0.5px;
+      }
+
+      .brandText {
+        font-family: var(--font-serif);
+        font-style: italic;
+        font-size: $fs-20;
+        font-weight: $fw-normal;
+        letter-spacing: -0.5px;
+        color: var(--color-text);
+      }
+
+      &:hover .brandMark {
+        background: var(--color-accent);
+        color: white;
+      }
+    }
+  }
+
+  .center {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: $space-2;
+
+    .crumb,
+    .project {
+      @include button-reset;
+      display: flex;
+      align-items: center;
+      gap: $space-2;
+      padding: $space-1 $space-3;
+      border-radius: $radius-md;
+      color: var(--color-text-dim);
+      font-size: $fs-13;
+      transition: color $dur-base $ease-out, background $dur-base $ease-out;
+
+      &:hover {
+        color: var(--color-text);
+        background: var(--color-bg-hover);
+      }
+    }
+
+    .crumbDots {
+      // 4 个小点构成虚线圆环图标
+      display: inline-grid;
+      grid-template-columns: repeat(2, 4px);
+      grid-template-rows: repeat(2, 4px);
+      gap: 2px;
+
+      i {
+        background: var(--color-text-mute);
+        border-radius: 50%;
+      }
+    }
+
+    .crumbSep {
+      color: var(--color-text-faint);
+      font-size: $fs-13;
+    }
+
+    .project {
+      color: var(--color-text);
+      font-weight: $fw-medium;
+
+      .projectName {
+        @include truncate;
+        max-width: 240px;
+      }
+
+      .caret {
+        color: var(--color-text-mute);
+      }
+    }
+  }
+
+  .right {
+    display: flex;
+    align-items: center;
+    gap: $space-1;
+
+    .iconBtn {
+      @include button-reset;
+      display: inline-flex;
+      align-items: center;
+      gap: $space-2;
+      height: 32px;
+      padding: 0 $space-3;
+      border-radius: $radius-md;
+      color: var(--color-text-dim);
+      font-size: $fs-13;
+      transition: background $dur-base $ease-out, color $dur-base $ease-out;
+
+      &:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text);
+      }
+
+      .iconBtnLabel {
+        font-weight: $fw-medium;
+      }
+    }
+  }
+
+  // —— 浅色主题下的细微差异（仅结构差异，颜色靠 CSS 变量自动）——
+  @include light {
+    .left .brand .brandMark {
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+    }
+  }
+}
+
+// —— 响应式：移动端 ——
+@include mobile {
+  .topbar {
+    padding: 0 $space-3;
+
+    .left {
+      .mobileMenuBtn {
+        display: inline-flex;
+      }
+
+      .brand .brandText {
+        display: none;
+      }
+    }
+
+    .center {
+      .crumb {
+        display: none;
+      }
+
+      .crumbSep {
+        display: none;
+      }
+
+      .project .projectName {
+        max-width: 120px;
+        font-size: $fs-12;
+      }
+    }
+
+    .right {
+      .iconBtn .iconBtnLabel {
+        display: none;
+      }
+
+      .iconBtn {
+        padding: 0 $space-2;
+      }
+    }
+  }
+}

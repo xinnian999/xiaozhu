@@ -1,0 +1,69 @@
+@use '@/styles/variables' as *;
+@use '@/styles/common' as *;
+
+.row {
+  @include button-reset;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 26px;
+  padding: 0 $space-3;
+  text-align: left;
+  color: var(--color-text-dim);
+  font-size: $fs-12;
+  transition: background $dur-fast $ease-out, color $dur-fast $ease-out;
+  position: relative;
+
+  &:hover {
+    background: var(--color-bg-soft);
+    color: var(--color-text);
+  }
+
+  .name {
+    @include truncate;
+    flex: 1;
+    font-family: var(--font-mono);
+    font-size: $fs-12;
+    letter-spacing: 0;
+  }
+}
+
+.dirRow {
+  color: var(--color-text);
+
+  .chevron {
+    flex-shrink: 0;
+    color: var(--color-text-mute);
+    transition: transform $dur-fast $ease-out;
+
+    &.chevronOpen {
+      transform: rotate(90deg);
+    }
+  }
+
+  .dirIcon {
+    flex-shrink: 0;
+    color: var(--color-text-mute);
+  }
+}
+
+.fileRow {
+  .fileIcon {
+    flex-shrink: 0;
+  }
+}
+
+.fileActive {
+  background: var(--color-bg-elev) !important;
+  color: var(--color-text) !important;
+
+  .activeDot {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--color-accent);
+    box-shadow: 0 0 6px var(--color-accent-glow);
+    flex-shrink: 0;
+  }
+}

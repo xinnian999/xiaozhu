@@ -1,0 +1,121 @@
+@use '@/styles/variables' as *;
+@use '@/styles/common' as *;
+
+.tabbar {
+  height: 34px;
+  display: flex;
+  align-items: stretch;
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+  overflow: hidden;
+
+  .tabs {
+    flex: 1;
+    display: flex;
+    overflow-x: auto;
+    overflow-y: hidden;
+    min-width: 0;
+
+    .tab {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      gap: $space-2;
+      padding: 0 $space-3;
+      height: 100%;
+      cursor: pointer;
+      font-family: var(--font-mono);
+      font-size: $fs-11;
+      color: var(--color-text-mute);
+      border-right: 1px solid var(--color-border-soft);
+      transition: color $dur-fast $ease-out;
+      flex-shrink: 0;
+
+      .tabName {
+        @include truncate;
+        max-width: 180px;
+      }
+
+      .close {
+        @include button-reset;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 16px;
+        height: 16px;
+        border-radius: $radius-xs;
+        color: var(--color-text-faint);
+        opacity: 0;
+        transition: all $dur-fast $ease-out;
+
+        &:hover {
+          background: var(--color-bg-hover);
+          color: var(--color-text);
+        }
+      }
+
+      &:hover {
+        color: var(--color-text-dim);
+        background: var(--color-bg-soft);
+
+        .close {
+          opacity: 1;
+        }
+      }
+
+      &.active {
+        color: var(--color-text);
+        background: var(--color-bg-mute);
+
+        // 顶部细线高亮
+        &::before {
+          content: '';
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          height: 1px;
+          background: var(--color-accent);
+        }
+
+        .close {
+          opacity: 1;
+          color: var(--color-text-dim);
+        }
+      }
+    }
+  }
+
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 0 $space-2;
+    background: var(--color-bg);
+    border-left: 1px solid var(--color-border-soft);
+    flex-shrink: 0;
+
+    .actionBtn {
+      @include button-reset;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 24px;
+      height: 24px;
+      border-radius: $radius-xs;
+      color: var(--color-text-mute);
+      transition: all $dur-fast $ease-out;
+
+      &:hover:not(:disabled) {
+        background: var(--color-bg-hover);
+        color: var(--color-text);
+      }
+
+      &:disabled {
+        opacity: 0.35;
+        cursor: not-allowed;
+      }
+    }
+  }
+}

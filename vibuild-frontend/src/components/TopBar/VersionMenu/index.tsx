@@ -2,12 +2,12 @@ import { useCallback, useMemo, useRef, useState } from 'react'
 import { ChevronDown } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
 import { useClickOutside } from '@/hooks/useClickOutside'
-import { groupVersionsByBranch } from '@/lib/sessionBranch'
+import { buildVersionTree, flattenVersionTree, getBranchLabel } from '@/lib/sessionBranch'
 import VersionCard from '@/components/VersionCard'
 import styles from './index.module.scss'
 
 // ============================================
-// 顶栏：版本切换下拉（按分支分组，不截断历史版本）
+// 顶栏：版本切换下拉（树形展示，分支以子节点呈现）
 // ============================================
 export default function VersionMenu() {
   const [open, setOpen] = useState(false)
@@ -16,8 +16,9 @@ export default function VersionMenu() {
   const session = useSessionStore((s) => s.session)
   const currentVersion = useSessionStore((s) => s.currentVersion())
 
-  const branchGroups = useMemo(
-    () => groupVersionsByBranch(session),
+  // 把版本扁平化为带 depth / 分叉信息的渲染行
+  const rows = useMemo(
+    () => flattenVersionTree(buildVersionTree(session)),
     [session.id, session.versions],
   )
 
@@ -42,24 +43,41 @@ export default function VersionMenu() {
         <div className={styles.panel} role="menu" aria-label="版本历史">
           <p className={styles.panelTitle}>版本历史</p>
           <p className={styles.panelDesc}>所有分支均保留，可随时切回</p>
-          <div className={styles.groups}>
-            {branchGroups.map((group) => (
-              <section key={group.branchId} className={styles.group}>
-                <h3 className={styles.groupTitle}>{group.label}</h3>
-                <div className={styles.list}>
-                  {group.versions.map((v) => (
+          <div className={styles.tree}>
+            {rows.map((row) => {
+              const branchId = row.version.branchId ?? 'main'
+              return (
+                <div
+                  key={row.version.id}
+                  className={styles.row}
+                  style={{ '--depth': row.depth } as React.CSSProperties}
+                >
+                  {/* 缩进 + 分叉 rail：每一级一个槽位 */}
+                  <div className={styles.indent} aria-hidden>
+                    {Array.from({ length: row.depth }).map((_, i) => (
+                      <span key={i} className={styles.indentSlot}>
+                        {i === row.depth - 1 && row.isBranchRoot ? (
+                          <span className={styles.elbow}>└</span>
+                        ) : (
+                          <span className={styles.vline} />
+                        )}
+                      </span>
+                    ))}
+                  </div>
+                  <div className={styles.cardWrap}>
                     <VersionCard
-                      key={v.id}
-                      version={v}
-                      isCurrent={v.id === session.currentVersionId}
+                      version={row.version}
+                      isCurrent={row.version.id === session.currentVersionId}
                       projectName={session.name}
-                      branchLabel={group.branchId === 'main' ? undefined : group.label}
+                      branchLabel={
+                        row.isBranchRoot ? getBranchLabel(session, branchId) : undefined
+                      }
                       onSelect={close}
                     />
-                  ))}
+                  </div>
                 </div>
-              </section>
-            ))}
+              )
+            })}
           </div>
         </div>
       )}

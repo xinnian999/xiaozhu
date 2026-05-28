@@ -1,13 +1,14 @@
 import { create } from 'zustand'
-import { demoSession, createBlankProject, type Session, type Version } from '@/mock/demoProjects'
+import { demoSessions, demoSession, createBlankProject } from '@/mock/demoProjects'
+import type { Session, Version } from '@/types/project'
 import { useEditorStore } from '@/store/editor'
 
 // ============================================
-// Session store：本地项目 + 版本切换（当前 mock 仅一个项目）
+// Session store：本地项目 + 版本切换
 // ============================================
 
 type SessionState = {
-  /** 本机已打开的项目列表（单机可多个，demo 仅一项） */
+  /** 本机已打开的项目列表 */
   projects: Session[]
   session: Session
   setCurrentProject: (projectId: string) => void
@@ -24,7 +25,7 @@ function syncProjectInList(projects: Session[], session: Session): Session[] {
 }
 
 export const useSessionStore = create<SessionState>((set, get) => ({
-  projects: [demoSession],
+  projects: demoSessions,
   session: demoSession,
 
   setCurrentProject: (projectId) => {

@@ -81,34 +81,60 @@
       line-height: $lh-snug;
     }
 
-    .groups {
+    .tree {
       max-height: min(420px, 60vh);
       overflow-y: auto;
-      padding: 0 $space-1;
+      padding: $space-1 $space-1 $space-2;
       @include hide-scrollbar;
-    }
 
-    .group {
-      &:not(:last-child) {
-        margin-bottom: $space-2;
-        padding-bottom: $space-2;
-        border-bottom: 1px solid var(--color-border-soft);
-      }
-
-      .groupTitle {
-        margin: 0;
-        padding: $space-1 $space-2 $space-2;
-        font-size: $fs-10;
-        font-weight: $fw-medium;
-        color: var(--color-text-mute);
-        font-family: var(--font-mono);
-        letter-spacing: 0.04em;
-      }
-
-      .list {
+      .row {
         display: flex;
-        flex-direction: column;
+        align-items: stretch;
         gap: 2px;
+      }
+
+      // 每一级缩进的 rail 容器
+      .indent {
+        flex-shrink: 0;
+        display: flex;
+        align-items: stretch;
+      }
+
+      // 单个缩进槽（一层 = 一个槽）
+      .indentSlot {
+        position: relative;
+        width: 18px;
+        flex-shrink: 0;
+        display: flex;
+        justify-content: center;
+        align-items: stretch;
+      }
+
+      // 贯穿型竖线（中间层 / 非分叉起点）
+      .vline {
+        width: 1px;
+        background: var(--color-border);
+      }
+
+      // 分叉拐角（└）
+      .elbow {
+        position: absolute;
+        top: 0;
+        left: 50%;
+        width: 12px;
+        height: 22px;
+        color: var(--color-text-faint);
+        font-family: var(--font-mono);
+        font-size: 14px;
+        line-height: 22px;
+        // 让"└"贴近卡片
+        transform: translate(-1px, 6px);
+        pointer-events: none;
+      }
+
+      .cardWrap {
+        flex: 1;
+        min-width: 0;
       }
     }
   }

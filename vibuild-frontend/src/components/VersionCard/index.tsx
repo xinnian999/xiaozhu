@@ -4,7 +4,7 @@ import { useEditorStore } from '@/store/editor'
 import { useUIStore } from '@/store/ui'
 import { downloadVersionAsZip } from '@/lib/download'
 import { shortHash, formatClock } from '@/lib/format'
-import type { Version } from '@/mock/demoProjects'
+import type { Version } from '@/types/project'
 import styles from './index.module.scss'
 
 // ============================================

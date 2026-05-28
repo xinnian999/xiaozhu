@@ -1,5 +1,5 @@
 import { WebContainer, type FileSystemTree } from '@webcontainer/api'
-import type { FileMap } from '@/mock/demoProjects'
+import type { FileMap } from '@/types/project'
 
 // ============================================
 // WebContainer 单例封装

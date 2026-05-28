@@ -1,6 +1,6 @@
 import { Sparkles } from 'lucide-react'
 import { formatClock } from '@/lib/format'
-import type { Message, Version } from '@/mock/demoProjects'
+import type { Message, Version } from '@/types/project'
 import styles from './index.module.scss'
 
 type Props = {

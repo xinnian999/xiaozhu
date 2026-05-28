@@ -1,6 +1,6 @@
 import JSZip from 'jszip'
 import { saveAs } from 'file-saver'
-import type { Version } from '@/mock/demoProjects'
+import type { Version } from '@/types/project'
 
 // ============================================
 // 下载工具：把某个版本的文件打包成 zip 触发下载

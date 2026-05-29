@@ -1,0 +1,16 @@
+{
+  "name": "vibuild",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": ["web"],
+  "scripts": {
+    "dev": "concurrently -n web,server -c cyan,magenta \"bun run dev:web\" \"bun run dev:server\"",
+    "dev:web": "bun run --cwd web dev",
+    "dev:server": "uv run --directory server fastapi dev app/main.py --port 8000",
+    "build": "bun run --cwd web build",
+    "lint": "bun run --cwd web lint"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

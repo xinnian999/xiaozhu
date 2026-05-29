@@ -1,5 +1,5 @@
-import type { FileMap, Session, Version } from '@/types/project'
-import { buildCommonBaseFiles, HOUR, MIN, NOW } from './_shared'
+import type { FileMap, Session, Version } from "@/types/project";
+import { buildCommonBaseFiles, HOUR, MIN, NOW } from "./_shared";
 
 // ============================================
 // 项目 A：个人主页
@@ -21,7 +21,7 @@ body {
   background: #0a0a0a;
   color: #f5f5f5;
 }
-`
+`;
 
 const APP_V1 = `export default function App() {
   return (
@@ -41,7 +41,7 @@ const APP_V1 = `export default function App() {
     </main>
   )
 }
-`
+`;
 
 const APP_V2 = `import Nav from './components/Nav'
 import Hero from './components/Hero'
@@ -54,7 +54,7 @@ export default function App() {
     </>
   )
 }
-`
+`;
 
 const NAV = `export default function Nav() {
   return (
@@ -72,7 +72,7 @@ const NAV = `export default function Nav() {
     </nav>
   )
 }
-`
+`;
 
 const HERO_V2 = `export default function Hero() {
   return (
@@ -104,7 +104,7 @@ const HERO_V2 = `export default function Hero() {
     </section>
   )
 }
-`
+`;
 
 const APP_V3 = `import Nav from './components/Nav'
 import Hero from './components/Hero'
@@ -119,7 +119,7 @@ export default function App() {
     </>
   )
 }
-`
+`;
 
 const HERO_V3 = `export default function Hero() {
   return (
@@ -154,7 +154,7 @@ const HERO_V3 = `export default function Hero() {
     </section>
   )
 }
-`
+`;
 
 const PROJECTS = `const list = [
   { title: 'Aurora UI', desc: '一套面向暗色界面的组件库', tag: 'TypeScript · React' },
@@ -185,7 +185,7 @@ export default function Projects() {
     </section>
   )
 }
-`
+`;
 
 const README = `# Cool Personal Blog
 
@@ -197,136 +197,153 @@ const README = `# Cool Personal Blog
 bun install
 bun dev
 \`\`\`
-`
+`;
 
 // ---------- 文件集合 ----------
 
 const BASE_FILES: FileMap = {
-  ...buildCommonBaseFiles({ pkgName: 'cool-personal-blog', htmlTitle: '你好，我是你的名字' }),
-  'README.md': README,
-  'src/index.css': INDEX_CSS,
-  'src/App.tsx': APP_V1,
-}
+  ...buildCommonBaseFiles({
+    pkgName: "cool-personal-blog",
+    htmlTitle: "你好，我是你的名字",
+  }),
+  "README.md": README,
+  "src/index.css": INDEX_CSS,
+  "src/App.tsx": APP_V1,
+};
 
 // ---------- 版本 ----------
 
 const v1: Version = {
-  id: 'v1',
-  label: '初始化项目',
-  summary: '初始化一个深色风格的个人主页',
-  branchId: 'main',
+  id: "v1",
+  label: "初始化项目",
+  branchId: "main",
   createdAt: NOW - 4 * HOUR,
   diff: { added: 680, removed: 0 },
-  authorRole: 'assistant',
   files: BASE_FILES,
-}
+};
 
 const v2: Version = {
-  id: 'v2',
-  label: '增加导航与 CTA',
-  summary: '增加顶部导航和 hero 区的 CTA 按钮',
-  branchId: 'main',
-  parentVersionId: 'v1',
+  id: "v2",
+  label: "增加导航与 CTA",
+  branchId: "main",
+  parentVersionId: "v1",
   createdAt: NOW - 2 * HOUR,
   diff: { added: 92, removed: 8 },
-  authorRole: 'assistant',
   files: {
     ...BASE_FILES,
-    'src/App.tsx': APP_V2,
-    'src/components/Nav.tsx': NAV,
-    'src/components/Hero.tsx': HERO_V2,
+    "src/App.tsx": APP_V2,
+    "src/components/Nav.tsx": NAV,
+    "src/components/Hero.tsx": HERO_V2,
   },
-}
+};
 
 const v3: Version = {
-  id: 'v3',
-  label: '增加项目展示',
-  summary: '加上"近期项目"列表区块',
-  branchId: 'main',
-  parentVersionId: 'v2',
+  id: "v3",
+  label: "增加项目展示",
+  branchId: "main",
+  parentVersionId: "v2",
   createdAt: NOW - 25 * MIN,
   diff: { added: 64, removed: 4 },
-  authorRole: 'assistant',
   files: {
     ...v2.files,
-    'src/App.tsx': APP_V3,
-    'src/components/Hero.tsx': HERO_V3,
-    'src/components/Projects.tsx': PROJECTS,
+    "src/App.tsx": APP_V3,
+    "src/components/Hero.tsx": HERO_V3,
+    "src/components/Projects.tsx": PROJECTS,
   },
-}
+};
 
 const v2Light: Version = {
-  id: 'v2-light',
-  label: '尝试浅色 Hero',
-  summary: '在 v2 基础上试验更亮的 hero 配色',
-  branchId: 'branch-light-hero',
-  parentVersionId: 'v2',
+  id: "v2-light",
+  label: "尝试浅色 Hero",
+  branchId: "branch-light-hero",
+  parentVersionId: "v2",
   createdAt: NOW - 40 * MIN,
   diff: { added: 18, removed: 6 },
-  authorRole: 'assistant',
   files: {
     ...v2.files,
-    'src/index.css': INDEX_CSS.replace('background: #0a0a0a', 'background: #f5f3ef')
-      .replace('color: #f5f5f5', 'color: #1a1a1a'),
+    "src/index.css": INDEX_CSS.replace(
+      "background: #0a0a0a",
+      "background: #f5f3ef",
+    ).replace("color: #f5f5f5", "color: #1a1a1a"),
   },
-}
+};
 
 // ---------- 导出 ----------
 
 export const personalBlog: Session = {
-  id: 'cool-personal-blog',
-  name: '个人主页',
-  description: '深色风格 · 单页 · 含 hero / nav / projects',
-  currentVersionId: 'v3',
+  id: "cool-personal-blog",
+  name: "个人主页",
+  description: "深色风格 · 单页 · 含 hero / nav / projects",
+  currentVersionId: "v3",
   createdAt: v1.createdAt,
   updatedAt: v3.createdAt,
   versions: [v1, v2, v3, v2Light],
   messages: [
     {
-      id: 'a-m1', role: 'user', branchId: 'main',
-      text: '帮我做一个深色风格的个人主页，要简洁高级一点',
-      ts: v1.createdAt - MIN,
+      id: "a-m1",
+      role: "user",
+      branchId: "main",
+      text: "帮我做一个深色风格的个人主页，要简洁高级一点",
+      createdAt: v1.createdAt - MIN,
     },
     {
-      id: 'a-m2', role: 'assistant', branchId: 'main',
-      text: '好的，我先初始化一个 React + Vite 项目，做一个全屏的 hero 区域，深色基调配少量洋红强调色。',
-      producedVersionId: 'v1', ts: v1.createdAt,
+      id: "a-m2",
+      role: "assistant",
+      branchId: "main",
+      text: "好的，我先初始化一个 React + Vite 项目，做一个全屏的 hero 区域，深色基调配少量洋红强调色。",
+      producedVersionId: "v1",
+      createdAt: v1.createdAt,
     },
     {
-      id: 'a-m3', role: 'user', branchId: 'main',
-      text: '在顶部加个导航，hero 区下面加两个按钮',
-      ts: v2.createdAt - MIN,
+      id: "a-m3",
+      role: "user",
+      branchId: "main",
+      text: "在顶部加个导航，hero 区下面加两个按钮",
+      createdAt: v2.createdAt - MIN,
     },
     {
-      id: 'a-m4', role: 'assistant', branchId: 'main',
+      id: "a-m4",
+      role: "assistant",
+      branchId: "main",
       text: '已加上一个毛玻璃质感的固定导航条，以及"联系我 / 查看作品"两个按钮，主按钮用洋红色突出。',
-      producedVersionId: 'v2', ts: v2.createdAt,
+      producedVersionId: "v2",
+      createdAt: v2.createdAt,
     },
     {
-      id: 'a-m5', role: 'user', branchId: 'main',
-      text: '再加一个项目展示区块，用卡片排版',
-      ts: v3.createdAt - MIN,
+      id: "a-m5",
+      role: "user",
+      branchId: "main",
+      text: "再加一个项目展示区块，用卡片排版",
+      createdAt: v3.createdAt - MIN,
     },
     {
-      id: 'a-m6', role: 'assistant', branchId: 'main',
+      id: "a-m6",
+      role: "assistant",
+      branchId: "main",
       text: '在 hero 下方新增"近期项目"区块，使用响应式网格布局展示三个示例项目卡片。',
-      producedVersionId: 'v3', ts: v3.createdAt,
+      producedVersionId: "v3",
+      createdAt: v3.createdAt,
     },
     {
-      id: 'a-m5b', role: 'user', branchId: 'branch-light-hero',
-      text: '试一下把 hero 背景改成浅色会不会更干净',
-      ts: v2Light.createdAt - MIN,
+      id: "a-m5b",
+      role: "user",
+      branchId: "branch-light-hero",
+      text: "试一下把 hero 背景改成浅色会不会更干净",
+      createdAt: v2Light.createdAt - MIN,
     },
     {
-      id: 'a-m6b', role: 'assistant', branchId: 'branch-light-hero',
-      text: '已在实验分支调整全局背景为浅暖色，hero 对比度保持不变，方便与主线对比。',
-      producedVersionId: 'v2-light', ts: v2Light.createdAt,
+      id: "a-m6b",
+      role: "assistant",
+      branchId: "branch-light-hero",
+      text: "已在实验分支调整全局背景为浅暖色，hero 对比度保持不变，方便与主线对比。",
+      producedVersionId: "v2-light",
+      createdAt: v2Light.createdAt,
     },
   ],
-}
+};
 
 /** 给"新建空白项目"模板复用的最小文件集合 */
 export const personalBlogBlankFiles: FileMap = {
   ...BASE_FILES,
-  'README.md': README,
-}
+  "README.md": README,
+};

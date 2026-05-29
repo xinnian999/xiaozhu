@@ -3,10 +3,6 @@ import type { Message, Session, Version } from '@/types/project'
 /** 默认主线分支 id */
 export const MAIN_BRANCH = 'main'
 
-export function getBranchId(entity: { branchId?: string }): string {
-  return entity.branchId ?? MAIN_BRANCH
-}
-
 /** 从根到目标版本的祖先链（含自身） */
 export function getVersionAncestry(versions: Version[], versionId: string): string[] {
   const byId = new Map(versions.map((v) => [v.id, v]))
@@ -32,11 +28,11 @@ export function isDescendantOf(
 export function getLaterVersionsOnBranch(session: Session, versionId: string): Version[] {
   const current = session.versions.find((v) => v.id === versionId)
   if (!current) return []
-  const branch = getBranchId(current)
+  const branch = current.branchId
   return session.versions
     .filter(
       (v) =>
-        getBranchId(v) === branch &&
+        v.branchId === branch &&
         isDescendantOf(session.versions, versionId, v.id),
     )
     .sort((a, b) => a.createdAt - b.createdAt)
@@ -59,14 +55,14 @@ export function getAlternateBranches(
   const current = session.versions.find((v) => v.id === versionId)
   if (!current) return []
 
-  const currentBranch = getBranchId(current)
+  const currentBranch = current.branchId
   const byBranch = new Map<string, { forkFrom: string; versions: Version[] }>()
 
   for (const v of session.versions) {
-    if (getBranchId(v) === currentBranch) continue
+    if (v.branchId === currentBranch) continue
     if (!v.parentVersionId || !ancestry.has(v.parentVersionId)) continue
 
-    const bid = getBranchId(v)
+    const bid = v.branchId
     const entry = byBranch.get(bid) ?? { forkFrom: v.parentVersionId, versions: [] }
     entry.versions.push(v)
     byBranch.set(bid, entry)
@@ -95,10 +91,10 @@ export function getMessagesForVersion(session: Session, versionId: string): Mess
   const version = session.versions.find((v) => v.id === versionId)
   if (!version) return []
 
-  const branch = getBranchId(version)
+  const branch = version.branchId
   const branchMessages = session.messages
-    .filter((m) => getBranchId(m) === branch)
-    .sort((a, b) => a.ts - b.ts)
+    .filter((m) => m.branchId === branch)
+    .sort((a, b) => a.createdAt - b.createdAt)
 
   const ancestrySet = new Set(getVersionAncestry(session.versions, versionId))
   const result: Message[] = []
@@ -120,7 +116,7 @@ export function getBranchLabel(session: Session, branchId: string): string {
   if (branchId === MAIN_BRANCH) return '主线'
   // 找该分支上最早一个版本的 parent，作为分叉点
   const branchVersions = session.versions
-    .filter((v) => getBranchId(v) === branchId)
+    .filter((v) => v.branchId === branchId)
     .sort((a, b) => a.createdAt - b.createdAt)
   const forkFromId = branchVersions[0]?.parentVersionId
   return forkFromId ? `分支 · 自 ${forkFromId} 分出` : '分支'
@@ -167,13 +163,13 @@ export function buildVersionTree(session: Session): VersionTreeNode[] {
   // 否则深度优先会把主线走完才回头处理分叉，分支节点会被推到主线末尾，
   // 视觉上看起来像是从错误的版本分出去的。
   const buildNode = (version: Version, depth: number, parent?: Version): VersionTreeNode => {
-    const isBranchRoot = !!parent && getBranchId(parent) !== getBranchId(version)
+    const isBranchRoot = !!parent && parent.branchId !== version.branchId
     const rawChildren = childrenOf.get(version.id) ?? []
     const sameBranch = rawChildren
-      .filter((c) => getBranchId(c) === getBranchId(version))
+      .filter((c) => c.branchId === version.branchId)
       .sort((a, b) => a.createdAt - b.createdAt)
     const forks = rawChildren
-      .filter((c) => getBranchId(c) !== getBranchId(version))
+      .filter((c) => c.branchId !== version.branchId)
       .sort((a, b) => a.createdAt - b.createdAt)
 
     // 同分支后代不增加深度；分叉子树 depth+1

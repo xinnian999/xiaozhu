@@ -45,7 +45,7 @@ export default function VersionMenu() {
           <p className={styles.panelDesc}>所有分支均保留，可随时切回</p>
           <div className={styles.tree}>
             {rows.map((row) => {
-              const branchId = row.version.branchId ?? 'main'
+              const branchId = row.version.branchId
               return (
                 <div
                   key={row.version.id}

@@ -47,8 +47,8 @@ export default function MessageBubble({
           </button>
         )}
 
-        <time className={styles.time} dateTime={new Date(message.ts).toISOString()}>
-          {formatClock(message.ts)}
+        <time className={styles.time} dateTime={new Date(message.createdAt).toISOString()}>
+          {formatClock(message.createdAt)}
         </time>
       </div>
     </article>

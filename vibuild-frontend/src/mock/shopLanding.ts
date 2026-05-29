@@ -1,5 +1,5 @@
-import type { FileMap, Session, Version } from '@/types/project'
-import { buildCommonBaseFiles, DAY, HOUR, MIN, NOW } from './_shared'
+import type { FileMap, Session, Version } from "@/types/project";
+import { buildCommonBaseFiles, DAY, HOUR, MIN, NOW } from "./_shared";
 
 // ============================================
 // 项目 B：电商落地页（纯主线，无分支）
@@ -14,7 +14,7 @@ body {
   background: #fafafa;
   color: #111;
 }
-`
+`;
 
 const APP_V1 = `export default function App() {
   return (
@@ -24,7 +24,7 @@ const APP_V1 = `export default function App() {
     </main>
   )
 }
-`
+`;
 
 const APP_V2 = `import Banner from './components/Banner'
 
@@ -35,7 +35,7 @@ export default function App() {
     </main>
   )
 }
-`
+`;
 
 const BANNER = `export default function Banner() {
   return (
@@ -55,7 +55,7 @@ const BANNER = `export default function Banner() {
     </section>
   )
 }
-`
+`;
 
 const APP_V3 = `import Banner from './components/Banner'
 import ProductGrid from './components/ProductGrid'
@@ -68,7 +68,7 @@ export default function App() {
     </main>
   )
 }
-`
+`;
 
 const PRODUCT_GRID = `const products = [
   { name: '亚麻衬衫', price: 199, img: '🧺' },
@@ -99,114 +99,124 @@ export default function ProductGrid() {
     </section>
   )
 }
-`
+`;
 
 // ---------- 文件集合 ----------
 
 const BASE_FILES: FileMap = {
-  ...buildCommonBaseFiles({ pkgName: 'shop-landing', htmlTitle: 'Lumie Store' }),
-  'src/index.css': INDEX_CSS,
-  'src/App.tsx': APP_V1,
-}
+  ...buildCommonBaseFiles({
+    pkgName: "shop-landing",
+    htmlTitle: "Lumie Store",
+  }),
+  "src/index.css": INDEX_CSS,
+  "src/App.tsx": APP_V1,
+};
 
 // ---------- 版本 ----------
 
 const v1: Version = {
-  id: 'v1',
-  label: '项目骨架',
-  summary: '初始化电商落地页骨架',
-  branchId: 'main',
+  id: "v1",
+  label: "项目骨架",
+  branchId: "main",
   createdAt: NOW - 3 * DAY,
   diff: { added: 220, removed: 0 },
-  authorRole: 'assistant',
   files: BASE_FILES,
-}
+};
 
 const v2: Version = {
-  id: 'v2',
-  label: '加 Banner',
-  summary: '增加首屏夏日促销 Banner',
-  branchId: 'main',
-  parentVersionId: 'v1',
+  id: "v2",
+  label: "加 Banner",
+  branchId: "main",
+  parentVersionId: "v1",
   createdAt: NOW - 2 * DAY,
   diff: { added: 48, removed: 6 },
-  authorRole: 'assistant',
   files: {
     ...BASE_FILES,
-    'src/App.tsx': APP_V2,
-    'src/components/Banner.tsx': BANNER,
+    "src/App.tsx": APP_V2,
+    "src/components/Banner.tsx": BANNER,
   },
-}
+};
 
 const v3: Version = {
-  id: 'v3',
-  label: '加商品卡列表',
-  summary: '在 Banner 下方追加 4 个热卖商品卡片',
-  branchId: 'main',
-  parentVersionId: 'v2',
+  id: "v3",
+  label: "加商品卡列表",
+  branchId: "main",
+  parentVersionId: "v2",
   createdAt: NOW - 1 * DAY,
   diff: { added: 76, removed: 4 },
-  authorRole: 'assistant',
   files: {
     ...v2.files,
-    'src/App.tsx': APP_V3,
-    'src/components/ProductGrid.tsx': PRODUCT_GRID,
+    "src/App.tsx": APP_V3,
+    "src/components/ProductGrid.tsx": PRODUCT_GRID,
   },
-}
+};
 
-// 用户手动 checkpoint（演示 authorRole='user'）
+// 手动保存的稳定快照（与父版本文件相同，diff 为 0）
 const v3Checkpoint: Version = {
-  id: 'v3-checkpoint',
-  label: '满意版本快照',
-  summary: '用户手动保存的稳定快照，准备下载使用',
-  branchId: 'main',
-  parentVersionId: 'v3',
+  id: "v3-checkpoint",
+  label: "满意版本快照",
+  branchId: "main",
+  parentVersionId: "v3",
   createdAt: NOW - 20 * HOUR,
   diff: { added: 0, removed: 0 },
-  authorRole: 'user',
   files: v3.files,
-}
+};
 
 // ---------- 导出 ----------
 
 export const shopLanding: Session = {
-  id: 'shop-landing',
-  name: '电商落地页',
-  description: '夏日大促 · 单页 · banner + 商品卡',
-  currentVersionId: 'v3-checkpoint',
+  id: "shop-landing",
+  name: "电商落地页",
+  description: "夏日大促 · 单页 · banner + 商品卡",
+  currentVersionId: "v3-checkpoint",
   createdAt: v1.createdAt,
   updatedAt: v3Checkpoint.createdAt,
   versions: [v1, v2, v3, v3Checkpoint],
   messages: [
     {
-      id: 'b-m1', role: 'user', branchId: 'main',
-      text: '我要做一个夏季新品的电商落地页，简洁明亮一些',
-      ts: v1.createdAt - MIN,
+      id: "b-m1",
+      role: "user",
+      branchId: "main",
+      text: "我要做一个夏季新品的电商落地页，简洁明亮一些",
+      createdAt: v1.createdAt - MIN,
     },
     {
-      id: 'b-m2', role: 'assistant', branchId: 'main',
-      text: '先搭一个最小骨架，浅色背景，主标题先占位，方便我们逐步丰富。',
-      producedVersionId: 'v1', ts: v1.createdAt,
+      id: "b-m2",
+      role: "assistant",
+      branchId: "main",
+      text: "先搭一个最小骨架，浅色背景，主标题先占位，方便我们逐步丰富。",
+      producedVersionId: "v1",
+      createdAt: v1.createdAt,
     },
     {
-      id: 'b-m3', role: 'user', branchId: 'main',
-      text: '加一个首屏大 banner，主色调用暖黄',
-      ts: v2.createdAt - MIN,
+      id: "b-m3",
+      role: "user",
+      branchId: "main",
+      text: "加一个首屏大 banner，主色调用暖黄",
+      createdAt: v2.createdAt - MIN,
     },
     {
-      id: 'b-m4', role: 'assistant', branchId: 'main',
-      text: '已加上一个 70vh 的暖黄渐变 Banner，含主标题、副标题和圆角 CTA 按钮。',
-      producedVersionId: 'v2', ts: v2.createdAt,
+      id: "b-m4",
+      role: "assistant",
+      branchId: "main",
+      text: "已加上一个 70vh 的暖黄渐变 Banner，含主标题、副标题和圆角 CTA 按钮。",
+      producedVersionId: "v2",
+      createdAt: v2.createdAt,
     },
     {
-      id: 'b-m5', role: 'user', branchId: 'main',
-      text: '下面再加 4 个热卖商品的卡片',
-      ts: v3.createdAt - MIN,
+      id: "b-m5",
+      role: "user",
+      branchId: "main",
+      text: "下面再加 4 个热卖商品的卡片",
+      createdAt: v3.createdAt - MIN,
     },
     {
-      id: 'b-m6', role: 'assistant', branchId: 'main',
+      id: "b-m6",
+      role: "assistant",
+      branchId: "main",
       text: '在 Banner 下方新增"热卖商品"网格区域，4 个商品卡片自适应排列。',
-      producedVersionId: 'v3', ts: v3.createdAt,
+      producedVersionId: "v3",
+      createdAt: v3.createdAt,
     },
   ],
-}
+};

@@ -1,5 +1,5 @@
-import type { FileMap, Session, Version } from '@/types/project'
-import { buildCommonBaseFiles, DAY, MIN, NOW } from './_shared'
+import type { FileMap, Session, Version } from "@/types/project";
+import { buildCommonBaseFiles, DAY, MIN, NOW } from "./_shared";
 
 // ============================================
 // 项目 C：运营看板（多分支版本树）
@@ -17,7 +17,7 @@ body {
   background: #f8fafc;
   color: #0f172a;
 }
-`
+`;
 
 const INDEX_CSS_DARK = `* { box-sizing: border-box; margin: 0; padding: 0; }
 body {
@@ -25,7 +25,7 @@ body {
   background: #0f172a;
   color: #e2e8f0;
 }
-`
+`;
 
 const APP_V1 = `export default function App() {
   return (
@@ -35,7 +35,7 @@ const APP_V1 = `export default function App() {
     </main>
   )
 }
-`
+`;
 
 const APP_V2 = `import StatCards from './components/StatCards'
 
@@ -47,7 +47,7 @@ export default function App() {
     </main>
   )
 }
-`
+`;
 
 const STAT_CARDS = `const stats = [
   { label: 'DAU', value: '12,408', trend: '+8.2%' },
@@ -75,7 +75,7 @@ export default function StatCards() {
     </div>
   )
 }
-`
+`;
 
 const APP_V3 = `import StatCards from './components/StatCards'
 import OrderTable from './components/OrderTable'
@@ -91,7 +91,7 @@ export default function App() {
     </main>
   )
 }
-`
+`;
 
 const ORDER_TABLE = `const orders = [
   { id: 'O-2031', customer: '张明', amount: 268, status: '已发货' },
@@ -127,7 +127,7 @@ export default function OrderTable() {
     </section>
   )
 }
-`
+`;
 
 const APP_V4 = `import StatCards from './components/StatCards'
 import OrderTable from './components/OrderTable'
@@ -147,7 +147,7 @@ export default function App() {
     </main>
   )
 }
-`
+`;
 
 const FILTERS = `export default function Filters() {
   return (
@@ -163,7 +163,7 @@ const FILTERS = `export default function Filters() {
     </div>
   )
 }
-`
+`;
 
 // —— 分支 1：从 v2 分出，把指标卡换成图表
 const APP_V2_CHARTS = `import ChartGrid from './components/ChartGrid'
@@ -176,7 +176,7 @@ export default function App() {
     </main>
   )
 }
-`
+`;
 
 const CHART_GRID = `// 简单的 SVG 折线图占位
 const series = [12, 18, 15, 22, 30, 27, 35]
@@ -195,7 +195,7 @@ export default function ChartGrid() {
     </section>
   )
 }
-`
+`;
 
 const APP_V3_CHARTS = `import ChartGrid from './components/ChartGrid'
 import StatCards from './components/StatCards'
@@ -209,209 +209,233 @@ export default function App() {
     </main>
   )
 }
-`
+`;
 
 // ---------- 文件集合 ----------
 
 const BASE_FILES: FileMap = {
-  ...buildCommonBaseFiles({ pkgName: 'ops-dashboard', htmlTitle: 'Ops Dashboard' }),
-  'src/index.css': INDEX_CSS_LIGHT,
-  'src/App.tsx': APP_V1,
-}
+  ...buildCommonBaseFiles({
+    pkgName: "ops-dashboard",
+    htmlTitle: "Ops Dashboard",
+  }),
+  "src/index.css": INDEX_CSS_LIGHT,
+  "src/App.tsx": APP_V1,
+};
 
 // ---------- 版本（主线） ----------
 
 const v1: Version = {
-  id: 'v1',
-  label: '初始化看板',
-  summary: '空白看板骨架',
-  branchId: 'main',
+  id: "v1",
+  label: "初始化看板",
+  branchId: "main",
   createdAt: NOW - 7 * DAY,
   diff: { added: 180, removed: 0 },
-  authorRole: 'assistant',
   files: BASE_FILES,
-}
+};
 
 const v2: Version = {
-  id: 'v2',
-  label: '加 4 个指标卡',
-  summary: '增加 DAU / 订单量 / 客单价 / 退款率四张卡片',
-  branchId: 'main',
-  parentVersionId: 'v1',
+  id: "v2",
+  label: "加 4 个指标卡",
+  branchId: "main",
+  parentVersionId: "v1",
   createdAt: NOW - 6 * DAY,
   diff: { added: 64, removed: 6 },
-  authorRole: 'assistant',
   files: {
     ...BASE_FILES,
-    'src/App.tsx': APP_V2,
-    'src/components/StatCards.tsx': STAT_CARDS,
+    "src/App.tsx": APP_V2,
+    "src/components/StatCards.tsx": STAT_CARDS,
   },
-}
+};
 
 const v3: Version = {
-  id: 'v3',
-  label: '加订单列表',
-  summary: '在指标卡下方追加最近订单表格',
-  branchId: 'main',
-  parentVersionId: 'v2',
+  id: "v3",
+  label: "加订单列表",
+  branchId: "main",
+  parentVersionId: "v2",
   createdAt: NOW - 5 * DAY,
   diff: { added: 78, removed: 4 },
-  authorRole: 'assistant',
   files: {
     ...v2.files,
-    'src/App.tsx': APP_V3,
-    'src/components/OrderTable.tsx': ORDER_TABLE,
+    "src/App.tsx": APP_V3,
+    "src/components/OrderTable.tsx": ORDER_TABLE,
   },
-}
+};
 
 const v4: Version = {
-  id: 'v4',
-  label: '加时间筛选',
-  summary: '在标题右侧加上时间段切换按钮',
-  branchId: 'main',
-  parentVersionId: 'v3',
+  id: "v4",
+  label: "加时间筛选",
+  branchId: "main",
+  parentVersionId: "v3",
   createdAt: NOW - 4 * DAY,
   diff: { added: 42, removed: 4 },
-  authorRole: 'assistant',
   files: {
     ...v3.files,
-    'src/App.tsx': APP_V4,
-    'src/components/Filters.tsx': FILTERS,
+    "src/App.tsx": APP_V4,
+    "src/components/Filters.tsx": FILTERS,
   },
-}
+};
 
 // ---------- 版本（分支 1：branch-charts） ----------
 
 const v2Charts: Version = {
-  id: 'v2-charts',
-  label: '改为图表展示',
-  summary: '把指标卡替换为折线图',
-  branchId: 'branch-charts',
-  parentVersionId: 'v2',
+  id: "v2-charts",
+  label: "改为图表展示",
+  branchId: "branch-charts",
+  parentVersionId: "v2",
   createdAt: NOW - 5.5 * DAY,
   diff: { added: 52, removed: 22 },
-  authorRole: 'assistant',
   files: {
     ...v2.files,
-    'src/App.tsx': APP_V2_CHARTS,
-    'src/components/ChartGrid.tsx': CHART_GRID,
+    "src/App.tsx": APP_V2_CHARTS,
+    "src/components/ChartGrid.tsx": CHART_GRID,
   },
-}
+};
 
 const v3Charts: Version = {
-  id: 'v3-charts',
-  label: '图表 + 指标卡',
-  summary: '保留图表的同时把指标卡也加回来',
-  branchId: 'branch-charts',
-  parentVersionId: 'v2-charts',
+  id: "v3-charts",
+  label: "图表 + 指标卡",
+  branchId: "branch-charts",
+  parentVersionId: "v2-charts",
   createdAt: NOW - 5 * DAY,
   diff: { added: 28, removed: 6 },
-  authorRole: 'assistant',
   files: {
     ...v2Charts.files,
-    'src/App.tsx': APP_V3_CHARTS,
+    "src/App.tsx": APP_V3_CHARTS,
   },
-}
+};
 
 // ---------- 版本（分支 2：branch-dark-theme） ----------
 
 const v3Dark: Version = {
-  id: 'v3-dark',
-  label: '暗色主题尝试',
-  summary: '把整个看板切换到暗色主题',
-  branchId: 'branch-dark-theme',
-  parentVersionId: 'v3',
+  id: "v3-dark",
+  label: "暗色主题尝试",
+  branchId: "branch-dark-theme",
+  parentVersionId: "v3",
   createdAt: NOW - 4.5 * DAY,
   diff: { added: 14, removed: 14 },
-  authorRole: 'assistant',
   files: {
     ...v3.files,
-    'src/index.css': INDEX_CSS_DARK,
+    "src/index.css": INDEX_CSS_DARK,
   },
-}
+};
 
 // ---------- 导出 ----------
 
 export const opsDashboard: Session = {
-  id: 'ops-dashboard',
-  name: '运营看板',
-  description: '多分支版本树 · 指标卡 / 表格 / 筛选 / 图表',
-  currentVersionId: 'v4',
+  id: "ops-dashboard",
+  name: "运营看板",
+  description: "多分支版本树 · 指标卡 / 表格 / 筛选 / 图表",
+  currentVersionId: "v4",
   createdAt: v1.createdAt,
   updatedAt: v4.createdAt,
   versions: [v1, v2, v3, v4, v2Charts, v3Charts, v3Dark],
   messages: [
     {
-      id: 'c-m1', role: 'user', branchId: 'main',
-      text: '帮我搭一个运营数据看板，浅色主题，先有骨架就行',
-      ts: v1.createdAt - MIN,
+      id: "c-m1",
+      role: "user",
+      branchId: "main",
+      text: "帮我搭一个运营数据看板，浅色主题，先有骨架就行",
+      createdAt: v1.createdAt - MIN,
     },
     {
-      id: 'c-m2', role: 'assistant', branchId: 'main',
-      text: '已初始化空白看板，浅色背景 + slate 配色，方便后续加内容。',
-      producedVersionId: 'v1', ts: v1.createdAt,
+      id: "c-m2",
+      role: "assistant",
+      branchId: "main",
+      text: "已初始化空白看板，浅色背景 + slate 配色，方便后续加内容。",
+      producedVersionId: "v1",
+      createdAt: v1.createdAt,
     },
     {
-      id: 'c-m3', role: 'user', branchId: 'main',
-      text: '加 4 个核心指标卡：DAU、订单量、客单价、退款率',
-      ts: v2.createdAt - MIN,
+      id: "c-m3",
+      role: "user",
+      branchId: "main",
+      text: "加 4 个核心指标卡：DAU、订单量、客单价、退款率",
+      createdAt: v2.createdAt - MIN,
     },
     {
-      id: 'c-m4', role: 'assistant', branchId: 'main',
-      text: '已加上 4 张响应式指标卡，含趋势涨跌色。',
-      producedVersionId: 'v2', ts: v2.createdAt,
+      id: "c-m4",
+      role: "assistant",
+      branchId: "main",
+      text: "已加上 4 张响应式指标卡，含趋势涨跌色。",
+      producedVersionId: "v2",
+      createdAt: v2.createdAt,
     },
     {
-      id: 'c-m5', role: 'user', branchId: 'main',
-      text: '下面追加一个最近订单的表格',
-      ts: v3.createdAt - MIN,
+      id: "c-m5",
+      role: "user",
+      branchId: "main",
+      text: "下面追加一个最近订单的表格",
+      createdAt: v3.createdAt - MIN,
     },
     {
-      id: 'c-m6', role: 'assistant', branchId: 'main',
-      text: '已新增订单列表，含订单号 / 客户 / 金额 / 状态四列。',
-      producedVersionId: 'v3', ts: v3.createdAt,
+      id: "c-m6",
+      role: "assistant",
+      branchId: "main",
+      text: "已新增订单列表，含订单号 / 客户 / 金额 / 状态四列。",
+      producedVersionId: "v3",
+      createdAt: v3.createdAt,
     },
     {
-      id: 'c-m7', role: 'user', branchId: 'main',
-      text: '标题右边加一个时间段筛选',
-      ts: v4.createdAt - MIN,
+      id: "c-m7",
+      role: "user",
+      branchId: "main",
+      text: "标题右边加一个时间段筛选",
+      createdAt: v4.createdAt - MIN,
     },
     {
-      id: 'c-m8', role: 'assistant', branchId: 'main',
+      id: "c-m8",
+      role: "assistant",
+      branchId: "main",
       text: '已加上"今日 / 近 7 天 / 近 30 天"三段筛选按钮。',
-      producedVersionId: 'v4', ts: v4.createdAt,
+      producedVersionId: "v4",
+      createdAt: v4.createdAt,
     },
     // 分支 1：图表实验
     {
-      id: 'c-m3b', role: 'user', branchId: 'branch-charts',
-      text: '回到指标卡这一版试试——把卡片换成趋势折线图会不会更直观？',
-      ts: v2Charts.createdAt - MIN,
+      id: "c-m3b",
+      role: "user",
+      branchId: "branch-charts",
+      text: "回到指标卡这一版试试——把卡片换成趋势折线图会不会更直观？",
+      createdAt: v2Charts.createdAt - MIN,
     },
     {
-      id: 'c-m4b', role: 'assistant', branchId: 'branch-charts',
-      text: '已在新分支替换为 SVG 折线图组件，先看效果。',
-      producedVersionId: 'v2-charts', ts: v2Charts.createdAt,
+      id: "c-m4b",
+      role: "assistant",
+      branchId: "branch-charts",
+      text: "已在新分支替换为 SVG 折线图组件，先看效果。",
+      producedVersionId: "v2-charts",
+      createdAt: v2Charts.createdAt,
     },
     {
-      id: 'c-m5b', role: 'user', branchId: 'branch-charts',
-      text: '把指标卡也加回来，图表 + 卡片一起呈现',
-      ts: v3Charts.createdAt - MIN,
+      id: "c-m5b",
+      role: "user",
+      branchId: "branch-charts",
+      text: "把指标卡也加回来，图表 + 卡片一起呈现",
+      createdAt: v3Charts.createdAt - MIN,
     },
     {
-      id: 'c-m6b', role: 'assistant', branchId: 'branch-charts',
-      text: '已恢复指标卡，置于图表上方。',
-      producedVersionId: 'v3-charts', ts: v3Charts.createdAt,
+      id: "c-m6b",
+      role: "assistant",
+      branchId: "branch-charts",
+      text: "已恢复指标卡，置于图表上方。",
+      producedVersionId: "v3-charts",
+      createdAt: v3Charts.createdAt,
     },
     // 分支 2：暗色实验（从主线 v3 分出）
     {
-      id: 'c-m7c', role: 'user', branchId: 'branch-dark-theme',
-      text: '试试把整个看板改成暗色主题，看 OPS 同学晚上值班是不是更舒服',
-      ts: v3Dark.createdAt - MIN,
+      id: "c-m7c",
+      role: "user",
+      branchId: "branch-dark-theme",
+      text: "试试把整个看板改成暗色主题，看 OPS 同学晚上值班是不是更舒服",
+      createdAt: v3Dark.createdAt - MIN,
     },
     {
-      id: 'c-m8c', role: 'assistant', branchId: 'branch-dark-theme',
-      text: '已切换到 slate-900 暗色背景，文字配亮 slate 色。',
-      producedVersionId: 'v3-dark', ts: v3Dark.createdAt,
+      id: "c-m8c",
+      role: "assistant",
+      branchId: "branch-dark-theme",
+      text: "已切换到 slate-900 暗色背景，文字配亮 slate 色。",
+      producedVersionId: "v3-dark",
+      createdAt: v3Dark.createdAt,
     },
   ],
-}
+};

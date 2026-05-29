@@ -6,8 +6,9 @@ import { opsDashboard } from './opsDashboard'
 // ============================================
 // demo 项目聚合导出
 // ============================================
-// 类型定义已迁至 @/types/project，本文件只负责把三个 demo session 聚合起来。
-// 单一项目的内容请改对应子文件：personalBlog.ts / shopLanding.ts / opsDashboard.ts
+// 本文件只负责把三个 demo session 聚合起来，并提供空白项目模板。
+// 类型定义统一在 @/types/project；单个项目内容请改对应子文件：
+// personalBlog.ts / shopLanding.ts / opsDashboard.ts
 
 /** 所有 demo 项目（按 updatedAt 倒序，最新的在前） */
 export const demoSessions: Session[] = [personalBlog, shopLanding, opsDashboard].sort(
@@ -32,26 +33,12 @@ export function createBlankProject(name = '未命名项目'): Session {
       {
         id: 'v1',
         label: '初始版本',
-        summary: '新建项目',
         branchId: 'main',
         createdAt: now,
         diff: { added: 0, removed: 0 },
-        authorRole: 'user',
         files,
       },
     ],
     messages: [],
   }
 }
-
-/** @deprecated 使用 demoSession；保留别名便于迁移 */
-export const demoProject = demoSession
-
-// —— 类型 re-export（兼容旧 import 路径，建议新代码从 @/types/project 直接导入） ——
-export type {
-  FileMap,
-  AuthorRole,
-  Version,
-  Message,
-  Session,
-} from '@/types/project'

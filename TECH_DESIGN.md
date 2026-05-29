@@ -1,26 +1,23 @@
 # Vibuild — 技术方案 v0.1
 
 > 类 V0 的 AI 代码生成平台。练手项目，目标是学习 Python + LangChain / LangGraph / DeepAgents。
-> 本文档是「跑偏检测器」，每写一段功能前回来对一下范围。
 
 ---
 
 ## 1. 项目目标与边界
 
-### 一定要做（MVP）
+### MVP目标
 - 对话式输入需求 → AI 生成一个可运行的前端项目（React/Vite 类）
 - 前端用 **WebContainer** 在浏览器里跑起来，实时预览
 - 生成过程**流式**反馈：todo 规划、文件写入、消息增量
 - 会话可持久化，能继续在已有项目上迭代
 
-### 一定不做（MVP）
+### 二期
 - ❌ 用户系统 / 登录 / 多租户
 - ❌ 后端代码执行沙箱（WebContainer 本身就是沙箱）
 - ❌ 生成非 Node 项目（Python/Go 等，WebContainer 跑不了）
 - ❌ 部署 / 域名分发 / 协作编辑
 - ❌ 任何 "为以后扩展" 的抽象层
-
-> **跑偏自检**：如果开始写鉴权、写多用户、写部署，立刻停。
 
 ---
 
@@ -155,21 +152,8 @@ type Event =
 
 ---
 
-## 8. 里程碑
 
-| 阶段 | 目标 | 学到 |
-|---|---|---|
-| **M1** | FastAPI + 单个固定文件 SSE 给前端 | FastAPI、SSE、async |
-| **M2** | 接 Claude，prompt → 多文件 React 项目（一次生成） | LangChain 调用、流式 token |
-| **M3** | 前端集成 WebContainer，落地即预览 | WebContainer API、COOP/COEP |
-| **M4** | 会话持久化 + checkpoint，可继续修改已有项目 | LangGraph state/checkpoint、SQLAlchemy |
-| **M5** | 引入 planner + coder subagent | DeepAgents 子 agent、todo 规划 |
-
-> 完成 Mn 前不要碰 Mn+1 的事。每个 M 结束写一段「学到了什么」追加到本文档底部。
-
----
-
-## 9. 已知风险（先记下，不预先解决）
+## 10. 已知风险（先记下，不预先解决）
 
 - **WebContainer 跨域**：前端服务需返回
   `Cross-Origin-Opener-Policy: same-origin` 与 `Cross-Origin-Embedder-Policy: require-corp`，
@@ -178,19 +162,6 @@ type Event =
 - **Token 成本**：完整生成一个项目 5w–10w token 起步。dev 期用 `max_tokens` 限制 + 缓存历史。
 - **DeepAgents 子 agent 状态隔离**：子 agent 的 state/context 如何共享，M5 之前先读源码再设计，避免推倒重来。
 - **WebContainer 商业用途**：免费授权对个人/学习项目 OK，未来要商用得查协议。
-
----
-
-## 10. 跑偏自检清单
-
-每写一段新代码前默念一遍：
-- [ ] 这事是当前 Milestone 范围内的吗？
-- [ ] 我是不是在为「以后可能要」写抽象？
-- [ ] 这个新文件 / 新模块 / 新依赖有必要吗？
-- [ ] 我是不是在重造 LangGraph / DeepAgents 已经提供的能力？
-- [ ] 前端逻辑跑去后端写了吗？反之？
-
-任何一条命中 → 停 → 回到本文档。
 
 ---
 
@@ -211,11 +182,3 @@ type Event =
 **何时复议**：如果 MVP 之后引入复杂 chat 历史管理、多模态消息、附件上传等 AI SDK 强项功能，可重新评估。
 
 ---
-
-## 12. 学习笔记（每完成一个 M 追加）
-
-### M1
-- _（待写）_
-
-### M2
-- _（待写）_

@@ -88,7 +88,7 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
-@app.post("/api/chat")
+@app.post("/chat")
 async def chat(req: ChatRequest) -> StreamingResponse:
     """SSE 流式对话端点（M1 返回写死的事件流）。
 

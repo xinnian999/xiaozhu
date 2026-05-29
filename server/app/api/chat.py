@@ -1,14 +1,7 @@
-"""Chat API —— 真实 Claude 接入的 SSE 流式端点。
+"""Chat API —— agentic loop 版本。
 
-核心知识点：
-  1. langchain_anthropic.ChatAnthropic —— LangChain 封装的 Claude 客户端
-  2. llm.astream(messages) —— async 流式迭代，每次 yield 一个文本 chunk
-  3. FastAPI StreamingResponse —— 把 async generator 的输出直接作为 HTTP 响应体推送
-  4. SSE 格式 —— 每帧是 `data: {...}\\n\\n`，前端用 EventSource 或 fetch+ReadableStream 读
-
-对话历史（M1.5 简化版）：
-  - 本阶段不存消息历史到数据库，每次请求都是全新对话。
-  - 下一阶段加 LangGraph checkpoint 后，对话历史会自动持久化。
+不做 token 流，先跑通「Claude → 工具调用 → 执行 → 回传结果 → Claude 继续」这个循环。
+流式体验后续再加，核心逻辑不变。
 """
 
 import json
@@ -17,72 +10,132 @@ from collections.abc import AsyncGenerator
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import tool
 from pydantic import BaseModel
 
 from app.config import settings
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
-# LangChain 的 ChatAnthropic 会自动读 ANTHROPIC_API_KEY 环境变量，
-# 但我们显式传 api_key 让意图更清晰，也方便以后多 key 轮转。
+
+# ── 工具定义 ────────────────────────────────────────────────────────────────────
+# @tool 装饰器自动把类型注解 + docstring 转成 Claude 能读的 JSON Schema。
+# 现在是 stub，后续接数据库时替换函数体即可，接口不变。
+
+@tool
+async def write_file(path: str, content: str) -> str:
+    """写入或覆盖一个文件。path 是相对路径（如 src/App.tsx），content 是完整文件内容。"""
+    # TODO: 接数据库 + 推 file_write SSE
+    print(f"[write_file] {path}")
+    return f"已写入 {path}"
+
+
+@tool
+async def read_file(path: str) -> str:
+    """读取文件内容。修改已有文件前必须先调此工具，否则会覆盖原有代码。"""
+    # TODO: 从数据库读
+    print(f"[read_file] {path}")
+    return f"// {path} 的内容（stub）"
+
+
+@tool
+async def list_files() -> str:
+    """列出当前项目下所有文件路径。开始生成前先调用，了解项目现有结构。"""
+    # TODO: 从数据库读
+    return json.dumps(["src/App.tsx", "src/main.tsx", "package.json"])
+
+
+# 工具名 → 工具对象的映射，执行时用来查找
+TOOLS = {t.name: t for t in [write_file, read_file, list_files]}
+
+# bind_tools 告诉 Claude 它有哪些工具可用
 llm = ChatAnthropic(
     model=settings.claude_model,
     api_key=settings.anthropic_api_key,
-    # 中转服务地址，None 时 langchain-anthropic 自动用官方地址
     base_url=settings.anthropic_base_url,
-    # max_tokens 限制单次生成长度，开发期控制成本。生产环境调大或去掉。
     max_tokens=4096,
-)
-
-# Vibuild 的系统 prompt —— 告诉 Claude 它的角色和输出格式
-SYSTEM_PROMPT = """你是 Vibuild，一个 AI 代码生成助手。
-用户会用自然语言描述他们想要的前端应用，你的任务是：
-1. 先用简短的语言（1-2句）确认你理解了需求。
-2. 说明你将要生成什么文件。
-
-现在先聚焦在对话上，代码生成能力会在后续版本中集成。"""
+).bind_tools(list(TOOLS.values()))
 
 
-# ── 请求体 ─────────────────────────────────────────────────────────────────────
+SYSTEM_PROMPT = """你是 Vibuild，一个 AI 前端代码生成助手。
+用户描述他们想要的应用，你负责生成完整可运行的 React + Vite 项目文件。
+
+工作流程：
+1. 调用 list_files 了解项目现有结构
+2. 按需调用 read_file 读取要修改的文件
+3. 调用 write_file 写入每个文件（package.json / vite.config / src/ 下的文件等）
+4. 所有文件写完后，用一句话告诉用户项目已生成完毕
+"""
+
+
+# ── 请求体 ──────────────────────────────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
     message: str
-    session_id: str | None = None  # 预留，M2 LangGraph 接入后会用到
+    session_id: str | None = None
 
 
 # ── SSE 工具函数 ────────────────────────────────────────────────────────────────
 
 def sse(event: dict) -> str:
-    """把事件字典编码成 SSE 文本帧。"""
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
-# ── 核心流式生成器 ──────────────────────────────────────────────────────────────
+# ── Agentic Loop ────────────────────────────────────────────────────────────────
 
-async def claude_stream(req: ChatRequest) -> AsyncGenerator[str, None]:
-    """调用 Claude 并把响应映射到 SSE 事件流。
-
-    llm.astream(messages) 返回一个异步迭代器，每次 yield 一个 AIMessageChunk。
-    chunk.content 是这一帧的文本片段，我们把它包装成 message_delta 事件推送出去。
-    """
+async def claude_agent(req: ChatRequest) -> AsyncGenerator[str, None]:
+    """工具调用循环：Claude 决策 → 执行工具 → 回传结果 → Claude 继续，直到没有工具调用。"""
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=req.message),
     ]
 
     try:
-        async for chunk in llm.astream(messages):
-            # AIMessageChunk.content 可能是 str 或 list（多模态时）
-            # 目前只处理 str 情况
-            if isinstance(chunk.content, str) and chunk.content:
-                yield sse({"type": "message_delta", "text": chunk.content})
+        while True:
+            # ainvoke：等待 Claude 完整回复（非流式）
+            response = await llm.ainvoke(messages)
+            messages.append(response)  # 把 Claude 的回复追加进历史
 
-        # Claude 回复完毕 → 发 done 事件，前端关闭 stream
+            if not response.tool_calls:
+                # 绑工具后 content 可能是 list[{"type": "text", "text": "..."}]
+                # 需要把所有 text block 拼起来
+                if isinstance(response.content, str):
+                    text = response.content
+                else:
+                    text = "".join(
+                        block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "")
+                        for block in response.content
+                    )
+                if text:
+                    yield sse({"type": "message_delta", "text": text})
+                break
+
+            # Claude 要调用一个或多个工具
+            for tool_call in response.tool_calls:
+                name = tool_call["name"]
+                args = tool_call["args"]
+
+                print(f"[tool_call] name={name} args={list(args.keys())}")
+
+                # 推进度提示
+                yield sse({"type": "tool_call", "name": name, "args": args})
+
+                if name not in TOOLS:
+                    # Claude 调了不存在的工具，告诉它并继续
+                    messages.append(
+                        ToolMessage(content=f"工具 {name} 不存在", tool_call_id=tool_call["id"])
+                    )
+                    continue
+
+                tool_result = await TOOLS[name].ainvoke(args)
+                messages.append(
+                    ToolMessage(content=str(tool_result), tool_call_id=tool_call["id"])
+                )
+
         yield sse({"type": "done"})
 
     except Exception as e:
-        # 任何错误都包成 error 事件推给前端，而不是让连接静默断开
         yield sse({"type": "error", "message": str(e)})
         yield sse({"type": "done"})
 
@@ -91,17 +144,8 @@ async def claude_stream(req: ChatRequest) -> AsyncGenerator[str, None]:
 
 @router.post("/chat")
 async def chat(req: ChatRequest) -> StreamingResponse:
-    """SSE 流式对话端点，接入真实 Claude。
-
-    StreamingResponse 接受一个 async generator，FastAPI 会逐帧推送给客户端，
-    不需要等全部生成完才返回（这就是流式的意义）。
-    """
     return StreamingResponse(
-        claude_stream(req),
+        claude_agent(req),
         media_type="text/event-stream",
-        # 这两个 header 告诉浏览器/代理不要缓存、不要缓冲，实时推送
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

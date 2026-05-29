@@ -17,16 +17,20 @@ class Settings(BaseSettings):
         extra="ignore",  # .env 里有多余字段时不报错，方便以后扩展
     )
 
-    # ── Claude API ────────────────────────────────────────────
+    # ── LLM API（走 OpenAI 兼容协议）────────────────────────────
+    # 改用 OpenAI 协议是为了兼容更多中转服务 —— Anthropic 原生协议的中转
+    # 经常会注入它自己的 system prompt / 工具集，污染我们 bind_tools 的结果。
+    # OpenAI 协议生态成熟，中转一般是纯透传，行为更可预测。
+    #
     # 声明了类型 str，没有默认值 → 启动时若环境变量缺失会直接报错，
-    # 而不是在调用 Claude 时才神秘失败。早报错 > 晚报错。
-    anthropic_api_key: str
+    # 而不是在调用 LLM 时才神秘失败。早报错 > 晚报错。
+    openai_api_key: str
 
-    # 用哪个 Claude 模型，有默认值 → 可以不在 .env 里显式写
-    claude_model: str = "claude-sonnet-4-6"
+    # 用哪个模型。默认仍是 Claude，但通过中转走 OpenAI 协议调
+    llm_model: str = "claude-sonnet-4-5"
 
-    # 中转服务地址，None 表示使用官方默认地址（api.anthropic.com）
-    anthropic_base_url: str | None = None
+    # OpenAI 兼容端点的 base url，None 表示用官方 api.openai.com
+    openai_base_url: str | None = None
 
     # ── 数据库 ────────────────────────────────────────────────
     # SQLite 文件路径。sqlite+aiosqlite 前缀是 SQLAlchemy 的方言写法，

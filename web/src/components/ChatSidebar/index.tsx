@@ -15,6 +15,8 @@ export default function ChatSidebar() {
   const appendMessage = useSessionStore((s) => s.appendMessage)
   const setStreamingText = useSessionStore((s) => s.setStreamingText)
   const commitStreaming = useSessionStore((s) => s.commitStreaming)
+  const applyFileWrite = useSessionStore((s) => s.applyFileWrite)
+  const applyFileDelete = useSessionStore((s) => s.applyFileDelete)
   const mobileChatOpen = useUIStore((s) => s.mobileChatOpen)
   const setMobileChatOpen = useUIStore((s) => s.setMobileChatOpen)
   const chatCollapsed = useUIStore((s) => s.chatCollapsed)
@@ -39,6 +41,11 @@ export default function ChatSidebar() {
         if (event.type === 'message_delta') {
           accumulated += event.text
           setStreamingText(accumulated)
+        } else if (event.type === 'file_write') {
+          // LLM 写文件 —— 更新本地 files 快照，PreviewPane 会自动 syncFiles
+          applyFileWrite(event.path, event.content)
+        } else if (event.type === 'file_delete') {
+          applyFileDelete(event.path)
         } else if (event.type === 'error') {
           toast(`AI 错误：${event.message}`)
           break

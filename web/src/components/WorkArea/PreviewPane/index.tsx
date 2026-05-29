@@ -27,9 +27,14 @@ export default function PreviewPane() {
   // 标记上次同步的版本号，避免同 version 反复 sync
   const syncedVersionRef = useRef<string | null>(null)
 
-  // —— 首次挂载：boot ——
+  // —— 首次启动：等 files 到位再 boot ——
+  // files 从后端拉取是异步的，组件挂载时 currentVersion.files 可能还是空对象，
+  // 此时 boot 会让 WebContainer 找不到 package.json 直接报 ENOENT。
+  // 改成监听 files 变化，第一次出现非空 files 时再 boot。
   useEffect(() => {
     if (isBooted()) return
+    if (Object.keys(currentVersion.files).length === 0) return  // 还没拉到文件，等
+
     setWCError(null)
     bootAndRun(currentVersion.files, {
       onStatus: setWCStatus,
@@ -40,7 +45,7 @@ export default function PreviewPane() {
       syncedVersionRef.current = currentVersion.id
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [currentVersion.files])
 
   // —— 切版本：增量同步 ——
   useEffect(() => {

@@ -1,16 +1,24 @@
 import { create } from 'zustand'
 import type { Message } from '@/types/project'
-import { createSession, listSessions, type ApiSession } from '@/lib/api'
+import {
+  createSession,
+  listSessions,
+  listSessionFiles,
+  listSessionMessages,
+  type ApiSession,
+  type ApiMessage,
+} from '@/lib/api'
 
 // ============================================
 // Session store：多会话管理（对接后端，messages 存内存）
 // ============================================
-// 这一阶段的 Session 概念比 types/project.ts 里的轻量得多：
-//   - sessions 来自后端 /api/sessions
-//   - messages 纯内存（刷新丢失），等 LangGraph 接入后再持久化
-//   - versions / files 暂时保留字段但不使用，等项目生成功能接入
+// files 这次接进来了 —— 从后端 GET /api/sessions/{id}/files 拉，
+// SSE 的 file_write 事件回来时增量更新。
+//
+// versionId 是一个内部的"文件快照版本号"：每次 files 内容变了就 +1，
+// PreviewPane 通过它判断要不要 syncFiles，避免无限重渲染。
 
-// 内存里维护的单条会话（不含后端的 Session 完整模型）
+// 内存里维护的单条会话
 export type ChatSession = {
   id: string
   title: string
@@ -18,43 +26,35 @@ export type ChatSession = {
   // 流式输出时，AI 正在打的那条消息（不在 messages 里，渲染时单独展示）
   streamingText: string
   isStreaming: boolean
+  // 当前 session 的文件快照：path -> content
+  files: Record<string, string>
+  // 文件快照版本号，每次 files 变更 +1
+  versionId: number
 }
 
 type SessionState = {
-  /** 所有会话（顶部菜单列表） */
   sessions: ChatSession[]
-  /** 当前激活的会话 id */
   activeId: string | null
-  /** 是否正在从后端加载会话列表 */
   loading: boolean
 
-  /** 初始化：从后端拉取会话列表，没有则创建默认会话 */
   init: () => Promise<void>
-
-  /** 新建会话（调后端创建，写入本地列表并切换过去） */
   createNew: (title?: string) => Promise<void>
-
-  /** 切换到某个会话 */
-  switchTo: (id: string) => void
-
-  /** 往当前会话追加一条消息 */
+  switchTo: (id: string) => Promise<void>
   appendMessage: (msg: Message) => void
-
-  /** 更新流式输出文本 */
   setStreamingText: (text: string) => void
-
-  /** 结束流式输出：把 streamingText 固化为一条 assistant 消息 */
   commitStreaming: () => void
 
-  /** 取当前激活会话 */
+  /** SSE 收到 file_write：增量写入当前会话的 files */
+  applyFileWrite: (path: string, content: string) => void
+  /** SSE 收到 file_delete：从当前会话的 files 移除 */
+  applyFileDelete: (path: string) => void
+
   activeSession: () => ChatSession | null
 
-  // ── 兼容旧版 WorkArea 组件，等项目生成功能接入后替换 ──────────
-  /** 旧 store 的 session 字段（空壳，供 WorkArea 不报错） */
+  // ── 兼容旧版 WorkArea 组件 ─────────────────────────────────────
   session: { id: string; name: string; currentVersionId: string; versions: []; messages: [] }
-  /** 旧 store 的 projects 字段 */
   projects: []
-  /** 旧 store 的 currentVersion 方法（返回空文件占位版本） */
+  /** 当前 "version"：把当前 session 的 files 包成 PreviewPane 期望的形状 */
   currentVersion: () => { id: string; label: string; files: Record<string, string>; branchId: string; createdAt: number; diff: { added: number; removed: number } }
   setCurrentProject: (id: string) => void
   setCurrentVersion: (id: string) => void
@@ -63,7 +63,6 @@ type SessionState = {
 
 // ── 工具函数 ───────────────────────────────────────────────────
 
-/** 把后端的 ApiSession 转成内存的 ChatSession */
 function fromApi(api: ApiSession): ChatSession {
   return {
     id: api.id,
@@ -71,10 +70,23 @@ function fromApi(api: ApiSession): ChatSession {
     messages: [],
     streamingText: '',
     isStreaming: false,
+    files: {},
+    versionId: 0,
   }
 }
 
-/** 生成一条消息对象 */
+/** 把后端的 ApiMessage 转成前端 Message 类型。
+ *  branchId 现阶段统一 'main'，后端没有这个概念但前端类型要求有。 */
+function fromApiMessage(m: ApiMessage): Message {
+  return {
+    id: `srv-${m.id}`,
+    role: m.role,
+    text: m.text,
+    createdAt: new Date(m.created_at).getTime(),
+    branchId: 'main',
+  }
+}
+
 export function makeMessage(
   role: 'user' | 'assistant',
   text: string,
@@ -90,8 +102,8 @@ export function makeMessage(
   }
 }
 
-// 稳定常量：currentVersion() stub 必须每次返回同一个对象引用，
-// 否则 zustand selector 每次比较都不等，触发无限重渲染。
+// EMPTY_VERSION 仅在没有激活 session 时返回，必须是常量 —— 否则 zustand selector
+// 每次返回新对象引用都不等，触发无限重渲染。
 const EMPTY_VERSION = {
   id: 'v0',
   label: '等待生成',
@@ -99,6 +111,25 @@ const EMPTY_VERSION = {
   branchId: 'main',
   createdAt: 0,
   diff: { added: 0, removed: 0 },
+}
+
+// 缓存 currentVersion 包装对象：同一 session + 同一 versionId 必须返回同一个引用，
+// 否则 PreviewPane 的 useEffect 依赖 currentVersion.files 会无限触发 syncFiles。
+const versionCache = new Map<string, { versionId: number; value: ReturnType<SessionState['currentVersion']> }>()
+
+function getVersionFor(session: ChatSession) {
+  const cached = versionCache.get(session.id)
+  if (cached && cached.versionId === session.versionId) return cached.value
+  const value = {
+    id: `${session.id}@${session.versionId}`,
+    label: session.versionId === 0 ? '模板' : `v${session.versionId}`,
+    files: session.files,
+    branchId: 'main',
+    createdAt: 0,
+    diff: { added: 0, removed: 0 },
+  }
+  versionCache.set(session.id, { versionId: session.versionId, value })
+  return value
 }
 
 // ── Store ──────────────────────────────────────────────────────
@@ -112,19 +143,25 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set({ loading: true })
     try {
       const apiSessions = await listSessions()
+      let sessions: ChatSession[]
+      let activeId: string
+
       if (apiSessions.length > 0) {
-        // 已有会话：加载列表，激活最新一条
-        const sessions = apiSessions.map(fromApi)
-        set({ sessions, activeId: sessions[0].id })
+        sessions = apiSessions.map(fromApi)
+        activeId = sessions[0].id
       } else {
-        // 空库：自动创建第一个会话
         const api = await createSession('第一个对话')
-        const session = fromApi(api)
-        set({ sessions: [session], activeId: session.id })
+        sessions = [fromApi(api)]
+        activeId = sessions[0].id
       }
+
+      // 先把列表/active 写进 store，再异步拉文件 —— UI 能立即渲染会话列表
+      set({ sessions, activeId })
+
+      // 加载激活会话的文件
+      await get().switchTo(activeId)
     } catch (e) {
       console.error('初始化会话失败', e)
-      // 把错误暴露出去，让 App 层可以 toast 提示
       throw e
     } finally {
       set({ loading: false })
@@ -138,11 +175,34 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       sessions: [session, ...s.sessions],
       activeId: session.id,
     }))
+    // 新建会话后端已经预置了模板，立即拉过来给 WebContainer 用
+    await get().switchTo(session.id)
   },
 
-  switchTo: (id) => {
-    if (id === get().activeId) return
+  switchTo: async (id) => {
     set({ activeId: id })
+    // 切换到的目标会话如果还没拉过文件（files 为空且 versionId 为 0），从后端拉一次
+    const target = get().sessions.find((s) => s.id === id)
+    if (!target) return
+    if (Object.keys(target.files).length > 0) return  // 已加载过，不重复拉
+
+    // 并行拉文件和消息 —— 两个请求互相不依赖，并发更快
+    try {
+      const [files, apiMessages] = await Promise.all([
+        listSessionFiles(id),
+        listSessionMessages(id),
+      ])
+      const messages = apiMessages.map(fromApiMessage)
+      set((s) => ({
+        sessions: s.sessions.map((sess) =>
+          sess.id === id
+            ? { ...sess, files, messages, versionId: sess.versionId + 1 }
+            : sess,
+        ),
+      }))
+    } catch (e) {
+      console.error(`加载会话 ${id} 的内容失败`, e)
+    }
   },
 
   appendMessage: (msg) => {
@@ -180,15 +240,48 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }))
   },
 
+  applyFileWrite: (path, content) => {
+    const id = get().activeId
+    if (!id) return
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === id
+          ? {
+              ...sess,
+              files: { ...sess.files, [path]: content },
+              versionId: sess.versionId + 1,
+            }
+          : sess,
+      ),
+    }))
+  },
+
+  applyFileDelete: (path) => {
+    const id = get().activeId
+    if (!id) return
+    set((s) => ({
+      sessions: s.sessions.map((sess) => {
+        if (sess.id !== id) return sess
+        if (!(path in sess.files)) return sess
+        const { [path]: _omit, ...rest } = sess.files
+        return { ...sess, files: rest, versionId: sess.versionId + 1 }
+      }),
+    }))
+  },
+
   activeSession: () => {
     const { sessions, activeId } = get()
     return sessions.find((s) => s.id === activeId) ?? null
   },
 
-  // ── 兼容旧版 WorkArea 组件的 stub，等项目生成接入后替换 ──────────
+  // ── 兼容旧版 WorkArea 组件的字段 ──────────
   session: { id: '', name: '', currentVersionId: 'v0', versions: [], messages: [] },
   projects: [],
-  currentVersion: () => EMPTY_VERSION,
+  currentVersion: () => {
+    const active = get().activeSession()
+    if (!active) return EMPTY_VERSION
+    return getVersionFor(active)
+  },
   setCurrentProject: () => {},
   setCurrentVersion: () => {},
   createProject: () => ({ id: '', name: '' }),

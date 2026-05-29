@@ -12,6 +12,7 @@ dependencies = [
     "langchain-anthropic>=1.4.4",
     "pydantic-settings>=2.14.1",
     "sqlalchemy>=2.0.50",
+    "langchain-openai>=1.2.2",
 ]
 
 [dependency-groups]

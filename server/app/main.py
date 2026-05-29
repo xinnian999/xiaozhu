@@ -8,9 +8,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import chat, files, sessions
+from app.api import chat, files, messages, sessions
 from app.db import Base, engine
-from app.models import file  # noqa: F401 —— 让 SQLAlchemy 注册 File 表
+from app.models import file, message  # noqa: F401 —— 让 SQLAlchemy 注册 File / Message 表
 
 
 # ── 应用生命周期 ────────────────────────────────────────────
@@ -34,6 +34,7 @@ app = FastAPI(title="Vibuild Backend", version="0.2.0", lifespan=lifespan)
 # ── 路由注册 ─────────────────────────────────────────────────
 app.include_router(sessions.router)
 app.include_router(files.router)
+app.include_router(messages.router)
 app.include_router(chat.router)
 
 

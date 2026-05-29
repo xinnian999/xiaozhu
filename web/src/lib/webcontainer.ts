@@ -72,8 +72,11 @@ export async function bootAndRun(
     install.output.pipeTo(
       new WritableStream({
         write(chunk) {
-          // 把多行日志压缩成最后一行展示
-          const line = chunk.toString().split('\n').filter(Boolean).pop()
+          const text = chunk.toString()
+          // 完整日志打到 console，方便排查 npm install 失败的真实原因
+          console.log('[npm install]', text)
+          // UI 上只展示最后一行的摘要
+          const line = text.split('\n').filter(Boolean).pop()
           if (line) hooks.onLog(line.slice(0, 80))
         },
       }),
@@ -90,7 +93,9 @@ export async function bootAndRun(
     dev.output.pipeTo(
       new WritableStream({
         write(chunk) {
-          const line = chunk.toString().split('\n').filter(Boolean).pop()
+          const text = chunk.toString()
+          console.log('[npm dev]', text)
+          const line = text.split('\n').filter(Boolean).pop()
           if (line) hooks.onLog(line.slice(0, 80))
         },
       }),

@@ -47,6 +47,14 @@ export type ApiSession = {
   updated_at: string
 }
 
+export type ApiFile = {
+  id: number
+  session_id: string
+  path: string
+  content: string
+  updated_at: string
+}
+
 // ── Sessions CRUD ───────────────────────────────────────────────
 
 export async function createSession(title?: string): Promise<ApiSession> {
@@ -56,6 +64,33 @@ export async function createSession(title?: string): Promise<ApiSession> {
 
 export async function listSessions(): Promise<ApiSession[]> {
   const { data } = await http.get<ApiSession[]>('/api/sessions')
+  return data
+}
+
+// ── Files ───────────────────────────────────────────────────────
+
+/** 拉取一个 session 下的所有文件（含 content）。返回 {path: content} 扁平字典，
+ *  方便直接喂给 WebContainer。 */
+export async function listSessionFiles(sessionId: string): Promise<Record<string, string>> {
+  const { data } = await http.get<ApiFile[]>(`/api/sessions/${sessionId}/files`)
+  const map: Record<string, string> = {}
+  for (const f of data) map[f.path] = f.content
+  return map
+}
+
+// ── Messages ───────────────────────────────────────────────────
+
+export type ApiMessage = {
+  id: number
+  session_id: string
+  role: 'user' | 'assistant'
+  text: string
+  created_at: string
+}
+
+/** 拉取一个 session 下的所有历史消息（按时间升序）。 */
+export async function listSessionMessages(sessionId: string): Promise<ApiMessage[]> {
+  const { data } = await http.get<ApiMessage[]>(`/api/sessions/${sessionId}/messages`)
   return data
 }
 

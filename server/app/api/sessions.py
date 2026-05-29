@@ -11,7 +11,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
+from app.models.file import File
 from app.models.session import Session, SessionCreate, SessionRead
+from app.templates import load_template
 
 # prefix="/api/sessions" → 这个 router 里所有路由都以 /api/sessions 开头
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -22,17 +24,32 @@ async def create_session(
     body: SessionCreate,
     db: AsyncSession = Depends(get_db),  # FastAPI 自动注入
 ) -> SessionRead:
-    """创建一个新会话，返回完整的 session 对象（含自动生成的 id）。
+    """创建一个新会话，并把 Vite + React 模板预置进去，返回完整的 session 对象。
+
+    为什么要预置模板？因为 WebContainer 启动需要一个完整可跑的项目骨架
+    （package.json / vite.config.ts / index.html ...），让 LLM 从零生成
+    这些配置文件容易出错且浪费 token，干脆固定下来。
+    LLM 只负责改 src/ 下的业务代码。
 
     SQLAlchemy async 的操作流程：
       1. 创建 ORM 对象
       2. db.add() —— 加入当前 session 的"待写入队列"
-      3. await db.commit() —— 真正执行 SQL INSERT 并提交事务
-      4. await db.refresh(obj) —— 从数据库重新读一次，拿到 server_default 填充的字段
-         （比如 created_at 是数据库写的，Python 对象里原本是 None）
+      3. db.flush() —— 推 SQL 到数据库但不 commit，目的是先拿到 session.id
+         好让接下来批量插入的 File 拿到外键
+      4. await db.commit() —— 真正提交事务
+      5. await db.refresh(obj) —— 从数据库重新读一次，拿到 server_default 填充的字段
     """
     session = Session(title=body.title)
     db.add(session)
+    await db.flush()  # 拿到 session.id，准备给 files 当外键
+
+    # 把模板文件批量塞进 files 表
+    template_files = load_template("vite-react")
+    db.add_all([
+        File(session_id=session.id, path=path, content=content)
+        for path, content in template_files.items()
+    ])
+
     await db.commit()
     await db.refresh(session)  # 拿到数据库生成的 created_at / updated_at
     return SessionRead.model_validate(session)

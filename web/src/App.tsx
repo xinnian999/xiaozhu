@@ -4,18 +4,21 @@ import ChatSidebar from '@/components/ChatSidebar'
 import WorkArea from '@/components/WorkArea'
 import Toast from '@/components/Toast'
 import { useThemeStore } from '@/store/theme'
+import { useSessionStore } from '@/store/session'
 import styles from './App.module.scss'
 
-// ============================================
-// 应用主入口：垂直 TopBar + 水平 Chat / Work
-// ============================================
 function App() {
   const theme = useThemeStore((s) => s.theme)
+  const init = useSessionStore((s) => s.init)
 
-  // 初次挂载时把主题写到 html，保持与持久化一致
   useEffect(() => {
     document.documentElement.dataset.theme = theme
   }, [theme])
+
+  useEffect(() => {
+    // 错误统一由 axios 拦截器 toast，这里只需阻止 unhandled rejection
+    init().catch(() => {})
+  }, [])
 
   return (
     <div className={styles.app}>

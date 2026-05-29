@@ -1,41 +1,26 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import { MessageSquare } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
-import { useEditorStore } from '@/store/editor'
-import { getMessagesForVersion } from '@/lib/sessionBranch'
 import MessageBubble from '../MessageBubble'
 import styles from './index.module.scss'
 
 // ============================================
-// 对话列表：按当前选中版本裁剪并渲染 session 消息
+// 对话列表：渲染当前会话消息 + 流式输出中的 AI 消息
 // ============================================
 export default function MessageList() {
-  const session = useSessionStore((s) => s.session)
-  const setCurrentVersion = useSessionStore((s) => s.setCurrentVersion)
-  const resetEditor = useEditorStore((s) => s.reset)
+  const session = useSessionStore((s) => s.activeSession())
   const endRef = useRef<HTMLDivElement>(null)
 
-  const messages = useMemo(
-    () => getMessagesForVersion(session, session.currentVersionId),
-    [session.id, session.currentVersionId, session.messages, session.versions],
-  )
+  const messages = session?.messages ?? []
+  const streamingText = session?.streamingText ?? ''
+  const isStreaming = session?.isStreaming ?? false
 
-  const versionById = useMemo(
-    () => new Map(session.versions.map((v) => [v.id, v])),
-    [session.versions],
-  )
-
+  // 新消息到来时滚动到底部
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, session.currentVersionId, session.id])
+  }, [messages.length, streamingText])
 
-  const handleVersionClick = (versionId: string) => {
-    if (versionId === session.currentVersionId) return
-    setCurrentVersion(versionId)
-    resetEditor()
-  }
-
-  if (messages.length === 0) {
+  if (messages.length === 0 && !isStreaming) {
     return (
       <div className={styles.empty}>
         <MessageSquare size={20} className={styles.emptyIcon} />
@@ -48,16 +33,23 @@ export default function MessageList() {
   return (
     <div className={styles.list}>
       {messages.map((msg) => (
-        <MessageBubble
-          key={msg.id}
-          message={msg}
-          producedVersion={
-            msg.producedVersionId ? versionById.get(msg.producedVersionId) : undefined
-          }
-          isVersionCurrent={msg.producedVersionId === session.currentVersionId}
-          onVersionClick={handleVersionClick}
-        />
+        <MessageBubble key={msg.id} message={msg} />
       ))}
+
+      {/* 流式输出中的 AI 消息：单独渲染，末尾加光标动画 */}
+      {isStreaming && (
+        <MessageBubble
+          message={{
+            id: 'streaming',
+            role: 'assistant',
+            text: streamingText,
+            createdAt: Date.now(),
+            branchId: 'main',
+          }}
+          isStreaming
+        />
+      )}
+
       <div ref={endRef} className={styles.listEnd} aria-hidden />
     </div>
   )

@@ -1,0 +1,114 @@
+// ============================================
+// API 客户端：axios 实例 + SSE 流式请求
+// ============================================
+
+import axios from 'axios'
+import { toast } from '@/lib/toast'
+
+// ── axios 实例 ─────────────────────────────────────────────────
+// 走 Vite 代理，baseURL 留空即可（/api/xxx 会被代理到后端）
+export const http = axios.create({
+  baseURL: '',
+  headers: { 'Content-Type': 'application/json' },
+  timeout: 10_000,
+})
+
+// 请求拦截器：统一加 token、日志等（目前先留空占位）
+http.interceptors.request.use((config) => {
+  // 未来在这里加：config.headers.Authorization = `Bearer ${token}`
+  return config
+})
+
+// 响应拦截器：统一处理错误并 toast 提示，调用方不需要自己 catch
+http.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    const detail = err.response?.data?.detail ?? err.message
+    toast(`请求失败：${detail}`)
+    return Promise.reject(new Error(detail))
+  },
+)
+
+// ── 类型定义（与后端 SSE 事件协议对齐）────────────────────────
+
+export type SSEEvent =
+  | { type: 'message_delta'; text: string }
+  | { type: 'file_write'; path: string; content: string }
+  | { type: 'file_delete'; path: string }
+  | { type: 'plan_update'; todos: unknown[] }
+  | { type: 'tool_call'; name: string; args: object }
+  | { type: 'error'; message: string }
+  | { type: 'done' }
+
+export type ApiSession = {
+  id: string
+  title: string | null
+  created_at: string
+  updated_at: string
+}
+
+// ── Sessions CRUD ───────────────────────────────────────────────
+
+export async function createSession(title?: string): Promise<ApiSession> {
+  const { data } = await http.post<ApiSession>('/api/sessions', { title: title ?? null })
+  return data
+}
+
+export async function listSessions(): Promise<ApiSession[]> {
+  const { data } = await http.get<ApiSession[]>('/api/sessions')
+  return data
+}
+
+// ── SSE 流式对话 ────────────────────────────────────────────────
+// SSE 是长连接流，axios 不支持流式消费，这里保留原生 fetch。
+// 普通 REST 请求全走 axios，SSE 单独处理，两者分工明确。
+
+export async function* streamChat(
+  message: string,
+  sessionId: string,
+): AsyncGenerator<SSEEvent> {
+  const res = await fetch('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, session_id: sessionId }),
+  }).catch((e: unknown) => {
+    const msg = e instanceof Error ? e.message : '网络错误'
+    toast(`发送失败：${msg}`)
+    throw e
+  })
+
+  if (!res.ok || !res.body) {
+    toast(`发送失败：HTTP ${res.status}`)
+    yield { type: 'error', message: `请求失败: ${res.status}` }
+    yield { type: 'done' }
+    return
+  }
+
+  // ReadableStream → 按行拆分 → 解析 SSE 帧
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+
+    // SSE 每帧以 \n\n 结尾，按此拆分
+    const frames = buffer.split('\n\n')
+    // 最后一段可能不完整，留到下次拼接
+    buffer = frames.pop() ?? ''
+
+    for (const frame of frames) {
+      const line = frame.trim()
+      if (!line.startsWith('data:')) continue
+      const json = line.slice('data:'.length).trim()
+      try {
+        yield JSON.parse(json) as SSEEvent
+      } catch {
+        // 忽略格式错误的帧
+      }
+    }
+  }
+}

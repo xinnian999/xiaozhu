@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { ArrowUp, Mic, Paperclip, Image as ImageIcon, X } from 'lucide-react'
-import { useSessionStore } from '@/store/session'
+import { useSessionStore, makeMessage } from '@/store/session'
 import { useUIStore } from '@/store/ui'
-import { willForkOnContinue } from '@/lib/sessionBranch'
+import { streamChat } from '@/lib/api'
+import { toast } from '@/lib/toast'
 import MessageList from './MessageList'
 import styles from './index.module.scss'
 
@@ -10,22 +11,45 @@ import styles from './index.module.scss'
 // 左侧聊天侧栏
 // ============================================
 export default function ChatSidebar() {
-  const session = useSessionStore((s) => s.session)
+  const session = useSessionStore((s) => s.activeSession())
+  const appendMessage = useSessionStore((s) => s.appendMessage)
+  const setStreamingText = useSessionStore((s) => s.setStreamingText)
+  const commitStreaming = useSessionStore((s) => s.commitStreaming)
   const mobileChatOpen = useUIStore((s) => s.mobileChatOpen)
   const setMobileChatOpen = useUIStore((s) => s.setMobileChatOpen)
   const chatCollapsed = useUIStore((s) => s.chatCollapsed)
-  const pushToast = useUIStore((s) => s.pushToast)
 
   const [draft, setDraft] = useState('')
 
-  const handleSend = () => {
-    if (!draft.trim()) return
-    if (willForkOnContinue(session, session.currentVersionId)) {
-      pushToast('将在此版本上创建新分支继续对话，原有后续版本仍可在顶栏找回')
-    } else {
-      pushToast('对话功能将在后端接入后开放')
-    }
+  const isStreaming = session?.isStreaming ?? false
+
+  const handleSend = async () => {
+    if (!draft.trim() || isStreaming || !session) return
+
+    const text = draft.trim()
     setDraft('')
+
+    // 1. 把用户消息追加到列表
+    appendMessage(makeMessage('user', text))
+
+    // 2. 流式消费 SSE，逐 token 累积到 streamingText
+    let accumulated = ''
+    try {
+      for await (const event of streamChat(text, session.id)) {
+        if (event.type === 'message_delta') {
+          accumulated += event.text
+          setStreamingText(accumulated)
+        } else if (event.type === 'error') {
+          toast(`AI 错误：${event.message}`)
+          break
+        } else if (event.type === 'done') {
+          break
+        }
+      }
+    } finally {
+      // 3. 无论成功还是出错，都把累积内容固化为一条 assistant 消息
+      commitStreaming()
+    }
   }
 
   return (
@@ -58,12 +82,9 @@ export default function ChatSidebar() {
           <div className={styles.composerInner}>
             <textarea
               className={styles.input}
-              placeholder={
-                willForkOnContinue(session, session.currentVersionId)
-                  ? '从当前版本创建新分支并继续…'
-                  : '继续描述你的需求…'
-              }
+              placeholder={isStreaming ? 'AI 正在回复…' : '描述你想要的应用…'}
               value={draft}
+              disabled={isStreaming}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
@@ -88,8 +109,9 @@ export default function ChatSidebar() {
               </div>
 
               <button
-                className={`${styles.sendBtn} ${draft.trim() ? styles.sendActive : ''}`}
+                className={`${styles.sendBtn} ${draft.trim() && !isStreaming ? styles.sendActive : ''}`}
                 onClick={handleSend}
+                disabled={isStreaming}
                 aria-label="发送"
               >
                 <ArrowUp size={14} />

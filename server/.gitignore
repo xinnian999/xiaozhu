@@ -1,0 +1,16 @@
+# 虚拟环境（依赖靠 pyproject.toml + uv.lock 重建，不提交）
+.venv/
+
+# Python 字节码缓存
+__pycache__/
+*.py[cod]
+
+# 工具缓存
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# 本地环境变量 / 密钥
+.env
+.env.*
+!.env.example

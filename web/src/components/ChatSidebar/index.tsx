@@ -152,7 +152,9 @@ export default function ChatSidebar() {
               disabled={composerDisabled}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
+                // e.nativeEvent.isComposing：输入法（拼音 / 日文等）正在拼字时为 true。
+                // 此时的回车是「确认候选字」，不能当成发送，否则中文用户选字就误发了。
+                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                   e.preventDefault()
                   handleSend()
                 }

@@ -95,15 +95,6 @@ export default function PreviewPane() {
 
       <div className={styles.frame}>
         <div className={styles.browser}>
-          <div className={styles.browserBar}>
-            <span className={styles.dots} aria-hidden>
-              <i /><i /><i />
-            </span>
-            <span className={styles.browserUrl}>
-              {wcUrl ? new URL(wcUrl).host : 'localhost:5173'}
-            </span>
-            <StatusBadge status={wcStatus} />
-          </div>
 
           <div className={styles.viewport}>
             {showIframe && (

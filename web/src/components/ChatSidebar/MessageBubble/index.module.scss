@@ -132,13 +132,14 @@
 
 // ============================================
 // 工具调用进度卡：紧凑细窄，避免抢正常气泡的视觉重量
+// 带参数的可点击展开，下方拉出参数面板
 // ============================================
 .toolChip {
   display: inline-flex;
-  align-items: center;
-  gap: $space-2;
+  flex-direction: column;
+  align-items: stretch;
+  max-width: 100%;
   margin-bottom: $space-3;
-  padding: $space-1 $space-2;
   border: 1px dashed var(--color-border);
   border-radius: $radius-sm;
   background: var(--color-bg-soft);
@@ -146,17 +147,68 @@
   font-size: $fs-11;
   line-height: $lh-snug;
   color: var(--color-text-mute);
+  overflow: hidden;
   // 进入时轻微淡入，避免成片闪烁
   animation: tool-chip-in $dur-base $ease-out;
 
+  // 头部行：图标 + 文案 (+ 展开箭头)
+  .toolChipHeader {
+    @include button-reset;
+    display: flex;
+    align-items: center;
+    gap: $space-2;
+    width: 100%;
+    padding: $space-1 $space-2;
+    text-align: left;
+    color: inherit;
+    font: inherit;
+  }
+
+  // 仅可展开的卡片给指针手势 + hover 反馈
+  &.toolChipExpandable .toolChipHeader {
+    cursor: pointer;
+
+    &:hover {
+      background: var(--color-bg-hover);
+    }
+  }
+
   .toolChipIcon {
     display: inline-flex;
+    flex-shrink: 0;
     color: var(--color-accent);
   }
 
   .toolChipLabel {
     @include truncate;
-    max-width: 260px;
+    max-width: 220px;
+  }
+
+  // 展开箭头：靠右，展开时旋转 90°
+  .toolChipChevron {
+    flex-shrink: 0;
+    margin-left: auto;
+    color: var(--color-text-faint);
+    transition: transform $dur-base $ease-out;
+  }
+
+  .toolChipChevronOpen {
+    transform: rotate(90deg);
+  }
+
+  // 参数面板：可滚动，文件内容再长也不会撑爆布局
+  .toolChipArgs {
+    margin: 0;
+    padding: $space-2;
+    border-top: 1px dashed var(--color-border);
+    background: var(--color-bg);
+    color: var(--color-text-dim);
+    font-size: $fs-10;
+    line-height: $lh-relaxed;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 220px;
+    overflow: auto;
   }
 }
 

@@ -94,6 +94,26 @@ export async function listSessionMessages(sessionId: string): Promise<ApiMessage
   return data
 }
 
+// ── Browser logs（回传给后端，供 agent 自检报错）──────────────
+// 预览的 console 日志只有浏览器看得到，后端 agent 想知道「我写的代码跑起来
+// 报错没」，就得靠前端把这些日志推过去。
+// 走原生 fetch 而非 axios：这是 best-effort 旁路数据，失败要静默，
+// 不能触发 axios 拦截器里的 toast 弹窗骚扰用户。
+
+export type PushLog = { level: string; text: string; ts: number }
+
+export async function pushLogs(sessionId: string, logs: PushLog[]): Promise<void> {
+  try {
+    await fetch(`/api/sessions/${sessionId}/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ logs }),
+    })
+  } catch {
+    // 旁路数据，回传失败就算了，不打扰用户
+  }
+}
+
 // ── SSE 流式对话 ────────────────────────────────────────────────
 // SSE 是长连接流，axios 不支持流式消费，这里保留原生 fetch。
 // 普通 REST 请求全走 axios，SSE 单独处理，两者分工明确。

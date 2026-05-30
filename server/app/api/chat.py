@@ -4,6 +4,7 @@
 流式体验后续再加，核心逻辑不变。
 """
 
+import asyncio
 import json
 from collections.abc import AsyncGenerator
 
@@ -16,6 +17,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import log_store
 from app.config import settings
 from app.db import get_db
 from app.models.file import File
@@ -35,7 +37,9 @@ base_llm = ChatOpenAI(
     model=settings.llm_model,
     api_key=settings.openai_api_key,
     base_url=settings.openai_base_url,
-    max_tokens=4096,
+    # 一次 write_file 要塞下整个文件内容，4096 太小，写稍大的页面就会被截断
+    # （finish_reason=length），导致工具参数残缺、本轮空转。先给到 16384。
+    max_tokens=16384,
 )
 
 
@@ -56,7 +60,15 @@ SYSTEM_PROMPT = """你是 Vibuild，一个 AI 前端代码生成助手。
 1. 先调 list_files 看当前项目结构
 2. 修改已有文件前，必须先用 read_file 读取原内容
 3. 用 write_file 写入文件（path 是相对路径，content 是完整内容，不能省略）
-4. 完成后用一句话告诉用户做了什么
+4. 所有文件写完后，调 get_browser_logs 检查预览有没有运行报错
+5. 如果有报错：用 read_file 读出错文件 → 定位问题 → write_file 修复 →
+   再次 get_browser_logs 确认。最多修复 3 轮，仍修不好就如实告诉用户卡在哪
+6. 确认无报错后，用一句话告诉用户做了什么
+
+【自检要点】
+- get_browser_logs 是你唯一能"看到"代码跑起来效果的方式，写完务必调用
+- 常见错误：变量名拼写、import 路径、JSX 语法、用了未安装的依赖
+- 报错信息里通常带文件名和行号，照着定位
 
 【禁止】
 - 不要新增依赖（不要修改 package.json）
@@ -119,6 +131,9 @@ def build_tools(db: AsyncSession, session_id: str) -> list:
         else:
             db.add(File(session_id=session_id, path=path, content=content))
         await db.commit()
+        # 记下写入屏障：此刻之后浏览器产生的日志，才算这次写入引发的，
+        # 供 get_browser_logs 判断「这次改动有没有跑出错」。
+        log_store.mark_write(session_id)
         return f"已写入 {path}"
 
     @tool
@@ -140,7 +155,26 @@ def build_tools(db: AsyncSession, session_id: str) -> list:
         result = await db.execute(select(File.path).where(File.session_id == session_id))
         return json.dumps(result.scalars().all(), ensure_ascii=False)
 
-    return [write_file, read_file, list_files]
+    @tool
+    async def get_browser_logs() -> str:
+        """检查预览运行后的报错。写完文件后必须调用它，确认代码在浏览器里能正常跑。
+
+        返回这次写入之后浏览器产生的 error / warning；没有就说明运行正常。
+        """
+        # 时序：写完文件后浏览器要经历「收到文件 → HMR → 重新执行 → 报错」，
+        # 需要一点时间。这里轮询等「写入屏障之后的新日志」出现，最多等约 3 秒。
+        #   - 错误早到了：第一轮就拿到，立即返回。
+        #   - 错误还没到：每 0.25s 查一次，等它出现。
+        #   - 代码没问题：前端不会推任何 error/warn，一直等到超时 → 返回「正常」。
+        for _ in range(12):  # 12 × 0.25s = 3s
+            logs = log_store.logs_since_write(session_id)
+            if logs:
+                lines = "\n".join(f"[{x.level}] {x.text}" for x in logs)
+                return f"预览有以下报错/警告，请定位并修复：\n{lines}"
+            await asyncio.sleep(0.25)
+        return "预览运行正常，没有报错。"
+
+    return [write_file, read_file, list_files, get_browser_logs]
 
 
 # ── Agentic Loop ────────────────────────────────────────────────────────────────
@@ -177,8 +211,22 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
     # 累积本轮 assistant 的最终文本，用于结束时入库
     final_assistant_text = ""
 
+    # 硬性轮次上限：prompt 让 agent「最多修 3 轮」是软约束，模型未必听话。
+    # 加一个兜底计数，防止「写错→检查→修错→再检查→……」无限烧 token。
+    # 一次正常生成 + 几轮自检修复，25 轮足够；超了就强制收尾。
+    MAX_TURNS = 25
+    turns = 0
+
     try:
         while True:
+            turns += 1
+            if turns > MAX_TURNS:
+                yield sse({
+                    "type": "error",
+                    "message": f"已达最大轮次（{MAX_TURNS}），自动停止以防死循环。",
+                })
+                break
+
             # ainvoke：等待 LLM 完整回复（非流式）
             response = await llm.ainvoke(messages)
             messages.append(response)  # 把回复追加进历史
@@ -187,12 +235,27 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
             # 也可能「边说边调」。所以每一轮都先把文本取出来。
             text = extract_text(response)
 
+            # finish_reason：模型为什么停。"stop"=正常说完，"tool_calls"=要调工具，
+            # "length"=撞 max_tokens 被截断。截断时 write_file 的参数 JSON 是残缺的，
+            # langchain 解析不出合法 tool_calls，会丢进 invalid_tool_calls。
+            finish_reason = response.response_metadata.get("finish_reason")
+            if response.invalid_tool_calls or finish_reason == "length":
+                print(
+                    f"[截断] finish_reason={finish_reason} "
+                    f"invalid_tool_calls={response.invalid_tool_calls}"
+                )
+                yield sse({
+                    "type": "error",
+                    "message": "模型输出超长被截断，文件没写完。请把需求拆小，或分多次生成。",
+                })
+                break
+
             if not response.tool_calls:
-                print(f"[response] content={response.content} (未调用工具)")
                 # 最终回复：推给前端并入库（空字符串就不存）
                 if text:
                     yield sse({"type": "message_delta", "text": text})
                     final_assistant_text = text
+                print(f"[最终回复] content={text}")
                 break
 
             # 这一轮要调工具，但模型可能同时说了话（开场白 / 进度解释，

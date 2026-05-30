@@ -3,6 +3,7 @@ import { Loader2, AlertTriangle } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
 import { useUIStore, type WCStatus, type LogLevel } from '@/store/ui'
 import { bootAndRun, syncFiles, isBooted, isDevRunning } from '@/lib/webcontainer'
+import { pushLogs, type PushLog } from '@/lib/api'
 import styles from './index.module.scss'
 
 // ============================================
@@ -14,6 +15,8 @@ import styles from './index.module.scss'
 // ============================================
 export default function PreviewPane() {
   const currentVersion = useSessionStore((s) => s.currentVersion())
+  // 当前会话 id —— 回传日志要带上它，后端按 session 分桶存
+  const activeId = useSessionStore((s) => s.activeId)
 
   const wcStatus = useUIStore((s) => s.wcStatus)
   const wcUrl = useUIStore((s) => s.wcUrl)
@@ -31,6 +34,16 @@ export default function PreviewPane() {
   const syncedVersionRef = useRef<string | null>(null)
   // 当前 iframe 的引用，用于校验 postMessage 来源
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
+
+  // —— 日志回传给后端 ——
+  // activeId 放进 ref：下面的回调/定时器是在 effect 里建的闭包，
+  // 直接读 activeId 会捕获到旧值，用 ref 保证拿到最新会话 id。
+  const activeIdRef = useRef(activeId)
+  activeIdRef.current = activeId
+  // 待回传的日志缓冲 + debounce 定时器：日志是高频的（HMR 重连一刷一片），
+  // 攒一小批一起发，别一条一个请求。
+  const pendingLogsRef = useRef<PushLog[]>([])
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // —— 首次启动：等 files 到位再 boot ——
   // files 从后端拉取是异步的，组件挂载时 currentVersion.files 可能还是空对象，
@@ -71,18 +84,48 @@ export default function PreviewPane() {
 
   // —— 浏览器 console 桥接：iframe → 父页面 ——
   // iframe 里注入的脚本会 postMessage({ type: 'vibuild-console', level, text })，
-  // 这里挂全局监听，把它推到控制台面板。
+  // 这里挂全局监听：一边推到控制台面板（给人看），一边攒批回传后端（给 agent 看）。
   useEffect(() => {
+    // 把缓冲里的日志一次性发给后端，然后清空
+    const flush = () => {
+      flushTimerRef.current = null
+      const sid = activeIdRef.current
+      const batch = pendingLogsRef.current
+      if (!sid || batch.length === 0) return
+      pendingLogsRef.current = []
+      pushLogs(sid, batch)
+    }
+
     const handle = (e: MessageEvent) => {
       const data = e.data
       if (!data || data.type !== 'vibuild-console') return
       // 来源校验：必须来自当前 iframe 的 contentWindow，防止其他 tab 的脏数据
       if (iframeRef.current && e.source !== iframeRef.current.contentWindow) return
       const level: LogLevel = ['log', 'info', 'warn', 'error'].includes(data.level) ? data.level : 'log'
-      pushWcLog({ level, text: String(data.text ?? '') })
+      const text = String(data.text ?? '')
+      pushWcLog({ level, text })
+
+      // 只回传 error / warn：agent 关心的是「报错了没」，普通 log（vite 连接提示等）
+      // 是噪声，混进去会把后端那个 50 条上限的缓冲挤爆，真正的报错反而被挤掉。
+      if (level === 'error' || level === 'warn') {
+        pendingLogsRef.current.push({ level, text, ts: Date.now() })
+        // debounce 400ms：同一波报错往往连着来，攒一下合并成一个请求
+        if (flushTimerRef.current === null) {
+          flushTimerRef.current = setTimeout(flush, 400)
+        }
+      }
     }
+
     window.addEventListener('message', handle)
-    return () => window.removeEventListener('message', handle)
+    return () => {
+      window.removeEventListener('message', handle)
+      // 组件卸载前把没发完的日志补发一次，并清掉定时器
+      if (flushTimerRef.current !== null) {
+        clearTimeout(flushTimerRef.current)
+        flushTimerRef.current = null
+      }
+      flush()
+    }
   }, [pushWcLog])
 
   const showIframe = wcUrl && (wcStatus === 'ready' || wcStatus === 'syncing')

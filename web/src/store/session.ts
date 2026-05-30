@@ -38,8 +38,10 @@ type SessionState = {
   loading: boolean
 
   init: () => Promise<void>
-  createNew: (title?: string) => Promise<void>
+  createNew: (title?: string) => Promise<ChatSession>
   switchTo: (id: string) => Promise<void>
+  /** 回到"无激活会话"的空态首屏，不真正创建会话 */
+  goToEmpty: () => void
   appendMessage: (msg: Message) => void
   setStreamingText: (text: string) => void
   commitStreaming: () => void
@@ -143,23 +145,23 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set({ loading: true })
     try {
       const apiSessions = await listSessions()
-      let sessions: ChatSession[]
-      let activeId: string
+      const sessions = apiSessions.map(fromApi)
 
-      if (apiSessions.length > 0) {
-        sessions = apiSessions.map(fromApi)
-        activeId = sessions[0].id
-      } else {
-        const api = await createSession('第一个对话')
-        sessions = [fromApi(api)]
-        activeId = sessions[0].id
+      // 从 URL 取 sessionId：存在则尝试激活；不存在或非法 → 不主动创建会话，
+      // 让 UI 显示"全屏对话框"状态，等用户首条消息触发创建
+      const url = new URL(window.location.href)
+      const urlId = url.searchParams.get('sessionId')
+      const targetId = urlId && sessions.find((s) => s.id === urlId) ? urlId : null
+
+      set({ sessions, activeId: targetId })
+
+      if (targetId) {
+        await get().switchTo(targetId)
+      } else if (urlId) {
+        // URL 里有 sessionId 但找不到对应会话，把它从 URL 上清理掉，避免一直误导
+        url.searchParams.delete('sessionId')
+        window.history.replaceState(null, '', url.toString())
       }
-
-      // 先把列表/active 写进 store，再异步拉文件 —— UI 能立即渲染会话列表
-      set({ sessions, activeId })
-
-      // 加载激活会话的文件
-      await get().switchTo(activeId)
     } catch (e) {
       console.error('初始化会话失败', e)
       throw e
@@ -175,17 +177,27 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       sessions: [session, ...s.sessions],
       activeId: session.id,
     }))
+    // 同步 URL，刷新后能恢复到同一个会话
+    const url = new URL(window.location.href)
+    url.searchParams.set('sessionId', session.id)
+    window.history.replaceState(null, '', url.toString())
     // 新建会话后端已经预置了模板，立即拉过来给 WebContainer 用
     await get().switchTo(session.id)
+    return session
   },
 
   switchTo: async (id) => {
     set({ activeId: id })
+    // 同步 URL —— 切换会话也要让地址栏跟着变，分享链接才能定位
+    const url = new URL(window.location.href)
+    if (url.searchParams.get('sessionId') !== id) {
+      url.searchParams.set('sessionId', id)
+      window.history.replaceState(null, '', url.toString())
+    }
     // 切换到的目标会话如果还没拉过文件（files 为空且 versionId 为 0），从后端拉一次
     const target = get().sessions.find((s) => s.id === id)
     if (!target) return
     if (Object.keys(target.files).length > 0) return  // 已加载过，不重复拉
-
     // 并行拉文件和消息 —— 两个请求互相不依赖，并发更快
     try {
       const [files, apiMessages] = await Promise.all([
@@ -202,6 +214,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       }))
     } catch (e) {
       console.error(`加载会话 ${id} 的内容失败`, e)
+    }
+  },
+
+  goToEmpty: () => {
+    // 把激活态清掉，路由也去掉 sessionId，UI 自然回到空态首屏
+    set({ activeId: null })
+    const url = new URL(window.location.href)
+    if (url.searchParams.has('sessionId')) {
+      url.searchParams.delete('sessionId')
+      window.history.replaceState(null, '', url.toString())
     }
   },
 

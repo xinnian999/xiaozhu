@@ -1,7 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
 import { ChevronDown, Check, Plus } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
-import { useUIStore } from '@/store/ui'
 import { useClickOutside } from '@/hooks/useClickOutside'
 import styles from './index.module.scss'
 
@@ -16,8 +15,7 @@ export default function ProjectMenu() {
   const activeId = useSessionStore((s) => s.activeId)
   const activeSession = useSessionStore((s) => s.activeSession())
   const switchTo = useSessionStore((s) => s.switchTo)
-  const createNew = useSessionStore((s) => s.createNew)
-  const pushToast = useUIStore((s) => s.pushToast)
+  const goToEmpty = useSessionStore((s) => s.goToEmpty)
 
   const close = useCallback(() => setOpen(false), [])
   useClickOutside(rootRef, close)
@@ -27,10 +25,11 @@ export default function ProjectMenu() {
     close()
   }
 
-  const handleCreate = async () => {
+  // "新建会话"= 回到空态首屏（不立即建库），等用户发首条消息时再真正创建
+  // 行为与首屏一致，避免出现"空会话"
+  const handleCreate = () => {
     close()
-    await createNew()
-    pushToast('已创建新会话')
+    goToEmpty()
   }
 
   return (
@@ -42,7 +41,10 @@ export default function ProjectMenu() {
         aria-expanded={open}
         aria-haspopup="menu"
       >
-        <span className={styles.projectName}>{activeSession?.title ?? '加载中…'}</span>
+        {/* 没有激活会话时显示提示而不是"加载中…" —— 此时是用户刚进入空态首屏 */}
+        <span className={styles.projectName}>
+          {activeSession?.title ?? (sessions.length > 0 ? '选择会话' : '尚无会话')}
+        </span>
         <ChevronDown size={13} className={styles.caret} />
       </button>
 

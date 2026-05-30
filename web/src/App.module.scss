@@ -29,5 +29,11 @@
     display: flex;
     overflow: hidden;
     position: relative;
+
+    // —— 无激活会话：对话区全屏 ——
+    // 让 ChatSidebar 占满整个主区域，去掉右边框与固定宽度
+    &.noSession {
+      justify-content: center;
+    }
   }
 }

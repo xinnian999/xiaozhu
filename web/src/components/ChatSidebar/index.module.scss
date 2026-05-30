@@ -24,6 +24,31 @@
     }
   }
 
+  // —— 无激活会话：撑满整个主区域，去掉右边框 ——
+  // 此时对话区作为首屏的主舞台，居中铺开
+  &.fullscreen {
+    width: 100%;
+    border-right-width: 0;
+    background: transparent;
+
+    .chatBody {
+      // 居中欢迎语，且底部紧挨着 composer，类似 ChatGPT 首屏
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: $space-12 $space-6;
+    }
+
+    .composer {
+      // 输入框在大屏下不要顶满，保持一个舒适宽度
+      max-width: 720px;
+      width: 100%;
+      margin: 0 auto;
+      border-top-color: transparent;
+      background: transparent;
+    }
+  }
+
   .mobileClose {
     @include button-reset;
     display: none;
@@ -49,6 +74,30 @@
     overflow-y: auto;
     padding: $space-4 $space-3 $space-3;
     @include hide-scrollbar;
+  }
+
+  // —— 空态欢迎区 ——
+  .hero {
+    max-width: 520px;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    gap: $space-3;
+
+    .heroTitle {
+      font-size: $fs-32;
+      font-weight: $fw-semibold;
+      line-height: $lh-tight;
+      color: var(--color-text);
+      margin: 0;
+    }
+
+    .heroSubtitle {
+      font-size: $fs-14;
+      line-height: $lh-relaxed;
+      color: var(--color-text-dim);
+      margin: 0;
+    }
   }
 
   .composer {

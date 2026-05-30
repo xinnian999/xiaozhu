@@ -10,6 +10,8 @@ import styles from './App.module.scss'
 function App() {
   const theme = useThemeStore((s) => s.theme)
   const init = useSessionStore((s) => s.init)
+  // 没有激活会话时进入"空态"：隐藏右侧工作区，让对话框全屏展开
+  const hasActive = useSessionStore((s) => s.activeId !== null)
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -23,9 +25,9 @@ function App() {
   return (
     <div className={styles.app}>
       <TopBar />
-      <main className={styles.main}>
+      <main className={`${styles.main} ${hasActive ? '' : styles.noSession}`}>
         <ChatSidebar />
-        <WorkArea />
+        {hasActive && <WorkArea />}
       </main>
       <Toast />
     </div>

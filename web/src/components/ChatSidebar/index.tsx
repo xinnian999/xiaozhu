@@ -68,6 +68,13 @@ export default function ChatSidebar() {
           accumulated += event.text
           setStreamingText(accumulated)
         } else if (event.type === 'tool_call') {
+          // 工具调用前，先把本轮已累积的叙述（模型在调工具前说的话，
+          // 如「好的，我先看看结构」）固化成一条独立气泡，再插工具卡。
+          // 这样每一轮的话会和工具进度卡自然交错排列，而不是糊成一坨。
+          if (accumulated) {
+            commitStreaming()
+            accumulated = ''
+          }
           // 工具调用 → 在对话流里插一条"进度卡"消息，让用户看到 AI 正在做什么
           // 不入库（后端也不存），刷新会消失，符合"过程信息"语义
           appendMessage(makeMessage('assistant', '', {

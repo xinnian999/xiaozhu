@@ -80,6 +80,22 @@ def sse(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
+def extract_text(response: AIMessage) -> str:
+    """从 AIMessage 里取出纯文本内容。
+
+    绑定工具后，content 可能是普通字符串，也可能是
+    list[{"type": "text", "text": "..."}] 这样的 block 列表
+    （模型边说话边调工具时常见），后者要把所有 text block 拼起来。
+    """
+    content = response.content
+    if isinstance(content, str):
+        return content
+    return "".join(
+        block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "")
+        for block in content
+    )
+
+
 # ── 工具工厂 ────────────────────────────────────────────────────────────────────
 # 工具要操作"当前 session 的文件"，但 LLM 不该感知 session_id（那是后端会话身份，
 # 不是业务参数）。所以这里用闭包把 db / session_id "封进去"，工具的 JSON Schema
@@ -167,21 +183,24 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
             response = await llm.ainvoke(messages)
             messages.append(response)  # 把回复追加进历史
 
+            # content 和 tool_calls 是两个独立字段：模型可能只说话、只调工具，
+            # 也可能「边说边调」。所以每一轮都先把文本取出来。
+            text = extract_text(response)
+
             if not response.tool_calls:
                 print(f"[response] content={response.content} (未调用工具)")
-                # 绑工具后 content 可能是 list[{"type": "text", "text": "..."}]
-                # 需要把所有 text block 拼起来
-                if isinstance(response.content, str):
-                    text = response.content
-                else:
-                    text = "".join(
-                        block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "")
-                        for block in response.content
-                    )
+                # 最终回复：推给前端并入库（空字符串就不存）
                 if text:
                     yield sse({"type": "message_delta", "text": text})
                     final_assistant_text = text
                 break
+
+            # 这一轮要调工具，但模型可能同时说了话（开场白 / 进度解释，
+            # 如「好的，我先看看项目结构」）。这类中间叙述属于「过程信息」：
+            # 推给前端展示，但不入库 —— 刷新即消失，和工具进度卡语义一致。
+            if text:
+                print(f"[response] content={text} (同轮调用了工具)")
+                yield sse({"type": "message_delta", "text": text})
 
             # LLM 要调用一个或多个工具
             for tool_call in response.tool_calls:

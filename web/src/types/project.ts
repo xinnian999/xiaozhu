@@ -25,6 +25,13 @@ export type Message = {
   id: string
   role: 'user' | 'assistant'
   text: string
+  /** 消息种类：'text' 为正常对话气泡，'tool' 为工具调用进度卡。
+   *  缺省视为 'text'，保持向后兼容。 */
+  kind?: 'text' | 'tool'
+  /** kind === 'tool' 时使用：工具名（如 write_file / read_file / list_files） */
+  toolName?: string
+  /** kind === 'tool' 时使用：工具参数的摘要（如 { path: 'src/App.tsx' }） */
+  toolArgs?: Record<string, unknown>
   /** 该消息产出的版本（仅 assistant 消息有） */
   producedVersionId?: string
   /** 此条消息发送时刻 */

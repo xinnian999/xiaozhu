@@ -2,10 +2,11 @@ import { useUIStore } from '@/store/ui'
 import TabBar from './TabBar'
 import PreviewPane from './PreviewPane'
 import CodePane from './CodePane'
+import ConsolePanel from './ConsolePanel'
 import styles from './index.module.scss'
 
 // ============================================
-// 右侧工作区：tabs + 主面板
+// 右侧工作区：tabs + 主面板 + 控制台抽屉
 // ============================================
 export default function WorkArea() {
   const workTab = useUIStore((s) => s.workTab)
@@ -22,6 +23,9 @@ export default function WorkArea() {
         <div className={styles.pane} style={{ display: workTab === 'code' ? 'flex' : 'none' }}>
           <CodePane />
         </div>
+
+        {/* 控制台抽屉：浮在 preview / code 之上，consoleOpen 为真时显示 */}
+        <ConsolePanel />
       </div>
     </section>
   )

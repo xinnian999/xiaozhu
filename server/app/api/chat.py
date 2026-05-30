@@ -129,7 +129,7 @@ def build_tools(db: AsyncSession, session_id: str) -> list:
 
 # ── Agentic Loop ────────────────────────────────────────────────────────────────
 
-async def claude_agent(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, None]:
+async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, None]:
     """工具调用循环：LLM 决策 → 执行工具 → 回传结果 → LLM 继续，直到没有工具调用。"""
     # 每请求构造一次工具 + bind_tools，因为工具闭包了请求级别的 db / session_id
     tools = build_tools(db, req.session_id)
@@ -168,6 +168,7 @@ async def claude_agent(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str
             messages.append(response)  # 把回复追加进历史
 
             if not response.tool_calls:
+                print(f"[response] content={response.content} (未调用工具)")
                 # 绑工具后 content 可能是 list[{"type": "text", "text": "..."}]
                 # 需要把所有 text block 拼起来
                 if isinstance(response.content, str):
@@ -236,6 +237,8 @@ async def chat(
     req: ChatRequest,
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
+    """SSE 流式对话。"""
+
     # 先校验 session 存在 —— 否则后面工具一调用就报外键错，体验差。
     # 这一步是普通查询，发生在 StreamingResponse 开始之前，
     # 报 404 用 HTTPException 是标准 FastAPI 写法。
@@ -246,7 +249,7 @@ async def chat(
     # 注意：StreamingResponse 拿到的是生成器，FastAPI 会保持 db 依赖存活
     # 直到生成器耗尽（即整个 SSE 流结束），所以工具里使用 db 是安全的。
     return StreamingResponse(
-        claude_agent(req, db),
+        agent_loop(req, db),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

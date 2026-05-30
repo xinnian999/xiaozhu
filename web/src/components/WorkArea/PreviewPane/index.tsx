@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { Loader2, AlertTriangle } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
-import { useUIStore, type WCStatus } from '@/store/ui'
+import { useUIStore, type WCStatus, type LogLevel } from '@/store/ui'
 import { bootAndRun, syncFiles, isBooted, isDevRunning } from '@/lib/webcontainer'
 import styles from './index.module.scss'
 
@@ -23,9 +23,14 @@ export default function PreviewPane() {
   const setWCUrl = useUIStore((s) => s.setWCUrl)
   const setWCLog = useUIStore((s) => s.setWCLog)
   const setWCError = useUIStore((s) => s.setWCError)
+  const pushWcLog = useUIStore((s) => s.pushWcLog)
+  // 刷新计数器：变化即触发 iframe 重新挂载
+  const reloadTick = useUIStore((s) => s.previewReloadTick)
 
   // 标记上次同步的版本号，避免同 version 反复 sync
   const syncedVersionRef = useRef<string | null>(null)
+  // 当前 iframe 的引用，用于校验 postMessage 来源
+  const iframeRef = useRef<HTMLIFrameElement | null>(null)
 
   // —— 首次启动：等 files 到位再 boot ——
   // files 从后端拉取是异步的，组件挂载时 currentVersion.files 可能还是空对象，
@@ -64,6 +69,22 @@ export default function PreviewPane() {
       })
   }, [currentVersion.id, currentVersion.files, setWCStatus, setWCLog, setWCError])
 
+  // —— 浏览器 console 桥接：iframe → 父页面 ——
+  // iframe 里注入的脚本会 postMessage({ type: 'vibuild-console', level, text })，
+  // 这里挂全局监听，把它推到控制台面板。
+  useEffect(() => {
+    const handle = (e: MessageEvent) => {
+      const data = e.data
+      if (!data || data.type !== 'vibuild-console') return
+      // 来源校验：必须来自当前 iframe 的 contentWindow，防止其他 tab 的脏数据
+      if (iframeRef.current && e.source !== iframeRef.current.contentWindow) return
+      const level: LogLevel = ['log', 'info', 'warn', 'error'].includes(data.level) ? data.level : 'log'
+      pushWcLog({ level, text: String(data.text ?? '') })
+    }
+    window.addEventListener('message', handle)
+    return () => window.removeEventListener('message', handle)
+  }, [pushWcLog])
+
   const showIframe = wcUrl && (wcStatus === 'ready' || wcStatus === 'syncing')
   const isErrored = wcStatus === 'error'
 
@@ -86,7 +107,12 @@ export default function PreviewPane() {
 
           <div className={styles.viewport}>
             {showIframe && (
+              // key 里带上 reloadTick：每次刷新按钮 +1 都会让 React 卸掉重挂，
+              // iframe 整个 reset、重新拉一次 wcUrl，比 contentWindow.location.reload()
+              // 更稳（后者跨域会报安全错误）。
               <iframe
+                key={`${wcUrl}-${reloadTick}`}
+                ref={iframeRef}
                 src={wcUrl!}
                 className={styles.iframe}
                 title="预览"

@@ -16,6 +16,14 @@ export default function TabBar() {
   const setWorkTab = useUIStore((s) => s.setWorkTab)
   const chatCollapsed = useUIStore((s) => s.chatCollapsed)
   const toggleChat = useUIStore((s) => s.toggleChatCollapsed)
+  // 控制台抽屉开关：终端按钮亮起表示当前打开
+  const consoleOpen = useUIStore((s) => s.consoleOpen)
+  const toggleConsole = useUIStore((s) => s.toggleConsole)
+  const logCount = useUIStore((s) => s.wcLogs.length)
+  // 刷新预览：bump 一下 store 里的计数，PreviewPane 会重新挂载 iframe
+  const reloadPreview = useUIStore((s) => s.reloadPreview)
+  // 预览只在 dev server ready 时才有 URL，没有 URL 时刷新没意义
+  const wcUrl = useUIStore((s) => s.wcUrl)
   const session = useSessionStore((s) => s.session)
   const currentVersion = useSessionStore((s) => s.currentVersion())
 
@@ -64,7 +72,13 @@ export default function TabBar() {
           <button className={styles.urlIconBtn} aria-label="前进">
             <ChevronLeft size={13} style={{ transform: 'rotate(180deg)' }} />
           </button>
-          <button className={styles.urlIconBtn} aria-label="刷新">
+          <button
+            className={styles.urlIconBtn}
+            onClick={reloadPreview}
+            disabled={!wcUrl}
+            aria-label="刷新预览"
+            title="刷新预览"
+          >
             <RotateCw size={12} />
           </button>
 
@@ -81,8 +95,18 @@ export default function TabBar() {
       </div>
 
       <div className={styles.right}>
-        <button className={styles.iconBtn} aria-label="终端" title="终端">
+        <button
+          className={`${styles.iconBtn} ${consoleOpen ? styles.iconBtnActive : ''}`}
+          onClick={toggleConsole}
+          aria-label="终端"
+          title={consoleOpen ? '关闭控制台' : '打开控制台'}
+        >
           <Terminal size={14} />
+          {logCount > 0 && !consoleOpen && (
+            <span className={styles.iconBadge} aria-hidden>
+              {logCount > 99 ? '99+' : logCount}
+            </span>
+          )}
         </button>
         <button className={styles.iconBtn} aria-label="更多" title="更多">
           <MoreVertical size={14} />

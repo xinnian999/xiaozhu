@@ -1,0 +1,200 @@
+@use '@/styles/variables' as *;
+@use '@/styles/common' as *;
+
+// ============================================
+// 控制台底部抽屉：固定在 WorkArea 底部，覆盖 preview/code 内容
+// 高度由 store 控制，可拖拽调整；不再写死 height
+// ============================================
+.panel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  // 写死深色：浅色主题下也保持深色，避免 xterm 灰色文字 + 浅底导致不可读
+  background: #1a1a1c;
+  color: #d4d4d4;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.3);
+  // 不要把 height 也加入 transition，否则拖拽会有惯性感
+  animation: console-slide-up $dur-base $ease-out;
+
+  // 在 panel 内重写主题变量，让下面用 var(--color-*) 的子组件也跟着变深色
+  --color-bg: #1a1a1c;
+  --color-bg-soft: #1f1f22;
+  --color-bg-hover: rgba(255, 255, 255, 0.06);
+  --color-border: rgba(255, 255, 255, 0.08);
+  --color-text: #e4e4e7;
+  --color-text-dim: #b4b4b8;
+  --color-text-mute: #8a8a90;
+  --color-text-faint: #5e5e64;
+
+  // ── 顶部拖拽条 ──
+  // 紧贴 panel 顶部，4px 高，悬停/拖拽时高亮成 accent
+  .resizer {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: -2px;
+    height: 6px;
+    cursor: ns-resize;
+    z-index: 1;
+    // 用一根细线指示拖拽位置，悬停加粗成 accent
+    &::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 2px;
+      height: 2px;
+      background: transparent;
+      transition: background $dur-base $ease-out;
+    }
+
+    &:hover::after,
+    &.resizerActive::after {
+      background: var(--color-accent);
+    }
+  }
+
+  .header {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: $tab-h;
+    padding: 0 $space-2 0 $space-3;
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-bg-soft);
+
+    .tabs {
+      display: flex;
+      align-items: center;
+      gap: $space-1;
+
+      .tab {
+        @include button-reset;
+        display: inline-flex;
+        align-items: center;
+        gap: $space-1;
+        padding: $space-1 $space-2;
+        border-radius: $radius-sm;
+        font-size: $fs-11;
+        color: var(--color-text-mute);
+        transition: color $dur-base $ease-out, background $dur-base $ease-out;
+
+        &:hover {
+          background: var(--color-bg-hover);
+          color: var(--color-text-dim);
+        }
+
+        &.tabActive {
+          color: var(--color-text);
+          background: var(--color-bg-hover);
+        }
+
+        .tabCount {
+          font-family: var(--font-mono);
+          font-size: $fs-10;
+          color: var(--color-text-faint);
+          padding: 0 $space-1;
+          border-radius: $radius-xs;
+          background: var(--color-bg);
+        }
+      }
+    }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: $space-1;
+
+      .iconBtn {
+        @include button-reset;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 26px;
+        border-radius: $radius-sm;
+        color: var(--color-text-mute);
+        transition: color $dur-base $ease-out, background $dur-base $ease-out;
+
+        &:hover {
+          background: var(--color-bg-hover);
+          color: var(--color-text);
+        }
+      }
+    }
+  }
+
+  // .body：内容容器；本身不滚动，由子面板（NodeTerminal / 日志列表）各自决定
+  .body {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    position: relative;
+  }
+
+  // 浏览器日志列表：负责自己的滚动
+  .logList {
+    height: 100%;
+    overflow-y: auto;
+    padding: $space-2 0;
+    font-family: var(--font-mono);
+    font-size: $fs-11;
+    line-height: $lh-snug;
+    @include hide-scrollbar;
+  }
+
+  .empty {
+    margin: $space-6 0;
+    text-align: center;
+    color: var(--color-text-faint);
+    font-size: $fs-12;
+  }
+
+  // ── 单行日志（浏览器 tab 用）──
+  .row {
+    display: flex;
+    align-items: flex-start;
+    gap: $space-2;
+    padding: 2px $space-3;
+    color: var(--color-text-dim);
+    border-left: 2px solid transparent;
+
+    &:hover {
+      background: var(--color-bg-hover);
+    }
+
+    // 级别染色
+    &.row_warn {
+      color: #d9a25b;
+      border-left-color: rgba(217, 162, 91, 0.4);
+    }
+
+    &.row_error {
+      color: #e07070;
+      border-left-color: rgba(224, 112, 112, 0.4);
+      background: rgba(224, 112, 112, 0.04);
+    }
+
+    .rowText {
+      margin: 0;
+      flex: 1;
+      min-width: 0;
+      white-space: pre-wrap;
+      word-break: break-all;
+      font-family: inherit;
+      font-size: inherit;
+      line-height: inherit;
+    }
+  }
+}
+
+@keyframes console-slide-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}

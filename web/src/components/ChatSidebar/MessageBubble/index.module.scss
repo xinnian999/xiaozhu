@@ -129,3 +129,38 @@
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
 }
+
+// ============================================
+// 工具调用进度卡：紧凑细窄，避免抢正常气泡的视觉重量
+// ============================================
+.toolChip {
+  display: inline-flex;
+  align-items: center;
+  gap: $space-2;
+  margin-bottom: $space-3;
+  padding: $space-1 $space-2;
+  border: 1px dashed var(--color-border);
+  border-radius: $radius-sm;
+  background: var(--color-bg-soft);
+  font-family: var(--font-mono);
+  font-size: $fs-11;
+  line-height: $lh-snug;
+  color: var(--color-text-mute);
+  // 进入时轻微淡入，避免成片闪烁
+  animation: tool-chip-in $dur-base $ease-out;
+
+  .toolChipIcon {
+    display: inline-flex;
+    color: var(--color-accent);
+  }
+
+  .toolChipLabel {
+    @include truncate;
+    max-width: 260px;
+  }
+}
+
+@keyframes tool-chip-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
+}

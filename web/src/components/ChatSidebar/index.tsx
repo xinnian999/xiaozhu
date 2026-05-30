@@ -22,6 +22,9 @@ export default function ChatSidebar() {
   const mobileChatOpen = useUIStore((s) => s.mobileChatOpen)
   const setMobileChatOpen = useUIStore((s) => s.setMobileChatOpen)
   const chatCollapsed = useUIStore((s) => s.chatCollapsed)
+  // 本轮如果改了文件，结束时强制刷一下预览
+  // 原因：vite HMR 对 index.html 改动不响应，React Fast Refresh 也偶尔失败
+  const reloadPreview = useUIStore((s) => s.reloadPreview)
 
   const [draft, setDraft] = useState('')
   // 首条消息自动建会话期间禁用输入，避免重复点
@@ -54,6 +57,9 @@ export default function ChatSidebar() {
     // 1. 把用户消息追加到列表
     appendMessage(makeMessage('user', text))
 
+    // 本轮是否有文件改动 —— 用来决定结束时要不要刷新预览
+    let filesChanged = false
+
     // 2. 流式消费 SSE，逐 token 累积到 streamingText
     let accumulated = ''
     try {
@@ -61,11 +67,21 @@ export default function ChatSidebar() {
         if (event.type === 'message_delta') {
           accumulated += event.text
           setStreamingText(accumulated)
+        } else if (event.type === 'tool_call') {
+          // 工具调用 → 在对话流里插一条"进度卡"消息，让用户看到 AI 正在做什么
+          // 不入库（后端也不存），刷新会消失，符合"过程信息"语义
+          appendMessage(makeMessage('assistant', '', {
+            kind: 'tool',
+            toolName: event.name,
+            toolArgs: event.args as Record<string, unknown>,
+          }))
         } else if (event.type === 'file_write') {
           // LLM 写文件 —— 更新本地 files 快照，PreviewPane 会自动 syncFiles
           applyFileWrite(event.path, event.content)
+          filesChanged = true
         } else if (event.type === 'file_delete') {
           applyFileDelete(event.path)
+          filesChanged = true
         } else if (event.type === 'error') {
           toast(`AI 错误：${event.message}`)
           break
@@ -76,6 +92,12 @@ export default function ChatSidebar() {
     } finally {
       // 3. 无论成功还是出错，都把累积内容固化为一条 assistant 消息
       commitStreaming()
+      // 4. 文件有变化 → 流结束后强制刷一次预览。
+      //    300ms 延迟是为了等最后一次 file_write 触发的 syncFiles 落盘，
+      //    否则刷新可能赶在 wc.fs.writeFile 之前，看到的还是旧版。
+      if (filesChanged) {
+        setTimeout(reloadPreview, 300)
+      }
     }
   }
 

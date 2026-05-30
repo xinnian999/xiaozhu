@@ -122,9 +122,14 @@
         border-radius: $radius-xs;
         color: var(--color-text-mute);
 
-        &:hover {
+        &:hover:not(:disabled) {
           color: var(--color-text);
           background: var(--color-bg-hover);
+        }
+
+        &:disabled {
+          opacity: 0.4;
+          cursor: not-allowed;
         }
       }
 
@@ -182,6 +187,7 @@
 
     .iconBtn {
       @include button-reset;
+      position: relative;
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -193,6 +199,30 @@
       &:hover {
         background: var(--color-bg-hover);
         color: var(--color-text);
+      }
+
+      // 控制台打开时，终端按钮高亮
+      &.iconBtnActive {
+        color: var(--color-accent);
+        background: var(--color-accent-fade);
+      }
+
+      // 角标：未读日志数（仅在控制台关闭时显示）
+      .iconBadge {
+        position: absolute;
+        top: -2px;
+        right: -2px;
+        min-width: 14px;
+        height: 14px;
+        padding: 0 3px;
+        border-radius: $radius-full;
+        background: var(--color-accent);
+        color: white;
+        font-family: var(--font-mono);
+        font-size: 9px;
+        font-weight: $fw-semibold;
+        line-height: 14px;
+        text-align: center;
       }
     }
   }

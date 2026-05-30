@@ -7,10 +7,50 @@ import type { FileMap } from '@/types/project'
 // - 整页只能 boot 一次，再次 boot 会抛错，所以用模块级单例
 // - 暴露 boot/install/dev/syncFiles 四个高层动作
 // - 通过事件回调把状态变化报告给上层，避免循环依赖 store
+//
+// 关于 node 进程输出：我们不再自己解析 ANSI / 拆行，那条路坑太多
+// （进度条、清屏、跨 chunk 拼接……）。改成把 raw 字节流转发出去，
+// 由 xterm.js 负责渲染 —— 它本来就是终端模拟器。
+//
+// 订阅模型：进程输出 → 写入 ringBuffer + 通知 listeners。
+// 终端组件挂载时 attach(listener)：先重放 ringBuffer 把历史补齐，再实时收新数据。
 
 let containerPromise: Promise<WebContainer> | null = null
 let devServerStarted = false
 let lastFiles: FileMap | null = null  // 上次 mount 的文件快照，用于增量 diff
+
+// ── 输出广播总线 ───────────────────────────────────────────────
+// 所有 node 进程的 stdout/stderr 都汇入这一个总线。
+// xterm 视角下不区分 install / dev —— 那只是同一个 shell 的不同阶段，
+// 统一显示就是真实的终端体验。
+type OutputListener = (chunk: string) => void
+const listeners = new Set<OutputListener>()
+// 历史缓冲：保留最近若干字节，新订阅者可以拿到一份回放
+const HISTORY_BYTES = 64 * 1024
+let history = ''
+
+function broadcast(chunk: string) {
+  // 追加到历史，超长就截掉前面
+  history += chunk
+  if (history.length > HISTORY_BYTES) {
+    history = history.slice(history.length - HISTORY_BYTES)
+  }
+  for (const fn of listeners) {
+    try {
+      fn(chunk)
+    } catch (e) {
+      console.error('output listener error', e)
+    }
+  }
+}
+
+/** 订阅 node 进程输出。返回取消订阅函数。
+ *  订阅时立即回调一次历史 buffer，确保新挂载的终端不会"丢前面的日志"。 */
+export function subscribeProcessOutput(listener: OutputListener): () => void {
+  if (history) listener(history)
+  listeners.add(listener)
+  return () => listeners.delete(listener)
+}
 
 /** 启动（首次调用真正 boot，之后返回同一个实例） */
 export function getContainer(): Promise<WebContainer> {
@@ -42,6 +82,75 @@ function toFileTree(files: FileMap): FileSystemTree {
   return tree
 }
 
+// ── 浏览器 console 桥接脚本 ────────────────────────────────────
+// 注入到 iframe 内的 index.html 里：拦截 console.* + 全局错误事件，
+// 通过 postMessage 把日志转发给父页面（即我们的 UI）。
+// 必须先于业务代码执行，所以放在 <head> 末尾。
+//
+// 设计要点：
+// - 用 __vibuildConsoleBridged 旗标避免重复绑定（HMR 重新执行时）
+// - args 序列化要兜底，遇到 Error / 循环引用都不能抛
+// - 不挡 console 原行为：调完 post 后照常调原方法
+const CONSOLE_BRIDGE_SCRIPT = `<script>(function(){
+  if (window.__vibuildConsoleBridged) return;
+  window.__vibuildConsoleBridged = true;
+  function stringify(a){
+    if (a instanceof Error) return a.stack || a.message;
+    if (typeof a === 'object' && a !== null) {
+      try { return JSON.stringify(a); } catch(e) { return String(a); }
+    }
+    return String(a);
+  }
+  function post(level, args){
+    try {
+      window.parent.postMessage({
+        type: 'vibuild-console',
+        level: level,
+        text: Array.prototype.map.call(args, stringify).join(' ')
+      }, '*');
+    } catch(e) {}
+  }
+  ['log','info','warn','error','debug'].forEach(function(lvl){
+    var orig = console[lvl];
+    console[lvl] = function(){ post(lvl === 'debug' ? 'log' : lvl, arguments); orig.apply(console, arguments); };
+  });
+  window.addEventListener('error', function(e){
+    post('error', [e.message + ' (' + (e.filename||'') + ':' + e.lineno + ')']);
+  });
+  window.addEventListener('unhandledrejection', function(e){
+    post('error', ['Unhandled rejection: ' + stringify(e.reason)]);
+  });
+})();</script>`
+
+/** 把 console bridge 注入到 index.html 里（如果还没注入） */
+function injectConsoleBridge(files: FileMap): FileMap {
+  const html = files['index.html']
+  if (!html) return files
+  if (html.includes('__vibuildConsoleBridged')) return files  // 已注入过
+  // 优先放在 <head> 结束前；没有 </head> 就放在 <body> 前
+  const next = html.includes('</head>')
+    ? html.replace('</head>', `  ${CONSOLE_BRIDGE_SCRIPT}\n  </head>`)
+    : html.replace('<body>', `${CONSOLE_BRIDGE_SCRIPT}\n<body>`)
+  return { ...files, 'index.html': next }
+}
+
+/** 把一个进程的输出转发到总线，并在 UI 上贴个分隔横幅。
+ *  banner 让用户知道"现在是在 install 阶段还是 dev 阶段"。 */
+function pipeRawToBus(
+  output: ReadableStream<string>,
+  banner: string,
+) {
+  // \r\n 是 xterm 期望的换行；颜色码让 banner 醒目些
+  broadcast(`\x1b[36m\r\n— ${banner} —\x1b[0m\r\n`)
+  return output.pipeTo(
+    new WritableStream({
+      write(chunk) {
+        broadcast(chunk.toString())
+      },
+    }),
+  )
+}
+
 /** 全量 mount（首次启动 + npm install + dev server） */
 export async function bootAndRun(
   files: FileMap,
@@ -57,30 +166,24 @@ export async function bootAndRun(
     const wc = await getContainer()
 
     hooks.onStatus('mounting')
-    await wc.mount(toFileTree(files))
-    lastFiles = { ...files }
+    // 把 console bridge 脚本注入到 index.html，让 iframe 里的业务代码 console
+    // 都能被父页面收到
+    const filesWithBridge = injectConsoleBridge(files)
+    await wc.mount(toFileTree(filesWithBridge))
+    lastFiles = { ...filesWithBridge }
 
     // 监听后续 server-ready 事件（dev 启动后 vite 端口 ready 时触发）
     wc.on('server-ready', (_port, url) => {
       hooks.onUrl(url)
       hooks.onStatus('ready')
+      hooks.onLog('dev server ready')
     })
 
     // npm install
     hooks.onStatus('installing')
+    hooks.onLog('npm install')
     const install = await wc.spawn('npm', ['install'])
-    install.output.pipeTo(
-      new WritableStream({
-        write(chunk) {
-          const text = chunk.toString()
-          // 完整日志打到 console，方便排查 npm install 失败的真实原因
-          console.log('[npm install]', text)
-          // UI 上只展示最后一行的摘要
-          const line = text.split('\n').filter(Boolean).pop()
-          if (line) hooks.onLog(line.slice(0, 80))
-        },
-      }),
-    )
+    pipeRawToBus(install.output, 'npm install')
     const installCode = await install.exit
     if (installCode !== 0) {
       throw new Error(`npm install 失败 (exit ${installCode})`)
@@ -88,18 +191,10 @@ export async function bootAndRun(
 
     // npm run dev
     hooks.onStatus('starting')
+    hooks.onLog('npm run dev')
     const dev = await wc.spawn('npm', ['run', 'dev'])
     devServerStarted = true
-    dev.output.pipeTo(
-      new WritableStream({
-        write(chunk) {
-          const text = chunk.toString()
-          console.log('[npm dev]', text)
-          const line = text.split('\n').filter(Boolean).pop()
-          if (line) hooks.onLog(line.slice(0, 80))
-        },
-      }),
-    )
+    pipeRawToBus(dev.output, 'npm run dev')
     // 不 await dev.exit —— 它是常驻进程
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
@@ -114,6 +209,8 @@ export async function syncFiles(
   hooks: { onLog: (line: string) => void },
 ): Promise<{ added: number; modified: number; removed: number }> {
   const wc = await getContainer()
+  // 同步阶段也确保 index.html 始终带 bridge —— 否则 LLM 改 html 会把它覆盖掉
+  const filesWithBridge = injectConsoleBridge(files)
   const prev = lastFiles ?? {}
 
   let added = 0
@@ -121,7 +218,7 @@ export async function syncFiles(
   let removed = 0
 
   // 新增 + 修改
-  for (const [path, content] of Object.entries(files)) {
+  for (const [path, content] of Object.entries(filesWithBridge)) {
     if (!(path in prev)) {
       added++
     } else if (prev[path] !== content) {
@@ -143,7 +240,7 @@ export async function syncFiles(
 
   // 删除
   for (const path of Object.keys(prev)) {
-    if (!(path in files)) {
+    if (!(path in filesWithBridge)) {
       try {
         await wc.fs.rm(path)
         removed++
@@ -153,7 +250,7 @@ export async function syncFiles(
     }
   }
 
-  lastFiles = { ...files }
+  lastFiles = { ...filesWithBridge }
   hooks.onLog(`synced +${added} ~${modified} -${removed}`)
 
   return { added, modified, removed }

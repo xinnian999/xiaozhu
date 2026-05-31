@@ -1,8 +1,8 @@
 import { MoreHorizontal, Sun, Moon, Menu } from 'lucide-react'
-import { useSessionStore } from '@/store/session'
 import { useThemeStore } from '@/store/theme'
 import { useUIStore } from '@/store/ui'
 import ProjectMenu from './ProjectMenu'
+import VersionMenu from './VersionMenu'
 import styles from './index.module.scss'
 
 // ============================================
@@ -32,7 +32,7 @@ export default function TopBar() {
 
       <div className={styles.center}>
         <ProjectMenu />
-        {/* VersionMenu 留待项目生成功能接入后恢复 */}
+        <VersionMenu />
       </div>
 
       <div className={styles.right}>

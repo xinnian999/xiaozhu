@@ -204,19 +204,6 @@ export default function PreviewPane() {
 }
 
 // ============================================
-// 状态徽章：浏览器条上的小圆点 + 文字
-// ============================================
-function StatusBadge({ status }: { status: WCStatus }) {
-  const label = STATUS_LABELS[status]
-  return (
-    <span className={`${styles.statusBadge} ${styles[`statusBadge_${status}`]}`}>
-      <i className={styles.statusDot} />
-      {label}
-    </span>
-  )
-}
-
-// ============================================
 // boot/install/start 进行时的 overlay
 // ============================================
 function BootingBlock({ status, log }: { status: WCStatus; log: string }) {
@@ -262,15 +249,4 @@ function ErrorBlock({ error }: { error: string | null }) {
       </p>
     </div>
   )
-}
-
-const STATUS_LABELS: Record<WCStatus, string> = {
-  idle: '未启动',
-  booting: '启动中',
-  mounting: '挂载中',
-  installing: '安装中',
-  starting: '启动中',
-  ready: '运行中',
-  syncing: '同步中',
-  error: '失败',
 }

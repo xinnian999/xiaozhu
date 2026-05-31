@@ -11,31 +11,24 @@
     gap: $space-2;
     padding: $space-1 $space-3;
     border-radius: $radius-md;
-    color: var(--color-text);
+    color: var(--color-text-dim);
     font-size: $fs-13;
     font-weight: $fw-medium;
     transition: color $dur-base $ease-out, background $dur-base $ease-out;
-    max-width: min(320px, 42vw);
 
     &:hover,
     &.triggerOpen {
+      color: var(--color-text);
       background: var(--color-bg-hover);
+    }
+
+    .triggerIcon {
+      flex-shrink: 0;
+      color: var(--color-text-mute);
     }
 
     .label {
       @include truncate;
-    }
-
-    .versionTag {
-      flex-shrink: 0;
-      font-family: var(--font-mono);
-      font-size: $fs-10;
-      font-weight: $fw-semibold;
-      letter-spacing: 0.05em;
-      padding: 2px $space-2;
-      background: var(--color-bg-elev);
-      color: var(--color-text-dim);
-      border-radius: $radius-xs;
     }
 
     .caret {
@@ -81,60 +74,113 @@
       line-height: $lh-snug;
     }
 
-    .tree {
+    // 加载中 / 空态提示
+    .hint {
+      margin: 0;
+      padding: $space-3;
+      text-align: center;
+      font-size: $fs-12;
+      color: var(--color-text-mute);
+    }
+
+    .list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
       max-height: min(420px, 60vh);
       overflow-y: auto;
-      padding: $space-1 $space-1 $space-2;
       @include hide-scrollbar;
 
-      .row {
+      .item {
         display: flex;
-        align-items: stretch;
-        gap: 2px;
-      }
+        align-items: center;
+        gap: $space-2;
+        padding: $space-2 $space-3;
+        border-radius: $radius-md;
+        transition: background $dur-base $ease-out;
 
-      // 每一级缩进的 rail 容器
-      .indent {
-        flex-shrink: 0;
-        display: flex;
-        align-items: stretch;
-      }
+        &:hover {
+          background: var(--color-bg-hover);
+        }
 
-      // 单个缩进槽（一层 = 一个槽）
-      .indentSlot {
-        position: relative;
-        width: 18px;
-        flex-shrink: 0;
-        display: flex;
-        justify-content: center;
-        align-items: stretch;
-      }
+        &.itemCurrent {
+          background: var(--color-bg-soft);
+        }
 
-      // 贯穿型竖线（中间层 / 非分叉起点）
-      .vline {
-        width: 1px;
-        background: var(--color-border);
-      }
+        // 版本号标签 vN
+        .versionTag {
+          flex-shrink: 0;
+          font-family: var(--font-mono);
+          font-size: $fs-10;
+          font-weight: $fw-semibold;
+          letter-spacing: 0.05em;
+          padding: 2px $space-2;
+          background: var(--color-bg-elev);
+          color: var(--color-text-dim);
+          border-radius: $radius-xs;
+        }
 
-      // 分叉拐角（└）
-      .elbow {
-        position: absolute;
-        top: 0;
-        left: 50%;
-        width: 12px;
-        height: 22px;
-        color: var(--color-text-faint);
-        font-family: var(--font-mono);
-        font-size: 14px;
-        line-height: 22px;
-        // 让"└"贴近卡片
-        transform: translate(-1px, 6px);
-        pointer-events: none;
-      }
+        .itemMain {
+          flex: 1;
+          min-width: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+        }
 
-      .cardWrap {
-        flex: 1;
-        min-width: 0;
+        .itemName {
+          font-size: $fs-13;
+          color: var(--color-text);
+          @include truncate;
+        }
+
+        .itemMeta {
+          font-size: $fs-10;
+          color: var(--color-text-mute);
+        }
+
+        // 当前 tip 标记
+        .currentBadge {
+          flex-shrink: 0;
+          display: flex;
+          align-items: center;
+          gap: 3px;
+          font-size: $fs-10;
+          font-weight: $fw-medium;
+          color: var(--color-accent);
+        }
+
+        // 回滚按钮
+        .restoreBtn {
+          @include button-reset;
+          flex-shrink: 0;
+          display: flex;
+          align-items: center;
+          gap: 3px;
+          padding: $space-1 $space-2;
+          border-radius: $radius-sm;
+          border: 1px solid var(--color-border);
+          color: var(--color-text-dim);
+          font-size: $fs-10;
+          font-weight: $fw-medium;
+          transition: background $dur-base $ease-out, color $dur-base $ease-out,
+            border-color $dur-base $ease-out;
+
+          &:hover:not(:disabled) {
+            background: var(--color-bg-hover);
+            color: var(--color-text);
+            border-color: var(--color-accent);
+          }
+
+          &:disabled {
+            opacity: 0.5;
+            cursor: default;
+          }
+
+          .spin {
+            animation: vm-spin 0.8s linear infinite;
+          }
+        }
       }
     }
   }
@@ -146,11 +192,16 @@
   }
 }
 
+@keyframes vm-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+// ── 响应式（移动端）─────────────────────────────────────────────
 @include mobile {
   .menu {
     .trigger {
-      max-width: 160px;
-
       .label {
         font-size: $fs-12;
       }

@@ -50,7 +50,8 @@ class Session(Base):
 # from_attributes=True：允许 Pydantic 直接从 ORM 对象的属性读字段，
 # 而不要求传入字典。这样可以直接 SessionRead.model_validate(orm_obj)。
 
-from pydantic import BaseModel  # noqa: E402（放在下面是为了阅读顺序清晰）
+# 放在文件下半部是为了阅读顺序清晰（先 ORM 再 Schema），E402 在此豁免
+from pydantic import BaseModel  # noqa: E402
 
 
 class SessionCreate(BaseModel):

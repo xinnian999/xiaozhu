@@ -25,6 +25,7 @@ from app.models.file import File
 # （那边的 SystemMessage/HumanMessage 是 LLM 对话消息，这里的是数据库行）
 from app.models.message import Message as DBMessage
 from app.models.session import Session
+from app.versioning import snapshot_current_files
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
@@ -210,6 +211,9 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
 
     # 累积本轮 assistant 的最终文本，用于结束时入库
     final_assistant_text = ""
+    # 本轮是否真的写过文件 —— 只有写过才在结束时打一个版本快照，
+    # 纯聊天 / 报错空转的轮次不该产生空版本。
+    wrote_files = False
 
     # 硬性轮次上限：prompt 让 agent「最多修 3 轮」是软约束，模型未必听话。
     # 加一个兜底计数，防止「写错→检查→修错→再检查→……」无限烧 token。
@@ -290,6 +294,7 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
                 # write_file 落库成功后，立刻把整文件推给前端，
                 # 前端会 mount 到 WebContainer 触发 Vite 热更新（渐进式预览的核心爽点）。
                 if name == "write_file":
+                    wrote_files = True
                     yield sse({
                         "type": "file_write",
                         "path": args["path"],
@@ -304,6 +309,13 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
                 text=final_assistant_text,
             ))
             await db.commit()
+
+        # 本轮若改动过文件，把当前 files 全量快照成一个新版本（单线递增）。
+        # summary 用这轮用户的需求当说明，列表 UI 里好认。
+        if wrote_files:
+            await snapshot_current_files(
+                db, req.session_id, summary=req.message[:100]
+            )
 
         yield sse({"type": "done"})
 

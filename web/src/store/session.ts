@@ -50,6 +50,8 @@ type SessionState = {
   applyFileWrite: (path: string, content: string) => void
   /** SSE 收到 file_delete：从当前会话的 files 移除 */
   applyFileDelete: (path: string) => void
+  /** 用一组文件整体替换当前会话的 files（回滚到某版本时用） */
+  replaceFiles: (files: Record<string, string>) => void
 
   activeSession: () => ChatSession | null
 
@@ -288,6 +290,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         const { [path]: _omit, ...rest } = sess.files
         return { ...sess, files: rest, versionId: sess.versionId + 1 }
       }),
+    }))
+  },
+
+  replaceFiles: (files) => {
+    const id = get().activeId
+    if (!id) return
+    // 整体替换 files 并 +versionId，PreviewPane 监听到 currentVersion.files 变化后
+    // 会增量同步进 WebContainer（不在这里碰容器，保持 store 纯数据）。
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === id ? { ...sess, files, versionId: sess.versionId + 1 } : sess,
+      ),
     }))
   },
 

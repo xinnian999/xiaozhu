@@ -78,8 +78,37 @@ export async function listSessionFiles(sessionId: string): Promise<Record<string
   return map
 }
 
-// ── Messages ───────────────────────────────────────────────────
+// ── Versions（版本历史：单线递增、整快照、回滚即新版）──────────
 
+export type ApiVersion = {
+  id: number
+  session_id: string
+  seq: number
+  summary: string | null
+  created_at: string
+}
+
+/** 拉取一个 session 的版本列表（后端按 seq 倒序，最新在前）。 */
+export async function listVersions(sessionId: string): Promise<ApiVersion[]> {
+  const { data } = await http.get<ApiVersion[]>(`/api/sessions/${sessionId}/versions`)
+  return data
+}
+
+/** 回滚到指定版本：后端用该版本快照覆盖当前文件并 append 新版本，
+ *  返回回滚后的全部文件，整理成 {path: content} 供前端替换并重挂预览。 */
+export async function restoreVersion(
+  sessionId: string,
+  versionId: number,
+): Promise<Record<string, string>> {
+  const { data } = await http.post<ApiFile[]>(
+    `/api/sessions/${sessionId}/versions/${versionId}/restore`,
+  )
+  const map: Record<string, string> = {}
+  for (const f of data) map[f.path] = f.content
+  return map
+}
+
+// ── Messages ───────────────────────────────────────────────────
 export type ApiMessage = {
   id: number
   session_id: string

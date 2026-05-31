@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ChevronDown, History, RotateCcw, Loader2, Check } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
 import { useClickOutside } from '@/hooks/useClickOutside'
-import { listVersions, restoreVersion, type ApiVersion } from '@/lib/api'
+import { listVersions, type ApiVersion } from '@/lib/api'
 import { toast } from '@/lib/toast'
 import styles from './index.module.scss'
 
@@ -22,7 +22,7 @@ export default function VersionMenu() {
   const rootRef = useRef<HTMLDivElement>(null)
 
   const activeId = useSessionStore((s) => s.activeId)
-  const replaceFiles = useSessionStore((s) => s.replaceFiles)
+  const rollbackToVersion = useSessionStore((s) => s.rollbackToVersion)
 
   const close = useCallback(() => setOpen(false), [])
   useClickOutside(rootRef, close)
@@ -49,8 +49,8 @@ export default function VersionMenu() {
   const handleRestore = async (v: ApiVersion) => {
     setRestoringId(v.id)
     try {
-      const files = await restoreVersion(activeId, v.id)
-      replaceFiles(files) // 替换当前文件 → PreviewPane 增量同步到 WebContainer
+      // rollbackToVersion 内部完成：覆盖文件 + append 新版本 + 追加版本卡
+      await rollbackToVersion(v.id)
       toast(`已回滚到 v${v.seq}`)
       await refresh() // 回滚会 append 新版本，刷新列表
     } finally {

@@ -5,6 +5,9 @@ import {
   listSessions,
   listSessionFiles,
   listSessionMessages,
+  saveVersion,
+  restoreVersion,
+  listVersions,
   type ApiSession,
   type ApiMessage,
 } from '@/lib/api'
@@ -66,6 +69,10 @@ type SessionState = {
   setDraft: (path: string, content: string) => void
   /** 丢弃当前会话所有未保存的草稿 */
   discardDrafts: () => void
+  /** 保存草稿：提交后端 upsert + 快照新版本 → 替换 files、清空草稿、追加版本卡 */
+  saveDrafts: () => Promise<void>
+  /** 回滚到指定版本：覆盖 files 并 append 新版本，同时追加一张版本卡 */
+  rollbackToVersion: (versionId: number) => Promise<void>
 
   activeSession: () => ChatSession | null
 
@@ -96,24 +103,34 @@ function fromApi(api: ApiSession): ChatSession {
 
 /** 把后端的 ApiMessage 转成前端 Message 类型。
  *  branchId 现阶段统一 'main'，后端没有这个概念但前端类型要求有。
- *  kind='tool' 的行还原成工具卡（带 toolName/toolArgs），让刷新后能完整回显工具调用。 */
+ *  kind='tool' 还原成工具卡；kind='version' 还原成版本卡（从 tool_args 取 version_id/seq）。 */
 function fromApiMessage(m: ApiMessage): Message {
-  const isTool = m.kind === 'tool'
-  return {
+  const base = {
     id: `srv-${m.id}`,
     role: m.role,
     text: m.text,
     createdAt: new Date(m.created_at).getTime(),
     branchId: 'main',
-    // 普通文本消息不带 kind，保持和 makeMessage 一致；工具行才补齐工具字段
-    ...(isTool
-      ? {
-          kind: 'tool' as const,
-          toolName: m.tool_name ?? undefined,
-          toolArgs: m.tool_args ?? undefined,
-        }
-      : {}),
+  } as const
+
+  if (m.kind === 'tool') {
+    return {
+      ...base,
+      kind: 'tool',
+      toolName: m.tool_name ?? undefined,
+      toolArgs: m.tool_args ?? undefined,
+    }
   }
+  if (m.kind === 'version') {
+    const args = m.tool_args ?? {}
+    return {
+      ...base,
+      kind: 'version',
+      versionId: typeof args.version_id === 'number' ? args.version_id : undefined,
+      versionSeq: typeof args.seq === 'number' ? args.seq : undefined,
+    }
+  }
+  return base
 }
 
 export function makeMessage(
@@ -129,6 +146,12 @@ export function makeMessage(
     branchId: 'main',
     ...extra,
   }
+}
+
+/** 构造一张「版本卡」消息（kind='version'）。AI 流 / 手动保存 / 回滚 三处共用，
+ *  让对话时间线在每次产生新版本时插入一张带回滚按钮的卡片。 */
+export function makeVersionCard(versionId: number, seq: number): Message {
+  return makeMessage('assistant', '', { kind: 'version', versionId, versionSeq: seq })
 }
 
 // EMPTY_VERSION 仅在没有激活 session 时返回，必须是常量 —— 否则 zustand selector
@@ -384,6 +407,34 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         sess.id === id ? { ...sess, drafts: {} } : sess,
       ),
     }))
+  },
+
+  saveDrafts: async () => {
+    const id = get().activeId
+    if (!id) return
+    const sess = get().sessions.find((s) => s.id === id)
+    if (!sess) return
+    const drafts = sess.drafts
+    const count = Object.keys(drafts).length
+    if (count === 0) return
+    // 提交后端：upsert 改动文件 + 快照新版本，换回保存后的全部文件
+    const files = await saveVersion(id, drafts, `手动编辑 ${count} 个文件`)
+    get().replaceFiles(files) // 替换已保存文件 → PreviewPane 同步到新版本
+    get().discardDrafts() // 清空草稿，按钮自动消失
+    // 取最新版本（seq 最大 = 刚建的那个）追加一张版本卡到对话流
+    const vers = await listVersions(id)
+    if (vers[0]) get().appendMessage(makeVersionCard(vers[0].id, vers[0].seq))
+  },
+
+  rollbackToVersion: async (versionId) => {
+    const id = get().activeId
+    if (!id) return
+    // 后端用该版本快照覆盖当前文件并 append 一个新版本，返回回滚后的全部文件
+    const files = await restoreVersion(id, versionId)
+    get().replaceFiles(files)
+    // 回滚也产生新版本，同样追加一张版本卡
+    const vers = await listVersions(id)
+    if (vers[0]) get().appendMessage(makeVersionCard(vers[0].id, vers[0].seq))
   },
 
   activeSession: () => {

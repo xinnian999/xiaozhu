@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.file import File
+from app.models.message import Message
 from app.models.version import Version, VersionFile
 
 
@@ -53,6 +54,18 @@ async def snapshot_current_files(
         for f in files
     ])
 
-    # 5. 一次 commit 把「版本 + 所有文件」作为一个事务整体落库。
+    # 4.5 在对话时间线里追加一条「版本卡」消息（kind='version'）。
+    #     放在同一事务里：版本和它对应的卡消息一起落库。tool_args 复用成卡片负载，
+    #     存 version_id（回滚按钮要用）和 seq（卡片显示 vN）。
+    #     生成 / 保存 / 回滚都走这个函数，所以三处都会自动产生版本卡，不必各写一遍。
+    db.add(Message(
+        session_id=session_id,
+        role="assistant",
+        text="",
+        kind="version",
+        tool_args={"version_id": version.id, "seq": version.seq},
+    ))
+
+    # 5. 一次 commit 把「版本 + 所有文件 + 版本卡消息」作为一个事务整体落库。
     await db.commit()
     return version

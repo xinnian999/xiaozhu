@@ -332,9 +332,13 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
         # 本轮若改动过文件，把当前 files 全量快照成一个新版本（单线递增）。
         # summary 用这轮用户的需求当说明，列表 UI 里好认。
         if wrote_files:
-            await snapshot_current_files(
+            version = await snapshot_current_files(
                 db, req.session_id, summary=req.message[:100]
             )
+            # 推送版本事件，让前端在对话流里实时插入一张「版本卡」（带回滚按钮）。
+            # 版本卡消息本身已由 snapshot_current_files 落库，刷新后也能回显。
+            if version is not None:
+                yield sse({"type": "version", "version_id": version.id, "seq": version.seq})
 
         yield sse({"type": "done"})
 

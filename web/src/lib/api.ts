@@ -37,6 +37,7 @@ export type SSEEvent =
   | { type: 'file_delete'; path: string }
   | { type: 'plan_update'; todos: unknown[] }
   | { type: 'tool_call'; name: string; args: object }
+  | { type: 'version'; version_id: number; seq: number }
   | { type: 'error'; message: string }
   | { type: 'done' }
 
@@ -130,9 +131,9 @@ export type ApiMessage = {
   session_id: string
   role: 'user' | 'assistant'
   text: string
-  // 消息种类：'text' 普通对话，'tool' 工具调用卡。缺省 'text'
-  kind?: 'text' | 'tool'
-  // 仅 kind==='tool' 时有值
+  // 消息种类：'text' 普通对话，'tool' 工具调用卡，'version' 版本卡。缺省 'text'
+  kind?: 'text' | 'tool' | 'version'
+  // kind==='tool' 存工具参数；kind==='version' 存版本负载 {version_id, seq}
   tool_name?: string | null
   tool_args?: Record<string, unknown> | null
   created_at: string

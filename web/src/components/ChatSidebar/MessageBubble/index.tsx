@@ -1,6 +1,8 @@
 import { useState } from 'react'
-import { Sparkles, FileText, FilePlus, FolderOpen, Wrench, Bug, ChevronRight } from 'lucide-react'
+import { Sparkles, FileText, FilePlus, FolderOpen, Wrench, Bug, ChevronRight, GitCommit, RotateCcw, Loader2 } from 'lucide-react'
 import { formatClock } from '@/lib/format'
+import { useSessionStore } from '@/store/session'
+import { toast } from '@/lib/toast'
 import type { Message } from '@/types/project'
 import styles from './index.module.scss'
 
@@ -14,10 +16,14 @@ type Props = {
 // 单条对话气泡
 // ============================================
 // - kind === 'tool'：渲染成"工具调用进度卡"，紧凑显示工具名 + 关键参数
+// - kind === 'version'：渲染成"版本卡"，附带回滚按钮
 // - 其余情况：渲染成普通文本气泡
 export default function MessageBubble({ message, isStreaming = false }: Props) {
   if (message.kind === 'tool') {
     return <ToolCallChip message={message} />
+  }
+  if (message.kind === 'version') {
+    return <VersionCard message={message} />
   }
 
   const isUser = message.role === 'user'
@@ -94,6 +100,52 @@ function ToolCallChip({ message }: { message: Message }) {
       )}
 
       {hasArgs && expanded && <pre className={styles.toolChipArgs}>{formatArgs(args)}</pre>}
+    </div>
+  )
+}
+
+// ============================================
+// 版本卡：每产生一个新版本插一张，附带回滚按钮
+// ============================================
+// 点「回滚」→ 用该版本快照覆盖当前文件，并 append 一个新版本（回滚即新版），
+// 因此回滚后又会再插一张新的版本卡。
+function VersionCard({ message }: { message: Message }) {
+  const rollbackToVersion = useSessionStore((s) => s.rollbackToVersion)
+  const [busy, setBusy] = useState(false)
+  const seq = message.versionSeq
+  const versionId = message.versionId
+
+  const handleRollback = async () => {
+    if (busy || versionId == null) return
+    setBusy(true)
+    try {
+      await rollbackToVersion(versionId)
+      toast(`已回滚到 v${seq}`)
+    } catch (e) {
+      toast(`回滚失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className={styles.versionCard}>
+      <span className={styles.versionCardIcon} aria-hidden>
+        <GitCommit size={13} />
+      </span>
+      <span className={styles.versionCardLabel}>
+        已生成版本 <b className={styles.versionCardSeq}>v{seq ?? '?'}</b>
+      </span>
+      <button
+        className={styles.versionCardBtn}
+        onClick={handleRollback}
+        disabled={busy || versionId == null}
+        aria-label={seq != null ? `回滚到 v${seq}` : '回滚'}
+        title="回滚到此版本（会生成一个新版本）"
+      >
+        {busy ? <Loader2 size={12} className={styles.versionSpin} /> : <RotateCcw size={12} />}
+        <span>回滚</span>
+      </button>
     </div>
   )
 }

@@ -216,3 +216,74 @@
   from { opacity: 0; transform: translateY(2px); }
   to { opacity: 1; transform: translateY(0); }
 }
+
+// ============================================
+// 版本卡：每产生新版本插入一张，左侧图标 + 文案，右侧回滚按钮
+// 用 accent 淡色底，比工具卡更"实"一点，提示这是可操作的节点
+// ============================================
+.versionCard {
+  display: flex;
+  align-items: center;
+  gap: $space-2;
+  max-width: 100%;
+  margin-bottom: $space-3;
+  padding: $space-2 $space-2 $space-2 $space-3;
+  border: 1px solid var(--color-accent-fade);
+  border-radius: $radius-sm;
+  background: var(--color-accent-fade);
+  font-size: $fs-12;
+  color: var(--color-text-dim);
+  animation: tool-chip-in $dur-base $ease-out;
+
+  .versionCardIcon {
+    display: inline-flex;
+    flex-shrink: 0;
+    color: var(--color-accent);
+  }
+
+  .versionCardLabel {
+    flex: 1;
+    min-width: 0;
+    @include truncate;
+
+    .versionCardSeq {
+      font-family: var(--font-mono);
+      font-weight: $fw-semibold;
+      color: var(--color-accent);
+      letter-spacing: 0.05em;
+    }
+  }
+
+  .versionCardBtn {
+    @include button-reset;
+    display: inline-flex;
+    align-items: center;
+    gap: $space-1;
+    flex-shrink: 0;
+    padding: 3px $space-2;
+    border-radius: $radius-xs;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg);
+    color: var(--color-text-dim);
+    font-size: $fs-11;
+    transition: background $dur-base $ease-out, color $dur-base $ease-out, border-color $dur-base $ease-out;
+
+    &:hover:not(:disabled) {
+      border-color: var(--color-accent);
+      color: var(--color-accent);
+    }
+
+    &:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .versionSpin {
+      animation: version-spin 0.8s linear infinite;
+    }
+  }
+}
+
+@keyframes version-spin {
+  to { transform: rotate(360deg); }
+}

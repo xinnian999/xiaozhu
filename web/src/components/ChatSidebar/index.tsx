@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import { ArrowUp, Square, Mic, Paperclip, Image as ImageIcon, X } from 'lucide-react'
-import { useSessionStore, makeMessage } from '@/store/session'
+import { useSessionStore, makeMessage, makeVersionCard } from '@/store/session'
 import { useUIStore } from '@/store/ui'
 import { streamChat } from '@/lib/api'
 import { toast } from '@/lib/toast'
@@ -98,6 +98,14 @@ export default function ChatSidebar() {
         } else if (event.type === 'file_delete') {
           applyFileDelete(event.path)
           filesChanged = true
+        } else if (event.type === 'version') {
+          // 产生了新版本：先把本轮已累积的叙述固化成消息（让最终回复气泡先落位），
+          // 再插一张版本卡，保证卡片排在回复之后
+          if (accumulated) {
+            commitStreaming()
+            accumulated = ''
+          }
+          appendMessage(makeVersionCard(event.version_id, event.seq))
         } else if (event.type === 'error') {
           toast(`AI 错误：${event.message}`)
           break

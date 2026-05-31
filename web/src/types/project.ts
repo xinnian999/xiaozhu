@@ -25,13 +25,17 @@ export type Message = {
   id: string
   role: 'user' | 'assistant'
   text: string
-  /** 消息种类：'text' 为正常对话气泡，'tool' 为工具调用进度卡。
+  /** 消息种类：'text' 正常对话气泡，'tool' 工具调用进度卡，'version' 版本卡（带回滚按钮）。
    *  缺省视为 'text'，保持向后兼容。 */
-  kind?: 'text' | 'tool'
+  kind?: 'text' | 'tool' | 'version'
   /** kind === 'tool' 时使用：工具名（如 write_file / read_file / list_files） */
   toolName?: string
   /** kind === 'tool' 时使用：工具参数的摘要（如 { path: 'src/App.tsx' }） */
   toolArgs?: Record<string, unknown>
+  /** kind === 'version' 时使用：版本主键 id（回滚按钮调 restore 用） */
+  versionId?: number
+  /** kind === 'version' 时使用：版本序号（卡片显示 vN） */
+  versionSeq?: number
   /** 该消息产出的版本（仅 assistant 消息有） */
   producedVersionId?: string
   /** 此条消息发送时刻 */

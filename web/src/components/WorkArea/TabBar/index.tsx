@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { Eye, Code2, ChevronLeft, RotateCw, ExternalLink, Terminal, Save, Undo2, Loader2 } from 'lucide-react'
 import { useUIStore, type WorkTab } from '@/store/ui'
 import { useSessionStore } from '@/store/session'
-import { saveVersion } from '@/lib/api'
 import { toast } from '@/lib/toast'
 import styles from './index.module.scss'
 
@@ -38,20 +37,13 @@ export default function TabBar() {
 
   const isCode = workTab === 'code'
 
-  // 保存草稿：提交后端 → upsert files + 快照新版本 → 用返回结果替换本地 files 并清空草稿
+  // 保存草稿：提交后端 → upsert + 快照新版本 → 替换 files、清空草稿、追加版本卡
+  // 这些都由 store 的 saveDrafts 串起来，这里只管忙碌态和 toast
   const handleSave = async () => {
     if (saving) return
-    const { activeSession, replaceFiles, discardDrafts } = useSessionStore.getState()
-    const active = activeSession()
-    if (!active) return
-    const drafts = active.drafts
-    const count = Object.keys(drafts).length
-    if (count === 0) return
     setSaving(true)
     try {
-      const files = await saveVersion(active.id, drafts, `手动编辑 ${count} 个文件`)
-      replaceFiles(files) // 替换已保存文件 → PreviewPane 同步到新版本
-      discardDrafts() // 清空草稿，按钮自动消失
+      await useSessionStore.getState().saveDrafts()
       toast('已保存为新版本')
     } catch (e) {
       toast(`保存失败：${e instanceof Error ? e.message : String(e)}`)

@@ -40,15 +40,15 @@ class Message(Base):
     # 消息正文。工具行没有正文，存空字符串
     text: Mapped[str] = mapped_column(Text, nullable=False)
 
-    # 消息种类：'text'（普通对话）或 'tool'（工具调用卡）。
+    # 消息种类：'text'（普通对话）、'tool'（工具调用卡）或 'version'（版本卡）。
     # server_default='text' 让旧数据 / 迁移时自动补成普通文本，向后兼容
     kind: Mapped[str] = mapped_column(String, nullable=False, server_default="text")
 
     # 仅 kind='tool' 时有值：工具名（write_file / read_file / ...）
     tool_name: Mapped[str | None] = mapped_column(String, nullable=True)
 
-    # 仅 kind='tool' 时有值：工具参数。用 SQLAlchemy 的 JSON 类型 ——
-    # 写入时自动把 dict 序列化成 JSON 字符串存进 SQLite，读出时自动反序列化回 dict
+    # kind='tool' 时存工具参数；kind='version' 时存版本卡负载 {version_id, seq}。
+    # 用 SQLAlchemy 的 JSON 类型 —— 写入时自动把 dict 序列化成 JSON 字符串存进 SQLite，读出时自动反序列化回 dict
     tool_args: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -66,8 +66,9 @@ class MessageRead(BaseModel):
     # FastAPI/Pydantic 会校验返回值确实是 user/assistant 之一
     role: Literal["user", "assistant"]
     text: str
-    # 下面三个带默认值：旧数据 / 普通文本消息不带工具信息时也能正常序列化
-    kind: Literal["text", "tool"] = "text"
+    # 下面三个带默认值：旧数据 / 普通文本消息不带工具信息时也能正常序列化。
+    # kind='version' 是「版本卡」：tool_args 里存 {version_id, seq}，前端渲染成带回滚按钮的卡片
+    kind: Literal["text", "tool", "version"] = "text"
     tool_name: str | None = None
     tool_args: dict | None = None
     created_at: datetime

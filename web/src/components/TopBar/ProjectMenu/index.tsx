@@ -1,11 +1,11 @@
 import { useCallback, useRef, useState } from 'react'
-import { ChevronDown, Check, Plus } from 'lucide-react'
+import { ChevronDown, Check, Plus, FolderKanban } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
 import { useClickOutside } from '@/hooks/useClickOutside'
 import styles from './index.module.scss'
 
 // ============================================
-// 顶栏：会话切换下拉
+// 顶栏：项目切换下拉
 // ============================================
 export default function ProjectMenu() {
   const [open, setOpen] = useState(false)
@@ -25,8 +25,8 @@ export default function ProjectMenu() {
     close()
   }
 
-  // "新建会话"= 回到空态首屏（不立即建库），等用户发首条消息时再真正创建
-  // 行为与首屏一致，避免出现"空会话"
+  // 「新建项目」= 回到空态首屏（不立即建库），等用户发首条消息时再真正创建
+  // 行为与首屏一致，避免出现空项目占位
   const handleCreate = () => {
     close()
     goToEmpty()
@@ -41,16 +41,17 @@ export default function ProjectMenu() {
         aria-expanded={open}
         aria-haspopup="menu"
       >
-        {/* 没有激活会话时显示提示而不是"加载中…" —— 此时是用户刚进入空态首屏 */}
+        {/* 没有激活项目时显示提示而不是「加载中…」—— 此时是用户刚进入空态首屏 */}
+        <FolderKanban size={14} className={styles.projectIcon} aria-hidden />
         <span className={styles.projectName}>
-          {activeSession?.title ?? (sessions.length > 0 ? '选择会话' : '尚无会话')}
+          {activeSession?.title ?? (sessions.length > 0 ? '选择项目' : '尚无项目')}
         </span>
         <ChevronDown size={13} className={styles.caret} />
       </button>
 
       {open && (
-        <div className={styles.panel} role="menu" aria-label="选择会话">
-          <p className={styles.panelTitle}>会话</p>
+        <div className={styles.panel} role="menu" aria-label="选择项目">
+          <p className={styles.panelTitle}>项目</p>
           <ul className={styles.list}>
             {sessions.map((s) => (
               <li key={s.id}>
@@ -71,7 +72,7 @@ export default function ProjectMenu() {
           </ul>
           <button type="button" className={styles.createBtn} onClick={handleCreate}>
             <Plus size={14} />
-            <span>新建会话</span>
+            <span>新建项目</span>
           </button>
         </div>
       )}

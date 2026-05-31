@@ -150,16 +150,26 @@ export async function pushLogs(sessionId: string, logs: PushLog[]): Promise<void
 export async function* streamChat(
   message: string,
   sessionId: string,
+  signal?: AbortSignal,
 ): AsyncGenerator<SSEEvent> {
-  const res = await fetch('/api/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, session_id: sessionId }),
-  }).catch((e: unknown) => {
+  // 用户主动中断时 fetch / reader 会抛 AbortError，这里统一识别后静默收尾，不弹错误
+  const isAbort = (e: unknown) =>
+    signal?.aborted || (e instanceof DOMException && e.name === 'AbortError')
+
+  let res: Response
+  try {
+    res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, session_id: sessionId }),
+      signal,
+    })
+  } catch (e: unknown) {
+    if (isAbort(e)) return // 还没建立连接就被中断，直接结束
     const msg = e instanceof Error ? e.message : '网络错误'
     toast(`发送失败：${msg}`)
     throw e
-  })
+  }
 
   if (!res.ok || !res.body) {
     toast(`发送失败：HTTP ${res.status}`)
@@ -173,26 +183,33 @@ export async function* streamChat(
   const decoder = new TextDecoder()
   let buffer = ''
 
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
 
-    buffer += decoder.decode(value, { stream: true })
+      buffer += decoder.decode(value, { stream: true })
 
-    // SSE 每帧以 \n\n 结尾，按此拆分
-    const frames = buffer.split('\n\n')
-    // 最后一段可能不完整，留到下次拼接
-    buffer = frames.pop() ?? ''
+      // SSE 每帧以 \n\n 结尾，按此拆分
+      const frames = buffer.split('\n\n')
+      // 最后一段可能不完整，留到下次拼接
+      buffer = frames.pop() ?? ''
 
-    for (const frame of frames) {
-      const line = frame.trim()
-      if (!line.startsWith('data:')) continue
-      const json = line.slice('data:'.length).trim()
-      try {
-        yield JSON.parse(json) as SSEEvent
-      } catch {
-        // 忽略格式错误的帧
+      for (const frame of frames) {
+        const line = frame.trim()
+        if (!line.startsWith('data:')) continue
+        const json = line.slice('data:'.length).trim()
+        try {
+          yield JSON.parse(json) as SSEEvent
+        } catch {
+          // 忽略格式错误的帧
+        }
       }
     }
+  } catch (e: unknown) {
+    if (!isAbort(e)) throw e // 中断以外的读取错误才上抛
+  } finally {
+    // 中断时主动取消底层流，释放连接，避免悬挂
+    reader.cancel().catch(() => {})
   }
 }

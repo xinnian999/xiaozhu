@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { ArrowUp, Mic, Paperclip, Image as ImageIcon, X } from 'lucide-react'
+import { useRef, useState } from 'react'
+import { ArrowUp, Square, Mic, Paperclip, Image as ImageIcon, X } from 'lucide-react'
 import { useSessionStore, makeMessage } from '@/store/session'
 import { useUIStore } from '@/store/ui'
 import { streamChat } from '@/lib/api'
@@ -16,7 +16,9 @@ export default function ChatSidebar() {
   const createNew = useSessionStore((s) => s.createNew)
   const appendMessage = useSessionStore((s) => s.appendMessage)
   const setStreamingText = useSessionStore((s) => s.setStreamingText)
+  const beginStreaming = useSessionStore((s) => s.beginStreaming)
   const commitStreaming = useSessionStore((s) => s.commitStreaming)
+  const endStreaming = useSessionStore((s) => s.endStreaming)
   const applyFileWrite = useSessionStore((s) => s.applyFileWrite)
   const applyFileDelete = useSessionStore((s) => s.applyFileDelete)
   const mobileChatOpen = useUIStore((s) => s.mobileChatOpen)
@@ -29,6 +31,8 @@ export default function ChatSidebar() {
   const [draft, setDraft] = useState('')
   // 首条消息自动建会话期间禁用输入，避免重复点
   const [creating, setCreating] = useState(false)
+  // 本轮流式的中断控制器：点"停止"时 abort()，streamChat 内部据此静默收尾
+  const abortRef = useRef<AbortController | null>(null)
 
   const isStreaming = session?.isStreaming ?? false
   // 无激活会话时，侧栏切换到"全屏空态"布局
@@ -57,13 +61,18 @@ export default function ChatSidebar() {
     // 1. 把用户消息追加到列表
     appendMessage(makeMessage('user', text))
 
+    // 2. 立刻进入流式态（不等首个 token）：发送键即时变"停止"，并建好中断控制器
+    beginStreaming()
+    const controller = new AbortController()
+    abortRef.current = controller
+
     // 本轮是否有文件改动 —— 用来决定结束时要不要刷新预览
     let filesChanged = false
 
-    // 2. 流式消费 SSE，逐 token 累积到 streamingText
+    // 3. 流式消费 SSE，逐 token 累积到 streamingText
     let accumulated = ''
     try {
-      for await (const event of streamChat(text, targetSessionId)) {
+      for await (const event of streamChat(text, targetSessionId, controller.signal)) {
         if (event.type === 'message_delta') {
           accumulated += event.text
           setStreamingText(accumulated)
@@ -97,15 +106,22 @@ export default function ChatSidebar() {
         }
       }
     } finally {
-      // 3. 无论成功还是出错，都把累积内容固化为一条 assistant 消息
-      commitStreaming()
-      // 4. 文件有变化 → 流结束后强制刷一次预览。
+      // 4. 无论正常结束 / 出错 / 用户中断，都冲刷累积内容并退出流式态
+      abortRef.current = null
+      endStreaming()
+      // 5. 文件有变化 → 流结束后强制刷一次预览。
       //    300ms 延迟是为了等最后一次 file_write 触发的 syncFiles 落盘，
       //    否则刷新可能赶在 wc.fs.writeFile 之前，看到的还是旧版。
       if (filesChanged) {
         setTimeout(reloadPreview, 300)
       }
     }
+  }
+
+  // 点"停止"：中断本轮 SSE。abort 后 streamChat 抛出被静默吞掉，
+  // 控制流自然走到 handleSend 的 finally，由 endStreaming 收尾。
+  const handleStop = () => {
+    abortRef.current?.abort()
   }
 
   const composerDisabled = isStreaming || creating
@@ -175,14 +191,25 @@ export default function ChatSidebar() {
                 </button>
               </div>
 
-              <button
-                className={`${styles.sendBtn} ${draft.trim() && !composerDisabled ? styles.sendActive : ''}`}
-                onClick={handleSend}
-                disabled={composerDisabled}
-                aria-label="发送"
-              >
-                <ArrowUp size={14} />
-              </button>
+              {isStreaming ? (
+                // 流式进行中：发送键变成"停止"，点击中断本轮生成
+                <button
+                  className={`${styles.sendBtn} ${styles.stopBtn}`}
+                  onClick={handleStop}
+                  aria-label="停止生成"
+                >
+                  <Square size={12} />
+                </button>
+              ) : (
+                <button
+                  className={`${styles.sendBtn} ${draft.trim() && !composerDisabled ? styles.sendActive : ''}`}
+                  onClick={handleSend}
+                  disabled={composerDisabled}
+                  aria-label="发送"
+                >
+                  <ArrowUp size={14} />
+                </button>
+              )}
             </div>
           </div>
 

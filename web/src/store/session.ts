@@ -44,7 +44,12 @@ type SessionState = {
   goToEmpty: () => void
   appendMessage: (msg: Message) => void
   setStreamingText: (text: string) => void
+  /** 开始一轮流式：立刻把 isStreaming 置 true（不等首个 token），让发送按钮即时变成"停止" */
+  beginStreaming: () => void
+  /** 把当前累积的 streamingText 固化成一条消息并清空，但不结束流式（工具调用前的中途冲刷用） */
   commitStreaming: () => void
+  /** 结束一轮流式：冲刷剩余文本并把 isStreaming 置 false（正常结束 / 出错 / 用户中断都走这里） */
+  endStreaming: () => void
 
   /** SSE 收到 file_write：增量写入当前会话的 files */
   applyFileWrite: (path: string, content: string) => void
@@ -249,18 +254,45 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }))
   },
 
+  beginStreaming: () => {
+    const id = get().activeId
+    if (!id) return
+    // 立刻进入流式态：发送按钮即时切成"停止"，MessageList 也马上出现"思考中"光标气泡
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === id ? { ...sess, isStreaming: true } : sess,
+      ),
+    }))
+  },
+
   commitStreaming: () => {
     const id = get().activeId
     if (!id) return
-    const session = get().sessions.find((s) => s.id === id)
-    if (!session || !session.streamingText) return
-    const msg = makeMessage('assistant', session.streamingText)
+    // 把累积文本固化成一条 assistant 消息后清空；保持 isStreaming 不变（本轮还没结束）
     set((s) => ({
-      sessions: s.sessions.map((sess) =>
-        sess.id === id
-          ? { ...sess, messages: [...sess.messages, msg], streamingText: '', isStreaming: false }
-          : sess,
-      ),
+      sessions: s.sessions.map((sess) => {
+        if (sess.id !== id || !sess.streamingText) return sess
+        return {
+          ...sess,
+          messages: [...sess.messages, makeMessage('assistant', sess.streamingText)],
+          streamingText: '',
+        }
+      }),
+    }))
+  },
+
+  endStreaming: () => {
+    const id = get().activeId
+    if (!id) return
+    // 冲刷剩余文本（有才追加）并结束流式态；无条件把 isStreaming 复位，避免中断后卡在"停止"
+    set((s) => ({
+      sessions: s.sessions.map((sess) => {
+        if (sess.id !== id) return sess
+        const messages = sess.streamingText
+          ? [...sess.messages, makeMessage('assistant', sess.streamingText)]
+          : sess.messages
+        return { ...sess, messages, streamingText: '', isStreaming: false }
+      }),
     }))
   },
 

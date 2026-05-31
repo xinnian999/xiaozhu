@@ -9,7 +9,7 @@ import VersionMenu from './VersionMenu'
 import styles from './index.module.scss'
 
 // ============================================
-// 顶部栏：品牌位 / 会话导航 / 全局操作
+// 顶部栏：品牌位 / 项目导航 / 全局操作
 // ============================================
 export default function TopBar() {
   const theme = useThemeStore((s) => s.theme)

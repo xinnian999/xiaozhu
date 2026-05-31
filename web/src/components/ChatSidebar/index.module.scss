@@ -182,7 +182,32 @@
             color: white;
             box-shadow: 0 4px 12px var(--color-accent-glow);
           }
+
+          // 流式进行中的"停止"态：实心高亮 + 轻微脉冲，提示可点击中断
+          &.stopBtn {
+            background: var(--color-accent);
+            color: white;
+            cursor: pointer;
+            animation: stop-pulse 1.4s $ease-out infinite;
+
+            &:hover {
+              opacity: 0.88;
+            }
+          }
         }
+      }
+    }
+
+    // 停止按钮的脉冲动画：靠 box-shadow 扩散，不触发重排
+    @keyframes stop-pulse {
+      0% {
+        box-shadow: 0 0 0 0 var(--color-accent-glow);
+      }
+      70% {
+        box-shadow: 0 0 0 6px transparent;
+      }
+      100% {
+        box-shadow: 0 0 0 0 transparent;
       }
     }
 

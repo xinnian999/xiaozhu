@@ -1,4 +1,4 @@
-import { Eye, Code2, ChevronLeft, RotateCw, ExternalLink, Terminal, MoreVertical } from 'lucide-react'
+import { Eye, Code2, ChevronLeft, RotateCw, ExternalLink, Terminal } from 'lucide-react'
 import { useUIStore, type WorkTab } from '@/store/ui'
 import { useSessionStore } from '@/store/session'
 import styles from './index.module.scss'
@@ -107,9 +107,6 @@ export default function TabBar() {
               {logCount > 99 ? '99+' : logCount}
             </span>
           )}
-        </button>
-        <button className={styles.iconBtn} aria-label="更多" title="更多">
-          <MoreVertical size={14} />
         </button>
       </div>
     </div>

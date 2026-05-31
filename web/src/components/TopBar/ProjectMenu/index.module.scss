@@ -30,6 +30,11 @@
       transform: rotate(180deg);
     }
 
+    .projectIcon {
+      flex-shrink: 0;
+      color: var(--color-text-mute);
+    }
+
     .projectName {
       @include truncate;
       max-width: 160px;

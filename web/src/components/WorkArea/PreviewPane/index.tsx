@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import { Loader2, AlertTriangle } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
 import { useUIStore, type WCStatus, type LogLevel } from '@/store/ui'
-import { bootAndRun, syncFiles, isBooted, isDevRunning } from '@/lib/webcontainer'
+import { bootAndRun, syncFiles, resetContainer, isBooted, isDevRunning } from '@/lib/webcontainer'
 import { pushLogs, type PushLog } from '@/lib/api'
 import styles from './index.module.scss'
 
@@ -27,11 +27,15 @@ export default function PreviewPane() {
   const setWCLog = useUIStore((s) => s.setWCLog)
   const setWCError = useUIStore((s) => s.setWCError)
   const pushWcLog = useUIStore((s) => s.pushWcLog)
+  // 清空浏览器 console 日志面板 —— 切会话重挂时一并清掉
+  const clearWcLogs = useUIStore((s) => s.clearWcLogs)
   // 刷新计数器：变化即触发 iframe 重新挂载
   const reloadTick = useUIStore((s) => s.previewReloadTick)
 
   // 标记上次同步的版本号，避免同 version 反复 sync
   const syncedVersionRef = useRef<string | null>(null)
+  // 容器当前归属哪个会话 —— 用来判断 activeId 变了要不要 teardown 重挂
+  const containerSessionRef = useRef<string | null>(null)
   // 当前 iframe 的引用，用于校验 postMessage 来源
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
 
@@ -45,29 +49,57 @@ export default function PreviewPane() {
   const pendingLogsRef = useRef<PushLog[]>([])
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // —— 首次启动：等 files 到位再 boot ——
-  // files 从后端拉取是异步的，组件挂载时 currentVersion.files 可能还是空对象，
-  // 此时 boot 会让 WebContainer 找不到 package.json 直接报 ENOENT。
-  // 改成监听 files 变化，第一次出现非空 files 时再 boot。
+  // —— 容器生命周期：让运行中的容器始终对应当前会话 ——
+  // 首次启动、以及「切会话 / 开新会话」都走这里。切到不同会话时先 teardown
+  // 旧容器再重新 boot+mount —— FS / dev server / 终端日志全部从零开始，绝不串台
+  // （WebContainer 同一时刻只能有一个实例）。
+  //
+  // 等 files 到位再启动：files 从后端异步拉取，切换瞬间新会话的 files 还是空对象，
+  // 此时 boot 会让 WebContainer 找不到 package.json 直接 ENOENT。
   useEffect(() => {
-    if (isBooted()) return
     if (Object.keys(currentVersion.files).length === 0) return  // 还没拉到文件，等
 
-    setWCError(null)
-    bootAndRun(currentVersion.files, {
-      onStatus: setWCStatus,
-      onUrl: setWCUrl,
-      onLog: setWCLog,
-      onError: setWCError,
-    }).then(() => {
-      syncedVersionRef.current = currentVersion.id
-    })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentVersion.files])
+    const prevSession = containerSessionRef.current
+    // 容器已经服务于当前会话且在运行：交给下面的「切版本」effect 做增量同步
+    if (prevSession === activeId && isBooted()) return
+    // 立刻把容器归属占位成当前会话，避免 boot 完成前本 effect 被重复触发又启一遍
+    containerSessionRef.current = activeId
 
-  // —— 切版本：增量同步 ——
+    let cancelled = false
+    ;(async () => {
+      // 切到了不同会话：销毁旧容器 + 清空两处日志面板
+      if (isBooted() && prevSession !== activeId) {
+        setWCStatus('booting')
+        setWCUrl(null)
+        await resetContainer()
+        clearWcLogs()
+      }
+      if (cancelled) return
+
+      syncedVersionRef.current = null
+      setWCError(null)
+      await bootAndRun(currentVersion.files, {
+        onStatus: setWCStatus,
+        onUrl: setWCUrl,
+        onLog: setWCLog,
+        onError: setWCError,
+      })
+      if (cancelled) return
+      syncedVersionRef.current = currentVersion.id
+    })()
+
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId, currentVersion.files])
+
+  // —— 切版本：同会话内文件变更走增量同步（依赖 vite HMR，不重启 dev）——
   useEffect(() => {
     if (!isDevRunning()) return
+    // 只同步「当前会话自己的」版本变更；切会话的重挂由上面的 effect 负责，
+    // 这里若不挡住，会把新会话的文件 sync 进尚未销毁的旧容器。
+    if (containerSessionRef.current !== activeId) return
     if (syncedVersionRef.current === currentVersion.id) return
 
     setWCStatus('syncing')
@@ -80,7 +112,7 @@ export default function PreviewPane() {
         setWCError(e instanceof Error ? e.message : String(e))
         setWCStatus('error')
       })
-  }, [currentVersion.id, currentVersion.files, setWCStatus, setWCLog, setWCError])
+  }, [activeId, currentVersion.id, currentVersion.files, setWCStatus, setWCLog, setWCError])
 
   // —— 浏览器 console 桥接：iframe → 父页面 ——
   // iframe 里注入的脚本会 postMessage({ type: 'vibuild-console', level, text })，

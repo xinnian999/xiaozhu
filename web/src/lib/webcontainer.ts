@@ -1,5 +1,11 @@
 import { WebContainer, type FileSystemTree } from '@webcontainer/api'
 import type { FileMap } from '@/types/project'
+import {
+  computeDepsKey,
+  getSnapshot,
+  saveSnapshot,
+  deleteSnapshot,
+} from '@/lib/depsCache'
 
 // ============================================
 // WebContainer 单例封装
@@ -179,14 +185,65 @@ export async function bootAndRun(
       hooks.onLog('dev server ready')
     })
 
-    // npm install
+    // 依赖安装：先尝试从 IndexedDB 缓存恢复 node_modules，命中则跳过 npm install
     hooks.onStatus('installing')
-    hooks.onLog('npm install')
-    const install = await wc.spawn('npm', ['install'])
-    pipeRawToBus(install.output, 'npm install')
-    const installCode = await install.exit
-    if (installCode !== 0) {
-      throw new Error(`npm install 失败 (exit ${installCode})`)
+    // 依赖哈希作为缓存 key —— 模板固定 → 哈希恒定 → 跨项目/刷新共享同一份依赖
+    const depsKey = await computeDepsKey(filesWithBridge['package.json'])
+    let restored = false
+
+    if (depsKey) {
+      const snapshot = await getSnapshot(depsKey)
+      if (snapshot) {
+        try {
+          // 把缓存的快照秒挂到 node_modules，省掉整轮网络安装
+          hooks.onLog('从缓存恢复依赖')
+          broadcast('\x1b[36m\r\n— 从缓存恢复 node_modules —\x1b[0m\r\n')
+          await wc.mount(snapshot, { mountPoint: 'node_modules' })
+          // 快照往返会丢失 node_modules/.bin 下的符号链接（vite 等命令靠它定位，
+          // 否则 npm run dev 会报 "command not found: vite"）。
+          // npm rebuild 会重建 .bin —— 纯磁盘操作、不联网。
+          // --ignore-scripts：跳过各包的 install/postinstall 脚本（其产物已在快照里，
+          // 重跑纯属浪费），只保留 bin 链接这步，省掉大半耗时。
+          const rebuild = await wc.spawn('npm', ['rebuild', '--ignore-scripts'])
+          pipeRawToBus(rebuild.output, 'npm rebuild')
+          const rebuildCode = await rebuild.exit
+          if (rebuildCode !== 0) {
+            throw new Error(`npm rebuild 失败 (exit ${rebuildCode})`)
+          }
+          // 校验 .bin 确实链好了：dev server 是常驻进程不 await，
+          // 这里不拦住的话，命令缺失只会在终端报 "command not found"。
+          const bin = await wc.fs.readdir('node_modules/.bin').catch(() => [] as string[])
+          if (bin.length === 0) {
+            throw new Error('node_modules/.bin 为空，bin 链接未恢复')
+          }
+          restored = true
+        } catch (e) {
+          // 恢复链路任一步失败：删掉这份快照，退回干净的网络安装
+          console.warn('依赖快照恢复失败，退回 npm install', e)
+          await deleteSnapshot(depsKey)
+          restored = false
+        }
+      }
+    }
+
+    if (!restored) {
+      // 缓存未命中（或恢复失败）：正常 npm install
+      hooks.onLog('npm install')
+      const install = await wc.spawn('npm', ['install'])
+      pipeRawToBus(install.output, 'npm install')
+      const installCode = await install.exit
+      if (installCode !== 0) {
+        throw new Error(`npm install 失败 (exit ${installCode})`)
+      }
+      // 安装成功后导出 node_modules 快照存入缓存，供下次秒开（best-effort，失败不影响运行）
+      if (depsKey) {
+        try {
+          const snapshot = await wc.export('node_modules', { format: 'binary' })
+          await saveSnapshot(depsKey, snapshot)
+        } catch (e) {
+          console.warn('依赖快照导出失败（不影响本次运行）', e)
+        }
+      }
     }
 
     // npm run dev
@@ -264,4 +321,29 @@ export function isBooted(): boolean {
 /** dev server 是否已起来（用于决定是否要走完整 install/dev 流程） */
 export function isDevRunning(): boolean {
   return devServerStarted
+}
+
+/**
+ * 销毁当前容器并清空所有单例状态，为下一个项目腾位。
+ * 切 / 开会话时调用 —— WebContainer 明确「同一时刻只能有一个实例」，
+ * 必须先 teardown 才能重新 boot，否则上个项目的 FS / dev server / 终端日志
+ * 都会残留串台。teardown 后所有派生对象（进程、fs…）即失效。
+ */
+export async function resetContainer(): Promise<void> {
+  if (containerPromise) {
+    try {
+      const wc = await containerPromise
+      wc.teardown()
+    } catch (e) {
+      // teardown 失败不致命：清掉引用，让下次重新 boot
+      console.warn('容器 teardown 失败（忽略）', e)
+    }
+  }
+  containerPromise = null
+  devServerStarted = false
+  lastFiles = null
+  // 清空日志回放缓冲，并给已挂载的 xterm 发「清屏 + 清回滚」指令，
+  // 否则上个项目的 npm / dev 日志会一直留在终端里。
+  history = ''
+  broadcast('\x1b[2J\x1b[3J\x1b[H')
 }

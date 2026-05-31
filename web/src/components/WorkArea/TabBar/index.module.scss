@@ -225,6 +225,57 @@
         text-align: center;
       }
     }
+
+    // 代码 tab 的「保存 / 丢弃」：图标 + 文字
+    .actionBtn {
+      @include button-reset;
+      display: inline-flex;
+      align-items: center;
+      gap: $space-1;
+      height: 28px;
+      padding: 0 $space-2;
+      border-radius: $radius-sm;
+      color: var(--color-text-dim);
+      font-size: $fs-12;
+      font-weight: $fw-medium;
+      transition: background $dur-base $ease-out, color $dur-base $ease-out, opacity $dur-base $ease-out;
+
+      &:hover:not(:disabled) {
+        background: var(--color-bg-hover);
+        color: var(--color-text);
+      }
+
+      &:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      // 保存：主操作，高亮
+      &.saveBtn {
+        background: var(--color-accent);
+        color: white;
+
+        &:hover:not(:disabled) {
+          opacity: 0.9;
+        }
+        // 保存中（disabled）保持高亮，不走上面的灰色禁用样式
+        &:disabled {
+          opacity: 0.7;
+        }
+      }
+
+      // 保存中的 loading 图标旋转
+      .spin {
+        animation: tabbar-spin 0.8s linear infinite;
+      }
+    }
+  }
+
+  // 保存中的旋转关键帧
+  @keyframes tabbar-spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 }
 

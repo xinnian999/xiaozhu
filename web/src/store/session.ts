@@ -26,8 +26,12 @@ export type ChatSession = {
   // 流式输出时，AI 正在打的那条消息（不在 messages 里，渲染时单独展示）
   streamingText: string
   isStreaming: boolean
-  // 当前 session 的文件快照：path -> content
+  // 当前 session 的文件快照：path -> content（已保存/已生成的内容）
   files: Record<string, string>
+  // 编辑器里暂存但还没保存的改动：path -> 新内容。
+  // 只放和 files 不一致的文件；为空表示没有未保存改动。
+  // 编辑只写这里，不动 files，所以预览不会实时变；点「保存」才落库产生新版本。
+  drafts: Record<string, string>
   // 文件快照版本号，每次 files 变更 +1
   versionId: number
 }
@@ -58,6 +62,11 @@ type SessionState = {
   /** 用一组文件整体替换当前会话的 files（回滚到某版本时用） */
   replaceFiles: (files: Record<string, string>) => void
 
+  /** 编辑器改动：写入草稿。内容若改回和已保存一致，则把该文件移出草稿 */
+  setDraft: (path: string, content: string) => void
+  /** 丢弃当前会话所有未保存的草稿 */
+  discardDrafts: () => void
+
   activeSession: () => ChatSession | null
 
   // ── 兼容旧版 WorkArea 组件 ─────────────────────────────────────
@@ -80,6 +89,7 @@ function fromApi(api: ApiSession): ChatSession {
     streamingText: '',
     isStreaming: false,
     files: {},
+    drafts: {},
     versionId: 0,
   }
 }
@@ -343,6 +353,35 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set((s) => ({
       sessions: s.sessions.map((sess) =>
         sess.id === id ? { ...sess, files, versionId: sess.versionId + 1 } : sess,
+      ),
+    }))
+  },
+
+  setDraft: (path, content) => {
+    const id = get().activeId
+    if (!id) return
+    set((s) => ({
+      sessions: s.sessions.map((sess) => {
+        if (sess.id !== id) return sess
+        const committed = sess.files[path] ?? ''
+        const drafts = { ...sess.drafts }
+        if (content === committed) {
+          // 改回和已保存内容一致 → 不再算"脏"，移出草稿（这样保存按钮能正确消失）
+          delete drafts[path]
+        } else {
+          drafts[path] = content
+        }
+        return { ...sess, drafts }
+      }),
+    }))
+  },
+
+  discardDrafts: () => {
+    const id = get().activeId
+    if (!id) return
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === id ? { ...sess, drafts: {} } : sess,
       ),
     }))
   },

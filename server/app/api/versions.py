@@ -5,6 +5,7 @@
 """
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,6 +15,15 @@ from app.models.version import Version, VersionFile, VersionRead
 from app.versioning import snapshot_current_files
 
 router = APIRouter(prefix="/api/sessions/{session_id}/versions", tags=["versions"])
+
+
+# ── 请求体 ──────────────────────────────────────────────────────────────────────
+
+class SaveVersionRequest(BaseModel):
+    # 改动的文件：path -> 完整新内容。前端只传发生变化的文件，不是全量
+    files: dict[str, str]
+    # 版本描述，显示在版本列表里
+    summary: str | None = None
 
 
 @router.get("", response_model=list[VersionRead])
@@ -28,6 +38,48 @@ async def list_versions(
         .order_by(Version.seq.desc())
     )
     return [VersionRead.model_validate(v) for v in result.scalars().all()]
+
+
+@router.post("", response_model=list[FileRead])
+async def create_version(
+    session_id: str,
+    body: SaveVersionRequest,
+    db: AsyncSession = Depends(get_db),
+) -> list[FileRead]:
+    """保存编辑器里的改动，并产生一个新版本。
+
+    和 restore 思路相同，区别在「增量 upsert」而非「整体覆盖」：
+      1. 把改动文件写进 files 表（已存在改内容，不存在则新建），其余文件不动
+      2. 复用 snapshot_current_files 把当前全部文件快照成一个新版本（单线递增）
+      3. 返回保存后的全部文件，前端据此替换并重挂预览
+    """
+    if not body.files:
+        raise HTTPException(status_code=400, detail="没有需要保存的改动")
+
+    # 1. 逐个 upsert 改动文件。File 表对 (session_id, path) 有唯一约束，
+    #    所以「先查再决定 update / insert」是安全的
+    for path, content in body.files.items():
+        result = await db.execute(
+            select(File).where(File.session_id == session_id, File.path == path)
+        )
+        existing = result.scalar_one_or_none()
+        if existing is not None:
+            existing.content = content
+        else:
+            db.add(File(session_id=session_id, path=path, content=content))
+    await db.commit()
+
+    # 2. 把当前态快照成新版本 —— 和「生成结束」「回滚」用的是同一个函数
+    version = await snapshot_current_files(db, session_id, summary=body.summary or "手动编辑")
+    if version is None:
+        # 理论上走不到：上一步刚 upsert 过文件，files 表必不为空
+        raise HTTPException(status_code=400, detail="没有文件可保存")
+
+    # 3. 返回保存后的全部文件，前端 replaceFiles + 同步预览
+    result = await db.execute(
+        select(File).where(File.session_id == session_id).order_by(File.path)
+    )
+    return [FileRead.model_validate(f) for f in result.scalars().all()]
 
 
 @router.post("/{version_id}/restore", response_model=list[FileRead])

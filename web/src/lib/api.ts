@@ -108,6 +108,22 @@ export async function restoreVersion(
   return map
 }
 
+/** 保存编辑器里的改动：把改动文件提交后端，upsert 进 files 表并快照成一个新版本。
+ *  返回保存后的全部文件 {path: content}，前端据此替换并刷新预览。 */
+export async function saveVersion(
+  sessionId: string,
+  files: Record<string, string>,
+  summary?: string,
+): Promise<Record<string, string>> {
+  const { data } = await http.post<ApiFile[]>(
+    `/api/sessions/${sessionId}/versions`,
+    { files, summary },
+  )
+  const map: Record<string, string> = {}
+  for (const f of data) map[f.path] = f.content
+  return map
+}
+
 // ── Messages ───────────────────────────────────────────────────
 export type ApiMessage = {
   id: number

@@ -5,19 +5,53 @@ import { detectLanguage } from '@/lib/tree'
 import styles from './index.module.scss'
 
 // ============================================
-// Monaco 视图：只读，跟随主题切换
+// Monaco 视图：可编辑，跟随主题切换
+// - 编辑只写进前端草稿（不动 files / 不触发预览同步）
+// - 等用户点顶栏「保存」才落库并产生新版本
+// - AI 流式生成期间转只读，避免和 AI 的写入打架
 // ============================================
 type Props = { path: string }
 
 export default function MonacoView({ path }: Props) {
-  const currentVersion = useSessionStore((s) => s.currentVersion())
+  const session = useSessionStore((s) => s.activeSession())
+  const setDraft = useSessionStore((s) => s.setDraft)
   const theme = useThemeStore((s) => s.theme)
 
-  const value = currentVersion.files[path] ?? ''
+  const isStreaming = session?.isStreaming ?? false
+  // 显示内容：有未保存草稿就显示草稿，否则显示已保存版本
+  const committed = session?.files[path] ?? ''
+  const draft = session?.drafts[path]
+  const value = draft !== undefined ? draft : committed
   const language = detectLanguage(path)
+
+  // 编辑内容只写进草稿即可，预览要等用户点「保存」后才更新
+  const handleChange = (val: string | undefined) => {
+    if (val === undefined) return
+    setDraft(path, val)
+  }
 
   // 自定义 Monaco 主题：跟我们的设计系统对齐
   const handleMount: OnMount = (_editor, monaco) => {
+    // Monaco 自带的 TS 语言服务默认不开 JSX、也读不到项目的 tsconfig / node_modules，
+    // 于是 .tsx 会满屏报「Cannot use JSX」「找不到 react 模块」。这里全局配置一次：
+    // 1) 开启 JSX 解析，消除 17004；2) 关掉语义校验，避免「找不到模块 / 隐式 any」误报
+    //    —— 真正的类型/编译检查交给 WebContainer 里的 Vite，这里只当编辑器用。
+    const ts = monaco.languages.typescript
+    ts.typescriptDefaults.setCompilerOptions({
+      jsx: ts.JsxEmit.ReactJSX,
+      target: ts.ScriptTarget.ESNext,
+      module: ts.ModuleKind.ESNext,
+      moduleResolution: ts.ModuleResolutionKind.NodeJs,
+      esModuleInterop: true,
+      allowJs: true,
+      allowNonTsExtensions: true,
+      noEmit: true,
+    })
+    ts.typescriptDefaults.setDiagnosticsOptions({
+      noSemanticValidation: true, // 关语义校验：没装 @types/react，否则满屏「找不到模块」
+      noSyntaxValidation: false, // 保留语法校验：真正的括号 / 拼写错误仍然提示
+    })
+
     monaco.editor.defineTheme('vibuild-dark', {
       base: 'vs-dark',
       inherit: true,
@@ -77,8 +111,10 @@ export default function MonacoView({ path }: Props) {
         language={language}
         theme={theme === 'dark' ? 'vibuild-dark' : 'vibuild-light'}
         onMount={handleMount}
+        onChange={handleChange}
         options={{
-          readOnly: true,
+          // 生成进行中只读，其余时间可编辑
+          readOnly: isStreaming,
           minimap: { enabled: true, scale: 0.6, side: 'right', renderCharacters: false },
           fontFamily: "'JetBrains Mono', ui-monospace, Menlo, monospace",
           fontSize: 13,

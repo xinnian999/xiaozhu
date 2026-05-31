@@ -12,13 +12,12 @@ export default function MessageList() {
   const endRef = useRef<HTMLDivElement>(null)
 
   const messages = session?.messages ?? []
-  const streamingText = session?.streamingText ?? ''
   const isStreaming = session?.isStreaming ?? false
 
-  // 新消息到来时滚动到底部
+  // 新消息到来 / 进入思考态时滚动到底部
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages.length, streamingText])
+  }, [messages.length, isStreaming])
 
   if (messages.length === 0 && !isStreaming) {
     return (
@@ -36,18 +35,11 @@ export default function MessageList() {
         <MessageBubble key={msg.id} message={msg} />
       ))}
 
-      {/* 流式输出中的 AI 消息：单独渲染，末尾加光标动画 */}
+      {/* 生成中：不再逐字显示打字，改成带扫光动画的「正在思考中」 */}
       {isStreaming && (
-        <MessageBubble
-          message={{
-            id: 'streaming',
-            role: 'assistant',
-            text: streamingText,
-            createdAt: Date.now(),
-            branchId: 'main',
-          }}
-          isStreaming
-        />
+        <div className={styles.thinking} aria-live="polite">
+          正在思考中
+        </div>
       )}
 
       <div ref={endRef} className={styles.listEnd} aria-hidden />

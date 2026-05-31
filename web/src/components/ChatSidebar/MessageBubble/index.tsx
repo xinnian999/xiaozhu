@@ -1,5 +1,7 @@
 import { useState } from 'react'
-import { Sparkles, FileText, FilePlus, FolderOpen, Wrench, Bug, ChevronRight, GitCommit, RotateCcw, Loader2 } from 'lucide-react'
+import { FileText, FilePlus, FolderOpen, Wrench, Bug, ChevronRight, GitCommit, RotateCcw, Loader2 } from 'lucide-react'
+import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { formatClock } from '@/lib/format'
 import { useSessionStore } from '@/store/session'
 import { toast } from '@/lib/toast'
@@ -28,26 +30,46 @@ export default function MessageBubble({ message, isStreaming = false }: Props) {
 
   const isUser = message.role === 'user'
 
-  return (
-    <article className={`${styles.bubble} ${isUser ? styles.user : styles.assistant}`}>
-      {!isUser && (
-        <span className={styles.avatar} aria-hidden>
-          <Sparkles size={12} />
-        </span>
-      )}
-
-      <div className={styles.content}>
-        <p className={styles.text}>
-          {message.text}
-          {/* 流式输出时在文字末尾追加闪烁光标 */}
+  // AI 消息：不要头像和气泡，直接把正文渲染成 markdown
+  if (!isUser) {
+    return (
+      <div className={styles.assistantMsg}>
+        <div className={styles.markdown}>
+          <Markdown
+            remarkPlugins={[remarkGfm]}
+            components={{
+              // 链接在新标签打开，避免点了把整个应用导航走
+              a: ({ href, children }) => (
+                <a href={href} target="_blank" rel="noreferrer">
+                  {children}
+                </a>
+              ),
+            }}
+          >
+            {message.text}
+          </Markdown>
+          {/* 流式输出时在末尾追加闪烁光标 */}
           {isStreaming && <span className={styles.cursor} aria-hidden />}
-        </p>
+        </div>
 
         {!isStreaming && (
           <time className={styles.time} dateTime={new Date(message.createdAt).toISOString()}>
             {formatClock(message.createdAt)}
           </time>
         )}
+      </div>
+    )
+  }
+
+  // 用户消息：保留右侧气泡
+  return (
+    <article className={`${styles.bubble} ${styles.user}`}>
+      <div className={styles.content}>
+        <p className={styles.text}>{message.text}</p>
+
+        <time className={styles.time} dateTime={new Date(message.createdAt).toISOString()}>
+          {formatClock(message.createdAt)}
+        </time>
       </div>
     </article>
   )

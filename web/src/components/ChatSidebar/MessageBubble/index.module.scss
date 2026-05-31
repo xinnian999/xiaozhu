@@ -1,6 +1,9 @@
 @use '@/styles/variables' as *;
 @use '@/styles/common' as *;
 
+// ============================================
+// 用户消息气泡（AI 消息走下面的 .assistantMsg，无头像无气泡）
+// ============================================
 .bubble {
   display: flex;
   gap: $space-2;
@@ -25,28 +28,6 @@
     }
   }
 
-  &.assistant {
-    .content {
-      background: var(--color-bg-soft);
-      border: 1px solid var(--color-border-soft);
-      border-radius: $radius-lg $radius-lg $radius-lg $radius-xs;
-    }
-  }
-
-  .avatar {
-    flex-shrink: 0;
-    width: 24px;
-    height: 24px;
-    margin-top: 2px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: $radius-sm;
-    background: var(--color-accent-fade);
-    color: var(--color-accent);
-    border: 1px solid var(--color-accent-fade);
-  }
-
   .content {
     display: flex;
     flex-direction: column;
@@ -65,54 +46,142 @@
     word-break: break-word;
   }
 
-  .versionChip {
-    @include button-reset;
-    display: inline-flex;
-    align-items: center;
-    gap: $space-2;
-    align-self: flex-start;
-    padding: 3px $space-2;
-    border-radius: $radius-sm;
-    border: 1px solid var(--color-border);
-    background: var(--color-bg);
+  .time {
     font-family: var(--font-mono);
     font-size: $fs-10;
-    transition: border-color $dur-base $ease-out, background $dur-base $ease-out;
-
-    &:hover {
-      border-color: var(--color-border-strong);
-      background: var(--color-bg-hover);
-    }
-
-    &.versionChipCurrent {
-      border-color: var(--color-accent);
-      background: var(--color-accent-fade);
-
-      .versionId {
-        color: var(--color-accent);
-      }
-    }
-
-    .versionId {
-      font-weight: $fw-semibold;
-      letter-spacing: 0.05em;
-      color: var(--color-text-dim);
-    }
-
-    .versionLabel {
-      color: var(--color-text-mute);
-      @include truncate;
-      max-width: 160px;
-    }
+    color: var(--color-text-faint);
   }
+}
+
+// ============================================
+// AI 消息：无头像无气泡，正文渲染成 markdown
+// ============================================
+.assistantMsg {
+  display: flex;
+  flex-direction: column;
+  gap: $space-1;
+  margin-bottom: $space-4;
 
   .time {
     font-family: var(--font-mono);
     font-size: $fs-10;
     color: var(--color-text-faint);
   }
+}
 
-  // 流式输出时末尾闪烁光标
+// markdown 排版：贴合现有文本风格，元素间距收紧；首尾元素不留外边距
+.markdown {
+  font-size: $fs-13;
+  line-height: $lh-relaxed;
+  color: var(--color-text-dim);
+  word-break: break-word;
+
+  > :first-child { margin-top: 0; }
+  > :last-child { margin-bottom: 0; }
+
+  p {
+    margin: $space-2 0;
+    white-space: pre-wrap;
+  }
+
+  // 行内代码
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+    padding: 1px 5px;
+    border-radius: $radius-xs;
+    background: var(--color-bg-elev);
+    color: var(--color-text);
+  }
+
+  // 代码块
+  pre {
+    margin: $space-2 0;
+    padding: $space-3;
+    border-radius: $radius-sm;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    overflow: auto;
+
+    code {
+      padding: 0;
+      background: none;
+      color: var(--color-text-dim);
+      font-size: $fs-12;
+      line-height: $lh-relaxed;
+    }
+  }
+
+  ul,
+  ol {
+    margin: $space-2 0;
+    padding-left: 1.4em;
+  }
+
+  li {
+    margin: 2px 0;
+  }
+
+  a {
+    color: var(--color-accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    margin: $space-3 0 $space-2;
+    line-height: $lh-snug;
+    color: var(--color-text);
+    font-weight: $fw-semibold;
+  }
+  h1 { font-size: $fs-16; }
+  h2 { font-size: $fs-15; }
+  h3 { font-size: $fs-14; }
+  h4 { font-size: $fs-13; }
+
+  blockquote {
+    margin: $space-2 0;
+    padding-left: $space-3;
+    border-left: 2px solid var(--color-border-strong);
+    color: var(--color-text-mute);
+  }
+
+  hr {
+    margin: $space-3 0;
+    border: none;
+    border-top: 1px solid var(--color-border);
+  }
+
+  strong {
+    color: var(--color-text);
+    font-weight: $fw-semibold;
+  }
+
+  table {
+    margin: $space-2 0;
+    border-collapse: collapse;
+    font-size: $fs-12;
+  }
+  th,
+  td {
+    padding: 4px $space-2;
+    border: 1px solid var(--color-border);
+    text-align: left;
+  }
+  th {
+    background: var(--color-bg-soft);
+    color: var(--color-text);
+  }
+
+  img {
+    max-width: 100%;
+    border-radius: $radius-sm;
+  }
+
+  // 流式光标：跟在 markdown 内容末尾
   .cursor {
     display: inline-block;
     width: 2px;

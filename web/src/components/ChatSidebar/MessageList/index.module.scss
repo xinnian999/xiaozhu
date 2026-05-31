@@ -12,6 +12,36 @@
   }
 }
 
+// 生成中的「正在思考中」：渐变光在文字上连续流动（shimmer）
+.thinking {
+  margin-bottom: $space-4;
+  font-size: $fs-13;
+  font-weight: $fw-medium;
+  // 周期性渐变（暗-亮-暗-亮-暗，首尾同色），裁进文字后单向匀速平移：
+  // 含多条亮带 → 始终有光在流，循环点首尾同色 → 无缝衔接，不会一闪而过
+  background: linear-gradient(
+    90deg,
+    var(--color-text-mute) 0%,
+    var(--color-text) 25%,
+    var(--color-text-mute) 50%,
+    var(--color-text) 75%,
+    var(--color-text-mute) 100%
+  );
+  background-size: 200% auto;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: thinking-shimmer 2.2s linear infinite;
+}
+
+@keyframes thinking-shimmer {
+  // 只朝一个方向平移整整一个图块宽度（200%）→ 回到等价画面，循环无缝
+  to {
+    background-position: 200% center;
+  }
+}
+
 .empty {
   display: flex;
   flex-direction: column;

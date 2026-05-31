@@ -1,0 +1,39 @@
+# .dockerignore —— 哪些东西「不」放进构建上下文。
+# 作用：本机 docker build 时，整个工作目录会被打包发给构建器；
+# 不排除的话 node_modules / .venv / 数据库 / .env 都会被带进去 ——
+# 又慢又可能把密钥和开发数据打进镜像。阿里云 ACR 从 git 构建虽不含这些，
+# 但 vibuild.db.bak 被 git 跟踪了，这里也能兜底拦住它。
+
+# Git / 编辑器 / 系统文件
+.git
+.gitignore
+.vscode
+.idea
+.cursor
+.claude
+**/.DS_Store
+
+# 依赖与虚拟环境（镜像内会重新安装）
+node_modules
+web/node_modules
+server/.venv
+
+# Python 缓存
+**/__pycache__
+**/*.py[cod]
+server/.ruff_cache
+
+# 构建产物（镜像内会重新构建 / 重新拷贝）
+web/dist
+server/static
+
+# 本地数据库与备份（绝不进镜像！）
+**/*.db
+**/*.db.bak
+
+# 密钥（运行时用环境变量注入，不进镜像）
+.env
+.env.*
+
+# 文档（运行时用不到）
+**/*.md

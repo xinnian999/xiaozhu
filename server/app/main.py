@@ -5,12 +5,50 @@ startup 事件 + CORS + 路由注册三件事在这里完成。
 """
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.api import chat, files, logs, messages, sessions, versions
 from app.db import Base, engine
 from app.models import file, message, version  # noqa: F401 —— 让 SQLAlchemy 注册 File / Message / Version 表
+
+
+# ── 跨域隔离中间件（WebContainer 硬性前提）──────────────────
+# WebContainer 依赖 SharedArrayBuffer，浏览器只在「跨域隔离」状态下才放行它。
+# 开启跨域隔离要求顶层文档带这两个响应头：
+#   Cross-Origin-Opener-Policy: same-origin
+#   Cross-Origin-Embedder-Policy: require-corp
+# dev 期是 Vite(vite.config.ts) 帮我们加的；生产期没有 Vite 了，必须后端自己加。
+#
+# 为什么手写「纯 ASGI 中间件」而不用更简单的 @app.middleware("http")？
+# 后者基于 BaseHTTPMiddleware，历史上会把流式响应整个缓冲起来再一次性发出，
+# 这会直接破坏我们 /api/chat 的 SSE「边生成边推送」效果。纯 ASGI 中间件只在
+# 响应的「头」阶段插一手、完全不碰响应体，对流式透明，是最稳的写法。
+class CrossOriginIsolationMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # 只处理 HTTP 流量；WebSocket / lifespan 等原样放行
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(msg: Message) -> None:
+            # ASGI 把一个响应拆成多条 message：http.response.start 这条带状态码和
+            # 响应头，随后才是一条条 http.response.body。我们只在 start 这条往
+            # headers 里塞两个头，body 一个字节都不碰 —— 所以流式完全不受影响。
+            if msg["type"] == "http.response.start":
+                headers = MutableHeaders(scope=msg)
+                headers["Cross-Origin-Opener-Policy"] = "same-origin"
+                headers["Cross-Origin-Embedder-Policy"] = "require-corp"
+            await send(msg)
+
+        await self.app(scope, receive, send_with_headers)
 
 
 # ── 应用生命周期 ────────────────────────────────────────────
@@ -29,6 +67,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Vibuild Backend", version="0.2.0", lifespan=lifespan)
 
+# 给所有响应加跨域隔离头（dev / 生产都加，无副作用，让两边环境更一致）
+app.add_middleware(CrossOriginIsolationMiddleware)
+
 # CORS 由 Vite 代理处理，后端不再需要设置
 
 # ── 路由注册 ─────────────────────────────────────────────────
@@ -43,3 +84,17 @@ app.include_router(chat.router)
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+# ── 生产模式：托管前端构建产物 ──────────────────────────────
+# 约定：把前端 `bun run build` 出的 dist 拷到 server/static/ 即可，无需任何环境变量。
+# 用 __file__ 定位目录，不受 uvicorn 启动时工作目录影响。
+#   - dev 期：没拷 dist，static/ 不存在 → 跳过托管，前端走 Vite(5173)。
+#   - 生产期：static/ 里有文件 → 挂载，前后端成「同源单进程」。
+# 必须放在所有 API 路由「之后」：Starlette 按注册顺序匹配，前面的 /api/* 和
+# /health 先命中，剩下的一切路径才落到这个静态挂载上。
+#   html=True：访问 "/" 自动返回 index.html（单页应用入口）。
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+if STATIC_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+

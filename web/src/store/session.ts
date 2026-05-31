@@ -85,14 +85,24 @@ function fromApi(api: ApiSession): ChatSession {
 }
 
 /** 把后端的 ApiMessage 转成前端 Message 类型。
- *  branchId 现阶段统一 'main'，后端没有这个概念但前端类型要求有。 */
+ *  branchId 现阶段统一 'main'，后端没有这个概念但前端类型要求有。
+ *  kind='tool' 的行还原成工具卡（带 toolName/toolArgs），让刷新后能完整回显工具调用。 */
 function fromApiMessage(m: ApiMessage): Message {
+  const isTool = m.kind === 'tool'
   return {
     id: `srv-${m.id}`,
     role: m.role,
     text: m.text,
     createdAt: new Date(m.created_at).getTime(),
     branchId: 'main',
+    // 普通文本消息不带 kind，保持和 makeMessage 一致；工具行才补齐工具字段
+    ...(isTool
+      ? {
+          kind: 'tool' as const,
+          toolName: m.tool_name ?? undefined,
+          toolArgs: m.tool_args ?? undefined,
+        }
+      : {}),
   }
 }
 

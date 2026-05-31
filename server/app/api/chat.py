@@ -187,17 +187,38 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
     tools_by_name = {t.name: t for t in tools}
     llm = base_llm.bind_tools(tools)
 
+    # 入库小助手：把一条消息写进 messages 表。闭包捕获 db / session_id，
+    # 调用处只关心"存什么"。每存一条就 commit，保证自增 id 单调递增 ——
+    # 回显时按 id 升序排，顺序就和当时直播看到的一模一样。
+    async def save_message(
+        role: str,
+        text: str,
+        *,
+        kind: str = "text",
+        tool_name: str | None = None,
+        tool_args: dict | None = None,
+    ) -> None:
+        db.add(DBMessage(
+            session_id=req.session_id,
+            role=role,
+            text=text,
+            kind=kind,
+            tool_name=tool_name,
+            tool_args=tool_args,
+        ))
+        await db.commit()
+
     # 1. 先把用户消息入库 —— 即便 LLM 调用失败，用户消息也已经持久化，
     #    刷新后能看到自己发了什么
-    db.add(DBMessage(session_id=req.session_id, role="user", text=req.message))
-    await db.commit()
+    await save_message("user", req.message)
 
     # 2. 加载历史对话作为上下文，让 LLM 记得之前聊过什么。
-    #    只保留 user / assistant 的最终内容，不重放中间的 tool_call —— 那些工具
-    #    调用的结果已经体现在 files 表的现状里，重放反而会让 LLM 误以为还要再调一次。
+    #    只取 kind='text'（user 输入 + assistant 说过的话），把 kind='tool' 的
+    #    工具行过滤掉 —— 工具的效果已经体现在 files 表的现状里，把工具调用重放给
+    #    LLM 反而会让它误以为还要再调一次。kind 字段在这里第二次发挥作用。
     result = await db.execute(
         select(DBMessage)
-        .where(DBMessage.session_id == req.session_id)
+        .where(DBMessage.session_id == req.session_id, DBMessage.kind == "text")
         .order_by(DBMessage.created_at.asc(), DBMessage.id.asc())
     )
     history = result.scalars().all()
@@ -263,11 +284,12 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
                 break
 
             # 这一轮要调工具，但模型可能同时说了话（开场白 / 进度解释，
-            # 如「好的，我先看看项目结构」）。这类中间叙述属于「过程信息」：
-            # 推给前端展示，但不入库 —— 刷新即消失，和工具进度卡语义一致。
+            # 如「好的，我先看看项目结构」）。这类过场叙述也是对话流的一部分，
+            # 既推给前端展示，也入库（kind='text'），刷新后能完整还原。
             if text:
                 print(f"[response] content={text} (同轮调用了工具)")
                 yield sse({"type": "message_delta", "text": text})
+                await save_message("assistant", text)
 
             # LLM 要调用一个或多个工具
             for tool_call in response.tool_calls:
@@ -278,6 +300,8 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
 
                 # 推进度提示，让前端能显示"正在写入 App.tsx…"
                 yield sse({"type": "tool_call", "name": name, "args": args})
+                # 工具调用本身也存成一行消息（kind='tool'），回显时还原成工具卡
+                await save_message("assistant", "", kind="tool", tool_name=name, tool_args=args)
 
                 if name not in tools_by_name:
                     # 调了不存在的工具，告诉 LLM 并继续
@@ -303,12 +327,7 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
 
         # LLM 给出最终回复后，把 assistant 文本入库（空字符串就不存）
         if final_assistant_text:
-            db.add(DBMessage(
-                session_id=req.session_id,
-                role="assistant",
-                text=final_assistant_text,
-            ))
-            await db.commit()
+            await save_message("assistant", final_assistant_text)
 
         # 本轮若改动过文件，把当前 files 全量快照成一个新版本（单线递增）。
         # summary 用这轮用户的需求当说明，列表 UI 里好认。

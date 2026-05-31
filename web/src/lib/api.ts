@@ -114,6 +114,11 @@ export type ApiMessage = {
   session_id: string
   role: 'user' | 'assistant'
   text: string
+  // 消息种类：'text' 普通对话，'tool' 工具调用卡。缺省 'text'
+  kind?: 'text' | 'tool'
+  // 仅 kind==='tool' 时有值
+  tool_name?: string | null
+  tool_args?: Record<string, unknown> | null
   created_at: string
 }
 

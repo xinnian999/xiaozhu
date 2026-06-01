@@ -1,0 +1,42 @@
+# Vibuild 生产部署 compose —— 在服务器上直接 `docker compose up -d` 即可拉起。
+#
+# 这个镜像是「前后端同源单进程」：容器内 uvicorn 监听 8000，
+# 既提供 API 又托管前端静态页。所以只需要暴露一个端口。
+#
+# 用法（服务器上）：
+#   1. 准备好 .env（参考 .env.deploy.example，填上 OPENAI_API_KEY 等）
+#   2. docker login 到阿里云仓库（拉私有镜像需要）
+#   3. docker compose pull && docker compose up -d
+#   4. docker compose logs -f   # 看启动日志
+
+services:
+  vibuild:
+    # 阿里云个人版私有仓库里的镜像。:latest 可按需换成具体版本 tag。
+    image: crpi-a7p27yxlrmekg1a3.cn-beijing.personal.cr.aliyuncs.com/elin/vibuild:latest
+
+    # 容器名固定，方便 docker logs / exec 时直接按名字操作
+    container_name: vibuild
+
+    # 把容器的 8000 映射到宿主机 8000。若服务器上 8000 被占用，
+    # 改成 "8080:8000" 之类（左边宿主机口，右边容器口不要动）。
+    ports:
+      - "8000:8000"
+
+    # 敏感配置（OPENAI_API_KEY 等）从同目录的 .env 文件注入，不写进 compose。
+    # .env 内容见 .env.deploy.example。
+    env_file:
+      - .env
+
+    # 覆盖数据库路径，指向下面挂载的持久化目录 —— 否则 SQLite 文件落在
+    # 容器内 /app/vibuild.db，容器一删数据就没了。
+    # 注意 sqlite 的四个斜杠：//// 后面跟的是绝对路径 /app/data/vibuild.db。
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:////app/data/vibuild.db
+
+    # 把宿主机 ./data 挂到容器 /app/data，让 SQLite 数据库文件持久化。
+    # 升级 / 重建容器后数据还在。
+    volumes:
+      - ./data:/app/data
+
+    # 容器异常退出时自动重启；除非手动 stop，否则开机也会自启。
+    restart: unless-stopped

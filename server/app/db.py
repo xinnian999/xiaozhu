@@ -23,9 +23,9 @@ from sqlalchemy.orm import DeclarativeBase
 
 from app.config import settings
 
-# engine：底层连接池。echo=True 会把所有 SQL 打印到控制台，
-# 开发时非常有用（能看到 ORM 生成的 SQL 是否正确），上线前关掉。
-engine = create_async_engine(settings.database_url, echo=True)
+# engine：底层连接池。echo 由配置控制（dev 可开、生产关），
+# 开发时开着能看到 ORM 生成的 SQL 是否正确。
+engine = create_async_engine(settings.database_url, echo=settings.db_echo)
 
 # Session 工厂：每次调用它就拿到一个新的 AsyncSession 实例。
 # expire_on_commit=False：commit 之后对象不自动"过期"，

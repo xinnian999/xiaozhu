@@ -8,7 +8,7 @@
 # ─────────────────────────────────────────────────────────────
 # 阶段 1：构建前端（bun + vite → 静态产物 dist）
 # ─────────────────────────────────────────────────────────────
-FROM oven/bun:1 AS web-builder
+FROM crpi-a7p27yxlrmekg1a3.cn-beijing.personal.cr.aliyuncs.com/elin-common/bun:1 AS web-builder
 WORKDIR /app
 
 # 先只拷依赖清单，再装依赖 —— 利用 Docker 层缓存：
@@ -27,10 +27,10 @@ RUN bun run build
 # ─────────────────────────────────────────────────────────────
 # 阶段 2：运行后端（python + uvicorn，并托管阶段1的前端产物）
 # ─────────────────────────────────────────────────────────────
-FROM python:3.12-slim AS runtime
+FROM crpi-a7p27yxlrmekg1a3.cn-beijing.personal.cr.aliyuncs.com/elin-common/python:3.12-slim AS runtime
 
-# 直接从官方 uv 镜像拷 uv 二进制进来，比在容器里 pip install uv 更快更干净
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# 直接从 uv 镜像拷 uv 二进制进来，比在容器里 pip install uv 更快更干净
+COPY --from=crpi-a7p27yxlrmekg1a3.cn-beijing.personal.cr.aliyuncs.com/elin-common/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
 

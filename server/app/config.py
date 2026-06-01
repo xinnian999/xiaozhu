@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     # 代表"用 aiosqlite 驱动的 SQLite"（async 版本）。
     database_url: str = "sqlite+aiosqlite:///./vibuild.db"
 
+    # 是否把每条 SQL 打到控制台。dev 调试时设为 true 很有用，
+    # 生产环境保持 false：避免日志噪音 + 轻微性能开销。
+    # 本地想开就在 server/.env 里加一行 DB_ECHO=true。
+    db_echo: bool = False
+
     # ── CORS ──────────────────────────────────────────────────
     # list[str] 让我们可以在 .env 里写逗号分隔的多个源，
     # pydantic-settings 会自动解析成列表。

@@ -140,6 +140,73 @@ function injectConsoleBridge(files: FileMap): FileMap {
   return { ...files, 'index.html': next }
 }
 
+// ── .bin 软链接重建脚本 ────────────────────────────────────────
+// 背景：wc.export(binary) 导出的快照不保存符号链接，所以 mount 回来后
+// node_modules/.bin 整个是空的（vite / tsc 等命令全靠这里的软链接定位）。
+// 实测 `npm rebuild` 在 WebContainer 里报成功却不重建 .bin，不可靠。
+// 改成自己干：遍历 node_modules 里每个包的 package.json，读 bin 字段，
+// 在 .bin/ 下补回软链接。纯本地磁盘操作、不联网。
+//
+// 这段在容器内的 Node 里跑（前端 fs API 没暴露 symlink，但容器里的 node 有）。
+const RELINK_BIN_SCRIPT = `
+const fs = require('fs');
+const path = require('path');
+const root = 'node_modules';
+const binDir = path.join(root, '.bin');
+fs.mkdirSync(binDir, { recursive: true });
+
+// 收集待处理的包目录：顶层包 + @scope/ 下的包
+const pkgDirs = [];
+for (const name of fs.readdirSync(root)) {
+  if (name === '.bin' || name.startsWith('.')) continue;
+  if (name.startsWith('@')) {
+    // scope 目录，再下一层才是真正的包
+    const scopeDir = path.join(root, name);
+    if (!fs.statSync(scopeDir).isDirectory()) continue;
+    for (const sub of fs.readdirSync(scopeDir)) {
+      pkgDirs.push(path.join(scopeDir, sub));
+    }
+  } else {
+    const dir = path.join(root, name);
+    if (fs.statSync(dir).isDirectory()) pkgDirs.push(dir);
+  }
+}
+
+let linked = 0;
+for (const dir of pkgDirs) {
+  const pkgFile = path.join(dir, 'package.json');
+  if (!fs.existsSync(pkgFile)) continue;
+  let pkg;
+  try { pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8')); } catch { continue; }
+  let bin = pkg.bin;
+  if (!bin) continue;
+  // bin 可能是字符串（命令名=去 scope 的包名）或对象 {命令名: 相对路径}
+  if (typeof bin === 'string') {
+    const cmd = pkg.name && pkg.name.startsWith('@') ? pkg.name.split('/')[1] : pkg.name;
+    bin = { [cmd]: bin };
+  }
+  for (const [cmd, rel] of Object.entries(bin)) {
+    const target = path.join(dir, rel);                 // 真实可执行文件
+    const linkPath = path.join(binDir, cmd);            // .bin 下的链接
+    // 软链接内容用「相对 .bin 目录」的路径，跟 npm 行为一致
+    const relTarget = path.relative(binDir, target);
+    try {
+      if (fs.existsSync(linkPath) || fs.lstatSync(linkPath, { throwIfNoEntry: false })) {
+        fs.rmSync(linkPath, { force: true });
+      }
+    } catch {}
+    try {
+      fs.symlinkSync(relTarget, linkPath);
+      try { fs.chmodSync(target, 0o755); } catch {}     // 确保目标可执行
+      linked++;
+    } catch (e) {
+      console.error('link failed', cmd, e.message);
+    }
+  }
+}
+console.log('relinked ' + linked + ' bin entries');
+`
+
 /** 把一个进程的输出转发到总线，并在 UI 上贴个分隔横幅。
  *  banner 让用户知道"现在是在 install 阶段还是 dev 阶段"。 */
 function pipeRawToBus(
@@ -198,17 +265,20 @@ export async function bootAndRun(
           // 把缓存的快照秒挂到 node_modules，省掉整轮网络安装
           hooks.onLog('从缓存恢复依赖')
           broadcast('\x1b[36m\r\n— 从缓存恢复 node_modules —\x1b[0m\r\n')
+          // mount 的挂载点目录必须先存在，否则 mount 会静默失败（数据不写入也不报错）。
+          // 项目模板里没有 node_modules，所以这里先建出来。
+          await wc.fs.mkdir('node_modules', { recursive: true })
           await wc.mount(snapshot, { mountPoint: 'node_modules' })
           // 快照往返会丢失 node_modules/.bin 下的符号链接（vite 等命令靠它定位，
           // 否则 npm run dev 会报 "command not found: vite"）。
-          // npm rebuild 会重建 .bin —— 纯磁盘操作、不联网。
-          // --ignore-scripts：跳过各包的 install/postinstall 脚本（其产物已在快照里，
-          // 重跑纯属浪费），只保留 bin 链接这步，省掉大半耗时。
-          const rebuild = await wc.spawn('npm', ['rebuild', '--ignore-scripts'])
-          pipeRawToBus(rebuild.output, 'npm rebuild')
-          const rebuildCode = await rebuild.exit
-          if (rebuildCode !== 0) {
-            throw new Error(`npm rebuild 失败 (exit ${rebuildCode})`)
+          // 不用 npm rebuild —— 它在 WebContainer 里报成功却不重建 .bin。
+          // 改成自己跑脚本遍历各包 package.json 的 bin 字段、补回软链接，纯本地不联网。
+          broadcast('\x1b[36m\r\n— 重建 .bin 软链接 —\x1b[0m\r\n')
+          const relink = await wc.spawn('node', ['-e', RELINK_BIN_SCRIPT])
+          pipeRawToBus(relink.output, 'relink bin')
+          const relinkCode = await relink.exit
+          if (relinkCode !== 0) {
+            throw new Error(`重建 .bin 失败 (exit ${relinkCode})`)
           }
           // 校验 .bin 确实链好了：dev server 是常驻进程不 await，
           // 这里不拦住的话，命令缺失只会在终端报 "command not found"。
@@ -219,6 +289,9 @@ export async function bootAndRun(
           restored = true
         } catch (e) {
           // 恢复链路任一步失败：删掉这份快照，退回干净的网络安装
+          const reason = e instanceof Error ? e.message : String(e)
+          // 把真实原因同时打到终端（之前只进 console.warn，终端里看不到，无法排查）
+          broadcast(`\x1b[31m\r\n[diag] 依赖快照恢复失败，退回 npm install：${reason}\x1b[0m\r\n`)
           console.warn('依赖快照恢复失败，退回 npm install', e)
           await deleteSnapshot(depsKey)
           restored = false

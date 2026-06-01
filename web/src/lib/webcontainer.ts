@@ -5,6 +5,7 @@ import {
   getSnapshot,
   saveSnapshot,
   deleteSnapshot,
+  fetchPrebuiltSnapshot,
 } from '@/lib/depsCache'
 
 // ============================================
@@ -224,6 +225,41 @@ function pipeRawToBus(
   )
 }
 
+/**
+ * 把一份二进制 node_modules 快照挂回容器，并重建 .bin 软链接。
+ * 两级缓存（IndexedDB 快照 / 预置静态快照）共用这套挂载逻辑。
+ * 成功返回 true；任一步失败抛错，由调用方决定 fallback。
+ */
+async function mountSnapshotAndRelink(
+  wc: WebContainer,
+  snapshot: Uint8Array,
+): Promise<void> {
+  // mount 的挂载点目录必须先存在，否则 mount 会静默失败（数据不写入也不报错）。
+  // 项目模板里没有 node_modules，所以这里先建出来。
+  await wc.fs.mkdir('node_modules', { recursive: true })
+  // 注意：wc.mount 对二进制快照走 Transferable 机制——会「转移」而非拷贝传入 buffer，
+  // 转移后调用方手里的 snapshot 会变成 detached 空壳。这里克隆一份再 mount，
+  // 保证传入的 snapshot 始终完好，调用方可放心复用（如随后写回 IndexedDB）。
+  await wc.mount(snapshot.slice(), { mountPoint: 'node_modules' })
+  // 快照往返会丢失 node_modules/.bin 下的符号链接（vite 等命令靠它定位，
+  // 否则 npm run dev 会报 "command not found: vite"）。
+  // 不用 npm rebuild —— 它在 WebContainer 里报成功却不重建 .bin。
+  // 改成自己跑脚本遍历各包 package.json 的 bin 字段、补回软链接，纯本地不联网。
+  broadcast('\x1b[36m\r\n— 重建 .bin 软链接 —\x1b[0m\r\n')
+  const relink = await wc.spawn('node', ['-e', RELINK_BIN_SCRIPT])
+  pipeRawToBus(relink.output, 'relink bin')
+  const relinkCode = await relink.exit
+  if (relinkCode !== 0) {
+    throw new Error(`重建 .bin 失败 (exit ${relinkCode})`)
+  }
+  // 校验 .bin 确实链好了：dev server 是常驻进程不 await，
+  // 这里不拦住的话，命令缺失只会在终端报 "command not found"。
+  const bin = await wc.fs.readdir('node_modules/.bin').catch(() => [] as string[])
+  if (bin.length === 0) {
+    throw new Error('node_modules/.bin 为空，bin 链接未恢复')
+  }
+}
+
 /** 全量 mount（首次启动 + npm install + dev server） */
 export async function bootAndRun(
   files: FileMap,
@@ -259,48 +295,51 @@ export async function bootAndRun(
     let restored = false
 
     if (depsKey) {
+      // ── 第一级：IndexedDB 快照（老用户，最快，纯本地无网络）──
       const snapshot = await getSnapshot(depsKey)
       if (snapshot) {
         try {
-          // 把缓存的快照秒挂到 node_modules，省掉整轮网络安装
           hooks.onLog('从缓存恢复依赖')
           broadcast('\x1b[36m\r\n— 从缓存恢复 node_modules —\x1b[0m\r\n')
-          // mount 的挂载点目录必须先存在，否则 mount 会静默失败（数据不写入也不报错）。
-          // 项目模板里没有 node_modules，所以这里先建出来。
-          await wc.fs.mkdir('node_modules', { recursive: true })
-          await wc.mount(snapshot, { mountPoint: 'node_modules' })
-          // 快照往返会丢失 node_modules/.bin 下的符号链接（vite 等命令靠它定位，
-          // 否则 npm run dev 会报 "command not found: vite"）。
-          // 不用 npm rebuild —— 它在 WebContainer 里报成功却不重建 .bin。
-          // 改成自己跑脚本遍历各包 package.json 的 bin 字段、补回软链接，纯本地不联网。
-          broadcast('\x1b[36m\r\n— 重建 .bin 软链接 —\x1b[0m\r\n')
-          const relink = await wc.spawn('node', ['-e', RELINK_BIN_SCRIPT])
-          pipeRawToBus(relink.output, 'relink bin')
-          const relinkCode = await relink.exit
-          if (relinkCode !== 0) {
-            throw new Error(`重建 .bin 失败 (exit ${relinkCode})`)
-          }
-          // 校验 .bin 确实链好了：dev server 是常驻进程不 await，
-          // 这里不拦住的话，命令缺失只会在终端报 "command not found"。
-          const bin = await wc.fs.readdir('node_modules/.bin').catch(() => [] as string[])
-          if (bin.length === 0) {
-            throw new Error('node_modules/.bin 为空，bin 链接未恢复')
-          }
+          await mountSnapshotAndRelink(wc, snapshot)
           restored = true
         } catch (e) {
-          // 恢复链路任一步失败：删掉这份快照，退回干净的网络安装
+          // 恢复失败：删掉这份损坏快照，继续往下尝试预置快照 / npm install
           const reason = e instanceof Error ? e.message : String(e)
-          // 把真实原因同时打到终端（之前只进 console.warn，终端里看不到，无法排查）
-          broadcast(`\x1b[31m\r\n[diag] 依赖快照恢复失败，退回 npm install：${reason}\x1b[0m\r\n`)
-          console.warn('依赖快照恢复失败，退回 npm install', e)
+          broadcast(`\x1b[31m\r\n[diag] IndexedDB 快照恢复失败：${reason}\x1b[0m\r\n`)
+          console.warn('IndexedDB 快照恢复失败', e)
           await deleteSnapshot(depsKey)
           restored = false
+        }
+      }
+
+      // ── 第二级：预置静态快照（新用户首次兜底，fetch 自家 CDN，与 npm registry 无关）──
+      if (!restored) {
+        const prebuilt = await fetchPrebuiltSnapshot(depsKey)
+        if (prebuilt) {
+          try {
+            hooks.onLog('从预置快照恢复依赖')
+            broadcast('\x1b[36m\r\n— 从预置快照恢复 node_modules —\x1b[0m\r\n')
+            await mountSnapshotAndRelink(wc, prebuilt)
+            restored = true
+            // 命中预置快照后写入本地 IndexedDB，让该用户下次走最快的第一级
+            try {
+              await saveSnapshot(depsKey, prebuilt)
+            } catch (e) {
+              console.warn('预置快照写入 IndexedDB 失败（不影响运行）', e)
+            }
+          } catch (e) {
+            const reason = e instanceof Error ? e.message : String(e)
+            broadcast(`\x1b[31m\r\n[diag] 预置快照恢复失败：${reason}\x1b[0m\r\n`)
+            console.warn('预置快照恢复失败', e)
+            restored = false
+          }
         }
       }
     }
 
     if (!restored) {
-      // 缓存未命中（或恢复失败）：正常 npm install
+      // ── 第三级：正常 npm install（前两级都未命中时的兜底）──
       hooks.onLog('npm install')
       const install = await wc.spawn('npm', ['install'])
       pipeRawToBus(install.output, 'npm install')
@@ -419,4 +458,52 @@ export async function resetContainer(): Promise<void> {
   // 否则上个项目的 npm / dev 日志会一直留在终端里。
   history = ''
   broadcast('\x1b[2J\x1b[3J\x1b[H')
+}
+
+// ── 开发者工具：导出预置快照 ───────────────────────────────────
+// 用法（仅开发期，在浏览器 console 里）：先正常打开一个项目、等它跑起来
+// （此时容器内 node_modules 已装好），然后执行 `window.__vibuildExportPrebuilt()`。
+// 它会下载两个文件：
+//   deps-snapshot.bin   —— 当前容器 node_modules 的二进制快照
+//   deps-snapshot.json  —— manifest（含 depsKey，运行时用于校验是否匹配）
+// 把这两个文件放进 web/public/ 提交，新用户首次即可走「预置快照」级、不再联网安装。
+//
+// 为什么从「实时容器」导出而不是从 IndexedDB？
+//   实时容器里的 node_modules 是 npm 在 WebContainer 环境里亲手装的，平台二进制
+//   （esbuild/vite 等）一定正确；导出路径也和运行时恢复完全一致，最可靠。
+async function exportPrebuiltSnapshot(): Promise<void> {
+  if (!containerPromise) {
+    console.error('[导出] 容器尚未 boot，请先打开一个项目并等它跑起来')
+    return
+  }
+  const wc = await containerPromise
+  // 读容器里的 package.json 算 depsKey，确保与运行时 computeDepsKey 口径一致
+  const pkgJson = await wc.fs.readFile('package.json', 'utf-8').catch(() => undefined)
+  const depsKey = await computeDepsKey(pkgJson)
+  if (!depsKey) {
+    console.error('[导出] 无法计算 depsKey（读不到 package.json？）')
+    return
+  }
+  console.log('[导出] 正在导出 node_modules 快照…（66MB 左右，稍候）')
+  const snapshot = await wc.export('node_modules', { format: 'binary' })
+
+  // 触发浏览器下载的小工具
+  const download = (data: BlobPart, filename: string, type: string) => {
+    const url = URL.createObjectURL(new Blob([data], { type }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+  // wc.export 返回的 Uint8Array 其 buffer 在 COEP 环境下可能被推断为 SharedArrayBuffer，
+  // Blob 不接受；slice 出一份普通 ArrayBuffer 副本即可。
+  download(snapshot.slice().buffer as ArrayBuffer, 'deps-snapshot.bin', 'application/octet-stream')
+  download(JSON.stringify({ depsKey }, null, 2), 'deps-snapshot.json', 'application/json')
+  console.log(`[导出] 完成。depsKey=${depsKey}，请把两个文件放进 web/public/ 提交。`)
+}
+
+// 挂到 window 供 console 调用（仅开发期用，不进任何 UI）
+if (typeof window !== 'undefined') {
+  ;(window as unknown as Record<string, unknown>).__vibuildExportPrebuilt = exportPrebuiltSnapshot
 }

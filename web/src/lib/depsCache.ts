@@ -104,3 +104,49 @@ export async function deleteSnapshot(key: string): Promise<void> {
     // 删不掉也无所谓，下次 put 会覆盖
   }
 }
+
+// ============================================
+// 预置静态快照（部署时随前端一起发布）
+// ============================================
+// IndexedDB 快照是 per-浏览器的：每个新用户、每台新设备的「第一次」都没有缓存，
+// 仍要联网 npm install。预置快照解决这个「首次慢」——
+// 把一份在 WebContainer 里导出的 node_modules 快照作为静态资源放进 public/，
+// 新用户首次直接 fetch 这个文件（走我们自己的 CDN，与 npm registry 无关），
+// 挂载成功后再写入各自的 IndexedDB，之后就走最快的本地缓存。
+//
+// 文件约定（都放在 public/ 根，部署后可通过 /deps-snapshot.* 访问）：
+//   /deps-snapshot.json  —— manifest，记录该快照对应的 depsKey
+//   /deps-snapshot.bin   —— node_modules 二进制快照本体
+const PREBUILT_MANIFEST_URL = '/deps-snapshot.json'
+const PREBUILT_SNAPSHOT_URL = '/deps-snapshot.bin'
+
+interface PrebuiltManifest {
+  // 该预置快照对应的依赖哈希（computeDepsKey 的产物）。
+  // 与当前项目的 depsKey 不一致时说明模板依赖已变，预置快照作废、跳过。
+  depsKey: string
+}
+
+/**
+ * 尝试拉取预置静态快照。仅当其 manifest 里的 depsKey 与当前一致时才返回，
+ * 避免模板依赖改了还挂旧快照。任何失败（文件不存在 / 网络错误 / 不匹配）都返回 null，
+ * 让调用方安静退回 npm install。
+ */
+export async function fetchPrebuiltSnapshot(depsKey: string): Promise<Uint8Array | null> {
+  try {
+    // 先读 manifest 校验版本，匹配了再下 66MB 本体，避免无谓的大文件下载
+    const manifestRes = await fetch(PREBUILT_MANIFEST_URL)
+    if (!manifestRes.ok) return null
+    const manifest = (await manifestRes.json()) as PrebuiltManifest
+    if (manifest.depsKey !== depsKey) {
+      console.warn('预置快照与当前依赖不匹配，跳过', manifest.depsKey, depsKey)
+      return null
+    }
+    const snapRes = await fetch(PREBUILT_SNAPSHOT_URL)
+    if (!snapRes.ok) return null
+    const buf = await snapRes.arrayBuffer()
+    return new Uint8Array(buf)
+  } catch (e) {
+    console.warn('拉取预置快照失败（不影响运行）', e)
+    return null
+  }
+}

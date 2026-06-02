@@ -161,13 +161,13 @@ export default function PreviewPane() {
   }, [pushWcLog])
 
   // ready 时延迟 900ms 再显示 iframe，让进度条动画有时间跑到 100%
-  // （sprint 是 800ms，多 100ms 保证数字真的跑满了再切走）
+  // syncing 是增量文件同步，iframe 保持可见，交给 vite HMR 处理，不触发 overlay
   const [iframeVisible, setIframeVisible] = useState(false)
   useEffect(() => {
     if (wcStatus === 'ready' && wcUrl) {
       const t = setTimeout(() => setIframeVisible(true), 900)
       return () => clearTimeout(t)
-    } else {
+    } else if (wcStatus !== 'syncing') {
       setIframeVisible(false)
     }
   }, [wcStatus, wcUrl])

@@ -388,6 +388,26 @@ export async function bootAndRun(
     const dev = await wc.spawn('npm', ['run', 'dev'])
     devServerStarted = true
     pipeRawToBus(dev.output, 'npm run dev')
+
+    // server-ready 时先预热 Vite，再通知 UI 显示 iframe
+    // 原因：server-ready 只代表端口开了，Vite 第一次处理请求时才做 esbuild
+    // pre-bundling（约 2-5s）。若直接显示 iframe，用户会看到白屏等 Vite 预打包。
+    // 改成在容器内自己 fetch 一次触发预打包，完成后 iframe 打开即是热的状态。
+    wc.on('server-ready', async (port, url) => {
+      broadcast('\x1b[36m\r\n— 预热 Vite（首次依赖预打包）—\x1b[0m\r\n')
+      try {
+        const warmup = await wc.spawn('node', [
+          '-e',
+          `require('http').get('http://localhost:${port}/',r=>{r.resume();r.on('end',()=>process.exit(0));}).on('error',()=>process.exit(0));`,
+        ])
+        await warmup.exit
+      } catch {
+        // 预热失败不阻塞，顶多白屏一下
+      }
+      hooks.onUrl(url)
+      hooks.onStatus('ready')
+      hooks.onLog('dev server ready')
+    })
     // 不 await dev.exit —— 它是常驻进程
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)

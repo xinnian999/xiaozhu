@@ -75,68 +75,50 @@
           }
 
           .booting {
-            .spinner {
-              color: var(--color-accent);
-              animation: spin 1s linear infinite;
-              margin-bottom: $space-3;
-            }
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: $space-3;
 
-            h3 {
-              font-family: var(--font-sans);
-              font-size: $fs-16;
-              font-weight: $fw-medium;
-              margin-bottom: $space-4;
+            // 大百分比数字
+            .pctNumber {
+              font-family: var(--font-mono);
+              font-size: 48px;
+              font-weight: $fw-semibold;
               color: #f3f1ed;
-              letter-spacing: -0.01em;
+              line-height: 1;
+              letter-spacing: -0.04em;
+
+              span {
+                font-size: $fs-20;
+                color: #66626c;
+                margin-left: 2px;
+              }
             }
 
-            .steps {
-              display: flex;
-              flex-direction: column;
-              gap: 6px;
-              list-style: none;
-              padding: 0;
-              margin: 0 auto $space-4;
-              text-align: left;
-              max-width: 220px;
+            // 进度条轨道
+            .progressTrack {
+              width: 200px;
+              height: 3px;
+              background: rgba(255, 255, 255, 0.06);
+              border-radius: 99px;
+              overflow: hidden;
 
-              li {
-                display: flex;
-                align-items: center;
-                gap: $space-2;
-                font-family: var(--font-mono);
-                font-size: $fs-11;
-                color: #66626c;
-                transition: color $dur-base $ease-out;
-
-                .stepDot {
-                  width: 6px;
-                  height: 6px;
-                  border-radius: 50%;
-                  border: 1px solid #3f3c44;
-                  flex-shrink: 0;
-                }
+              // 进度条填充，CSS transition 做平滑跳变
+              .progressBar {
+                height: 100%;
+                background: var(--color-accent);
+                border-radius: 99px;
+                box-shadow: 0 0 8px var(--color-accent-glow);
               }
+            }
 
-              .step_done {
-                color: #a8a4ad;
-
-                .stepDot {
-                  background: var(--color-success);
-                  border-color: var(--color-success);
-                }
-              }
-
-              .step_active {
-                color: #f3f1ed;
-
-                .stepDot {
-                  background: var(--color-accent);
-                  border-color: var(--color-accent);
-                  box-shadow: 0 0 8px var(--color-accent-glow);
-                  animation: pulse 1s ease-in-out infinite;
-                }
-              }
+            // 当前阶段描述
+            .statusLabel {
+              font-family: var(--font-sans);
+              font-size: $fs-12;
+              color: #66626c;
+              margin: 0;
             }
 
             .bootLog {
@@ -147,10 +129,10 @@
               border: 1px solid #1a191e;
               border-radius: $radius-xs;
               padding: $space-2 $space-3;
-              margin: 0;
+              margin: $space-1 0 0;
               text-align: left;
               @include truncate;
-              max-width: 100%;
+              max-width: 240px;
             }
           }
 
@@ -184,9 +166,4 @@
   }
 }
 
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
 

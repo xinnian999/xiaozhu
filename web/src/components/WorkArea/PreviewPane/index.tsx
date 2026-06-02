@@ -1,5 +1,5 @@
-import { useEffect, useRef } from 'react'
-import { Loader2, AlertTriangle } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { AlertTriangle } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
 import { useUIStore, type WCStatus, type LogLevel } from '@/store/ui'
 import { bootAndRun, syncFiles, resetContainer, isBooted, isDevRunning } from '@/lib/webcontainer'
@@ -160,7 +160,19 @@ export default function PreviewPane() {
     }
   }, [pushWcLog])
 
-  const showIframe = wcUrl && (wcStatus === 'ready' || wcStatus === 'syncing')
+  // ready 时延迟 900ms 再显示 iframe，让进度条动画有时间跑到 100%
+  // （sprint 是 800ms，多 100ms 保证数字真的跑满了再切走）
+  const [iframeVisible, setIframeVisible] = useState(false)
+  useEffect(() => {
+    if (wcStatus === 'ready' && wcUrl) {
+      const t = setTimeout(() => setIframeVisible(true), 900)
+      return () => clearTimeout(t)
+    } else {
+      setIframeVisible(false)
+    }
+  }, [wcStatus, wcUrl])
+
+  const showIframe = iframeVisible && wcUrl && (wcStatus === 'ready' || wcStatus === 'syncing')
   const isErrored = wcStatus === 'error'
 
   return (
@@ -206,30 +218,86 @@ export default function PreviewPane() {
 // ============================================
 // boot/install/start 进行时的 overlay
 // ============================================
+
+// 每个阶段对应的目标进度百分比
+const STATUS_PROGRESS: Record<string, number> = {
+  booting:    8,
+  mounting:   25,
+  installing: 65,
+  starting:   88,
+  ready:      100,
+}
+
+// 每个阶段展示给用户的描述文案
+const STATUS_LABEL: Record<string, string> = {
+  booting:    '正在启动运行环境…',
+  mounting:   '正在写入项目文件…',
+  installing: '正在准备依赖包…',
+  starting:   '正在启动开发服务…',
+  ready:      '即将完成…',
+}
+
 function BootingBlock({ status, log }: { status: WCStatus; log: string }) {
-  const steps: { key: WCStatus; label: string }[] = [
-    { key: 'booting', label: '启动运行时' },
-    { key: 'mounting', label: '挂载文件' },
-    { key: 'installing', label: '安装依赖' },
-    { key: 'starting', label: '启动开发服务' },
-  ]
-  const idx = steps.findIndex((s) => s.key === status)
+  const target = STATUS_PROGRESS[status] ?? 0
+  const label = STATUS_LABEL[status] ?? '正在加载…'
+
+  // 动画当前显示值，用 ref 驱动 raf 避免闭包过期
+  const [display, setDisplay] = useState(0)
+  const displayRef = useRef(0)
+  const rafRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current)
+
+    // 每个阶段有两段速度：
+    //   sprint：快速冲向目标值（0.8s 内追上）
+    //   drift ：到达目标后每秒缓慢 +1，让数字保持"活着"的感觉，最多漂移到 target+8
+    const SPRINT_DURATION = 800  // ms
+    const start = displayRef.current
+    const startTime = performance.now()
+
+    const tick = (now: number) => {
+      const elapsed = now - startTime
+
+      let next: number
+      if (elapsed < SPRINT_DURATION) {
+        // easeOutCubic sprint
+        const t = elapsed / SPRINT_DURATION
+        const ease = 1 - Math.pow(1 - t, 3)
+        next = start + (target - start) * ease
+        // 浮点误差可能让最后一帧停在 99.xx，sprint 结束时直接 snap 到 target
+        if (elapsed >= SPRINT_DURATION - 16) next = target
+      } else {
+        // drift：每秒 +0.6，缓慢爬行；target=100 时不 drift，保持 100
+        const driftCap = target >= 100 ? 100 : Math.min(target + 8, 99)
+        const driftSec = (elapsed - SPRINT_DURATION) / 1000
+        next = Math.min(target + driftSec * 0.6, driftCap)
+      }
+
+      const floored = Math.floor(next)
+      if (floored !== Math.floor(displayRef.current)) {
+        displayRef.current = next
+        setDisplay(floored)
+      } else {
+        displayRef.current = next
+      }
+
+      rafRef.current = requestAnimationFrame(tick)
+    }
+
+    rafRef.current = requestAnimationFrame(tick)
+    return () => {
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current)
+    }
+  }, [target])
 
   return (
     <div className={styles.booting}>
-      <Loader2 size={20} className={styles.spinner} />
-      <h3>正在启动预览</h3>
-      <ol className={styles.steps}>
-        {steps.map((s, i) => {
-          const state = i < idx ? 'done' : i === idx ? 'active' : 'pending'
-          return (
-            <li key={s.key} className={styles[`step_${state}`]}>
-              <span className={styles.stepDot} />
-              <span className={styles.stepLabel}>{s.label}</span>
-            </li>
-          )
-        })}
-      </ol>
+      <div className={styles.pctNumber}>{display}<span>%</span></div>
+      <div className={styles.progressTrack}>
+        <div className={styles.progressBar} style={{ width: `${display}%` }} />
+      </div>
+      <p className={styles.statusLabel}>{label}</p>
       {log && <pre className={styles.bootLog}>{log}</pre>}
     </div>
   )

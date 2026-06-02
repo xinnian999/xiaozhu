@@ -7,7 +7,8 @@ startup 事件 + CORS + 路由注册三件事在这里完成。
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -72,6 +73,11 @@ app.add_middleware(CrossOriginIsolationMiddleware)
 
 # CORS 由 Vite 代理处理，后端不再需要设置
 
+# ── 静态产物目录（路由和挂载共用）─────────────────────────────
+# dev 期 static/ 不存在；生产期有 dist 拷进来。
+# 提前声明让下方路由函数可以引用，不依赖定义顺序。
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+
 # ── 路由注册 ─────────────────────────────────────────────────
 app.include_router(sessions.router)
 app.include_router(files.router)
@@ -86,6 +92,31 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+# ── deps-snapshot.bin：用 gzip 压缩版本响应 ────────────────────
+# 66MB 的原始快照直接通过 StaticFiles 吐出来太慢。
+# Dockerfile 构建时已经生成 .bin.gz（约 18MB），这里拦截这个路径，
+# 优先返回压缩版本 + Content-Encoding: gzip，浏览器透明解压。
+# 前端 fetch 拿到的 arrayBuffer 是解压后的原始字节，wc.mount() 照常工作。
+# Cache-Control 设 1 天：manifest depsKey 校验会在下载前先拦截版本不匹配的情况。
+@app.get("/deps-snapshot.bin")
+async def serve_snapshot(request: Request) -> FileResponse:
+    gz_path = STATIC_DIR / "deps-snapshot.bin.gz"
+    if gz_path.exists():
+        return FileResponse(
+            gz_path,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Encoding": "gzip",
+                "Cache-Control": "public, max-age=86400",
+            },
+        )
+    # 没有压缩版本时回退到原始文件（开发环境 / 首次部署前）
+    return FileResponse(
+        STATIC_DIR / "deps-snapshot.bin",
+        media_type="application/octet-stream",
+    )
+
+
 # ── 生产模式：托管前端构建产物 ──────────────────────────────
 # 约定：把前端 `bun run build` 出的 dist 拷到 server/static/ 即可，无需任何环境变量。
 # 用 __file__ 定位目录，不受 uvicorn 启动时工作目录影响。
@@ -94,7 +125,6 @@ async def health() -> dict:
 # 必须放在所有 API 路由「之后」：Starlette 按注册顺序匹配，前面的 /api/* 和
 # /health 先命中，剩下的一切路径才落到这个静态挂载上。
 #   html=True：访问 "/" 自动返回 index.html（单页应用入口）。
-STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 if STATIC_DIR.is_dir():
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 

@@ -5,6 +5,7 @@ import WorkArea from '@/components/WorkArea'
 import Toast from '@/components/Toast'
 import { useThemeStore } from '@/store/theme'
 import { useSessionStore } from '@/store/session'
+import { warmupSnapshot } from '@/lib/depsCache'
 import styles from './App.module.scss'
 
 function App() {
@@ -20,6 +21,9 @@ function App() {
   useEffect(() => {
     // 错误统一由 axios 拦截器 toast，这里只需阻止 unhandled rejection
     init().catch(() => {})
+    // 后台预热：页面一加载就悄悄把 node_modules 快照下好存进 IndexedDB，
+    // 等用户输入完第一条需求触发 boot 时直接命中本地缓存，无感知
+    warmupSnapshot()
   }, [])
 
   return (

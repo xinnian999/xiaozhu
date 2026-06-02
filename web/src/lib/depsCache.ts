@@ -127,6 +127,43 @@ interface PrebuiltManifest {
 }
 
 /**
+ * 页面加载时后台预热：悄悄把快照下好存进 IndexedDB。
+ * 这样等用户输入第一条需求、真正触发 bootAndRun 时，第一级缓存已命中，无感知。
+ * 任何失败都静默退出，不影响主流程。
+ *
+ * 返回的 Promise 会被 webcontainer.ts 复用：
+ * 如果用户在预热还没完成时就进了项目，bootAndRun 会 await 这个 Promise，
+ * 等它结束后再查 IndexedDB —— 不会重复下载同一个文件。
+ */
+let _warmupPromise: Promise<void> | null = null
+
+export function warmupSnapshot(): void {
+  if (_warmupPromise) return  // 已经在跑，不重复启动
+  _warmupPromise = (async () => {
+    try {
+      const manifestRes = await fetch(PREBUILT_MANIFEST_URL)
+      if (!manifestRes.ok) return
+      const { depsKey } = (await manifestRes.json()) as PrebuiltManifest
+
+      const existing = await getSnapshot(depsKey)
+      if (existing) return
+
+      const snapRes = await fetch(PREBUILT_SNAPSHOT_URL)
+      if (!snapRes.ok) return
+      const snapshot = new Uint8Array(await snapRes.arrayBuffer())
+      await saveSnapshot(depsKey, snapshot)
+    } catch {
+      // 预热失败不影响运行，静默退出
+    }
+  })()
+}
+
+/** bootAndRun 用：如果预热还在进行中，await 这个 Promise 再查 IndexedDB，避免重复下载 */
+export function getWarmupPromise(): Promise<void> | null {
+  return _warmupPromise
+}
+
+/**
  * 尝试拉取预置静态快照。仅当其 manifest 里的 depsKey 与当前一致时才返回，
  * 避免模板依赖改了还挂旧快照。任何失败（文件不存在 / 网络错误 / 不匹配）都返回 null，
  * 让调用方安静退回 npm install。

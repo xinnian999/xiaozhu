@@ -6,6 +6,7 @@ import {
   saveSnapshot,
   deleteSnapshot,
   fetchPrebuiltSnapshot,
+  getWarmupPromise,
 } from '@/lib/depsCache'
 
 // ============================================
@@ -314,6 +315,29 @@ export async function bootAndRun(
       }
 
       // ── 第二级：预置静态快照（新用户首次兜底，fetch 自家 CDN，与 npm registry 无关）──
+      if (!restored) {
+        // 预热可能还在后台下载同一个文件；先等它结束再查 IndexedDB，
+        // 命中则直接用，避免重复发起 13MB 下载
+        const warmup = getWarmupPromise()
+        if (warmup) {
+          broadcast('\x1b[36m\r\n— 等待后台预热完成 —\x1b[0m\r\n')
+          await warmup.catch(() => {})  // 预热失败无所谓，下面照常走
+          const cached = await getSnapshot(depsKey)
+          if (cached) {
+            try {
+              hooks.onLog('从预热缓存恢复依赖')
+              broadcast('\x1b[36m\r\n— 从预热缓存恢复 node_modules —\x1b[0m\r\n')
+              await mountSnapshotAndRelink(wc, cached)
+              restored = true
+            } catch (e) {
+              const reason = e instanceof Error ? e.message : String(e)
+              broadcast(`\x1b[31m\r\n[diag] 预热缓存恢复失败：${reason}\x1b[0m\r\n`)
+              await deleteSnapshot(depsKey)
+            }
+          }
+        }
+      }
+
       if (!restored) {
         const prebuilt = await fetchPrebuiltSnapshot(depsKey)
         if (prebuilt) {

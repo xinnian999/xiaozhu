@@ -5,11 +5,13 @@ import {
   listSessions,
   listSessionFiles,
   listSessionMessages,
+  listModels,
   saveVersion,
   restoreVersion,
   listVersions,
   type ApiSession,
   type ApiMessage,
+  type ApiModel,
 } from '@/lib/api'
 
 // ============================================
@@ -43,6 +45,15 @@ type SessionState = {
   sessions: ChatSession[]
   activeId: string | null
   loading: boolean
+
+  // 可选模型清单（从后端 /api/models 拉，全局共享，不分会话）+ 当前选中的模型 id。
+  // 模型选择是「每条消息可变」的：选了哪个，下次发消息就用哪个，不绑定到会话。
+  models: ApiModel[]
+  selectedModel: string | null
+  /** 拉取模型清单；首个模型作为默认选中 */
+  loadModels: () => Promise<void>
+  /** 切换当前选中的模型 */
+  setSelectedModel: (id: string) => void
 
   init: () => Promise<void>
   createNew: (title?: string) => Promise<ChatSession>
@@ -190,6 +201,24 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   sessions: [],
   activeId: null,
   loading: false,
+
+  models: [],
+  selectedModel: null,
+
+  loadModels: async () => {
+    try {
+      const models = await listModels()
+      set((s) => ({
+        models,
+        // 还没选过模型时，默认选第一个；已经选过就保持用户的选择
+        selectedModel: s.selectedModel ?? models[0]?.id ?? null,
+      }))
+    } catch (e) {
+      console.error('加载模型清单失败', e)
+    }
+  },
+
+  setSelectedModel: (id) => set({ selectedModel: id }),
 
   init: async () => {
     set({ loading: true })

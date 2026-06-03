@@ -5,6 +5,7 @@ import { useUIStore } from '@/store/ui'
 import { streamChat } from '@/lib/api'
 import { toast } from '@/lib/toast'
 import MessageList from './MessageList'
+import ModelSelector from './ModelSelector'
 import styles from './index.module.scss'
 
 // ============================================
@@ -21,6 +22,7 @@ export default function ChatSidebar() {
   const endStreaming = useSessionStore((s) => s.endStreaming)
   const applyFileWrite = useSessionStore((s) => s.applyFileWrite)
   const applyFileDelete = useSessionStore((s) => s.applyFileDelete)
+  const selectedModel = useSessionStore((s) => s.selectedModel)
   const mobileChatOpen = useUIStore((s) => s.mobileChatOpen)
   const setMobileChatOpen = useUIStore((s) => s.setMobileChatOpen)
   const chatCollapsed = useUIStore((s) => s.chatCollapsed)
@@ -72,7 +74,7 @@ export default function ChatSidebar() {
     // 3. 流式消费 SSE，逐 token 累积到 streamingText
     let accumulated = ''
     try {
-      for await (const event of streamChat(text, targetSessionId, controller.signal)) {
+      for await (const event of streamChat(text, targetSessionId, selectedModel, controller.signal)) {
         if (event.type === 'message_delta') {
           accumulated += event.text
           setStreamingText(accumulated)
@@ -188,6 +190,7 @@ export default function ChatSidebar() {
 
             <div className={styles.composerActions}>
               <div className={styles.composerTools}>
+                <ModelSelector />
                 <button className={styles.toolBtn} aria-label="附件">
                   <Paperclip size={14} />
                 </button>

@@ -56,6 +56,15 @@ export type ApiFile = {
   updated_at: string
 }
 
+// 后端 GET /api/models 返回的单个模型。icon 是 @lobehub/icons 的「组件标识符」
+// （如 "Qwen.Color" / "Claude.Color"），不是 URL；前端用它解析成图标组件。
+// 注意：后端不会返回 group / api_key 这些内部字段，前端拿不到也不需要。
+export type ApiModel = {
+  id: string
+  label: string
+  icon: string
+}
+
 // ── Sessions CRUD ───────────────────────────────────────────────
 
 export async function createSession(title?: string): Promise<ApiSession> {
@@ -65,6 +74,14 @@ export async function createSession(title?: string): Promise<ApiSession> {
 
 export async function listSessions(): Promise<ApiSession[]> {
   const { data } = await http.get<ApiSession[]>('/api/sessions')
+  return data
+}
+
+// ── Models ──────────────────────────────────────────────────────
+
+/** 拉取可选模型清单，给模型下拉框渲染。 */
+export async function listModels(): Promise<ApiModel[]> {
+  const { data } = await http.get<ApiModel[]>('/api/models')
   return data
 }
 
@@ -172,6 +189,7 @@ export async function pushLogs(sessionId: string, logs: PushLog[]): Promise<void
 export async function* streamChat(
   message: string,
   sessionId: string,
+  model: string | null,
   signal?: AbortSignal,
 ): AsyncGenerator<SSEEvent> {
   // 用户主动中断时 fetch / reader 会抛 AbortError，这里统一识别后静默收尾，不弹错误
@@ -183,7 +201,8 @@ export async function* streamChat(
     res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, session_id: sessionId }),
+      // model 为空（清单还没加载完）时不传，让后端用默认模型；有值才带上
+      body: JSON.stringify({ message, session_id: sessionId, ...(model ? { model } : {}) }),
       signal,
     })
   } catch (e: unknown) {

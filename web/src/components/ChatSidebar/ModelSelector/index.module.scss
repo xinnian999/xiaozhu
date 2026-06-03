@@ -1,0 +1,121 @@
+@use '@/styles/variables' as *;
+@use '@/styles/common' as *;
+
+.selector {
+  position: relative;
+
+  .trigger {
+    @include button-reset;
+    display: flex;
+    align-items: center;
+    gap: $space-1;
+    padding: $space-1 $space-2;
+    border-radius: $radius-md;
+    color: var(--color-text-dim);
+    font-size: $fs-12;
+    transition: color $dur-base $ease-out, background $dur-base $ease-out;
+
+    &:hover,
+    &.triggerOpen {
+      color: var(--color-text);
+      background: var(--color-bg-hover);
+    }
+
+    .triggerIcon {
+      display: inline-flex;
+      align-items: center;
+      flex-shrink: 0;
+    }
+
+    .triggerLabel {
+      @include truncate;
+      max-width: 120px;
+      font-weight: $fw-medium;
+    }
+
+    .caret {
+      flex-shrink: 0;
+      color: var(--color-text-mute);
+      transition: transform $dur-base $ease-out;
+    }
+
+    &.triggerOpen .caret {
+      transform: rotate(180deg);
+    }
+  }
+
+  // 面板向「上」弹出：选择器在输入框底部工具栏，往下没空间
+  .panel {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 0;
+    z-index: 50;
+    width: min(240px, 80vw);
+    padding: $space-2;
+    background: var(--color-bg-elev);
+    border: 1px solid var(--color-border);
+    border-radius: $radius-lg;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+    animation: fade-up 0.15s $ease-out;
+
+    .list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      max-height: 280px;
+      overflow-y: auto;
+      @include hide-scrollbar;
+    }
+
+    .item {
+      @include button-reset;
+      display: flex;
+      align-items: center;
+      gap: $space-2;
+      width: 100%;
+      padding: $space-2 $space-2;
+      border-radius: $radius-md;
+      text-align: left;
+      transition: background $dur-base $ease-out;
+
+      &:hover {
+        background: var(--color-bg-hover);
+      }
+
+      &.itemActive {
+        background: var(--color-bg-soft);
+      }
+
+      .itemIcon {
+        display: inline-flex;
+        align-items: center;
+        flex-shrink: 0;
+      }
+
+      .itemLabel {
+        flex: 1;
+        min-width: 0;
+        font-size: $fs-13;
+        font-weight: $fw-medium;
+        color: var(--color-text);
+        @include truncate;
+      }
+
+      .itemCheck {
+        flex-shrink: 0;
+        color: var(--color-accent);
+      }
+    }
+  }
+
+  // lobe 解析不出时的 lucide 兜底图标，颜色调淡和品牌图标区分
+  .fallbackIcon {
+    color: var(--color-text-mute);
+  }
+
+  @include light {
+    .panel {
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.12);
+    }
+  }
+}

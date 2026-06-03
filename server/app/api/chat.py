@@ -12,14 +12,19 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import log_store
-from app.config import settings
 from app.db import get_db
+# 模型注册表 + LLM 构造都集中在 app.llm，这里只是引用方
+from app.llm import (
+    ALLOWED_MODEL_IDS,
+    DEFAULT_MODEL_ID,
+    build_llm,
+    public_models,
+)
 from app.models.file import File
 # 起别名 DBMessage 避免和 langchain_core.messages 概念混淆
 # （那边的 SystemMessage/HumanMessage 是 LLM 对话消息，这里的是数据库行）
@@ -28,20 +33,6 @@ from app.models.session import Session
 from app.versioning import snapshot_current_files
 
 router = APIRouter(prefix="/api", tags=["chat"])
-
-
-# ── 基础 LLM ────────────────────────────────────────────────────────────────────
-# 故意不在这里 bind_tools：工具实现要闭包捕获请求级别的 db / session_id，
-# 所以每次请求才能把工具构造出来再 bind。
-# 走 OpenAI 兼容协议：换中转更方便，且 Anthropic 协议的中转常会注入自己的工具集污染请求。
-base_llm = ChatOpenAI(
-    model=settings.llm_model,
-    api_key=settings.openai_api_key,
-    base_url=settings.openai_base_url,
-    # 一次 write_file 要塞下整个文件内容，4096 太小，写稍大的页面就会被截断
-    # （finish_reason=length），导致工具参数残缺、本轮空转。先给到 16384。
-    max_tokens=16384,
-)
 
 
 SYSTEM_PROMPT = """你是 Vibuild，一个 AI 前端代码生成助手。
@@ -85,6 +76,11 @@ class ChatRequest(BaseModel):
     # Pydantic 缺字段时 FastAPI 自动返 422，不用我们手动校验。
     session_id: str
     message: str
+    # 前端选的模型。可选 —— 不传就用白名单第一个（默认模型），
+    # 这样老前端 / curl 不带 model 也能照常工作，向后兼容。
+    # 注意：这里只接收字符串，「是否在白名单内」的校验放在路由层做（见 chat 函数），
+    # 因为校验不通过要返回 HTTP 400，而 Pydantic 字段校验器不方便返回自定义 HTTP 状态码。
+    model: str | None = None
 
 
 # ── SSE 工具函数 ────────────────────────────────────────────────────────────────
@@ -185,7 +181,10 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
     # 每请求构造一次工具 + bind_tools，因为工具闭包了请求级别的 db / session_id
     tools = build_tools(db, req.session_id)
     tools_by_name = {t.name: t for t in tools}
-    llm = base_llm.bind_tools(tools)
+    # 按本次请求选的模型现造 LLM 再 bind_tools。req.model 已在路由层校验过白名单，
+    # 这里直接用。这是「每条消息可变模型」的落点：同一会话里这条用 qwen、
+    # 下条用 claude 都行，因为每次进 agent_loop 都重新构造。
+    llm = build_llm(req.model).bind_tools(tools)
 
     # 入库小助手：把一条消息写进 messages 表。闭包捕获 db / session_id，
     # 调用处只关心"存什么"。每存一条就 commit，保证自增 id 单调递增 ——
@@ -349,12 +348,30 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
 
 # ── 路由 ────────────────────────────────────────────────────────────────────────
 
+@router.get("/models")
+async def list_models() -> list[dict]:
+    """返回可选模型清单，给前端渲染下拉框。
+
+    具体只吐哪些字段、为什么不含 group/api_key，见 app.llm.public_models。
+    """
+    return public_models()
+
+
 @router.post("/chat")
 async def chat(
     req: ChatRequest,
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     """SSE 流式对话。"""
+
+    # 模型校验 + 填默认值。放在路由层（而不是 Pydantic 字段里），是因为校验不通过
+    # 要返回 HTTP 400，HTTPException 在这里写最自然。
+    #   - 没传 model：用白名单第一个当默认，保证老前端 / curl 不带 model 也能跑。
+    #   - 传了但不在白名单：拒绝。绝不把未经许可的 model 字符串透传给中转。
+    if req.model is None:
+        req.model = DEFAULT_MODEL_ID
+    elif req.model not in ALLOWED_MODEL_IDS:
+        raise HTTPException(status_code=400, detail=f"不支持的模型：{req.model}")
 
     # 先校验 session 存在 —— 否则后面工具一调用就报外键错，体验差。
     # 这一步是普通查询，发生在 StreamingResponse 开始之前，

@@ -52,13 +52,17 @@ SYSTEM_PROMPT = """你是 Vibuild，一个 AI 前端代码生成助手。
 1. 先调 list_files 看当前项目结构
 2. 修改已有文件前，必须先用 read_file 读取原内容
 3. 用 write_file 写入文件（path 是相对路径，content 是完整内容，不能省略）
-4. 所有文件写完后，调 get_browser_logs 检查预览有没有运行报错
-5. 如果有报错：用 read_file 读出错文件 → 定位问题 → write_file 修复 →
-   再次 get_browser_logs 确认。最多修复 3 轮，仍修不好就如实告诉用户卡在哪
-6. 确认无报错后，用一句话告诉用户做了什么
+4. 一组完整、能正常渲染的改动都写完后，调 update_preview 把它们应用到预览
+   （在此之前 write_file 只是暂存，预览不会刷新，用户看不到半成品）
+5. 调 update_preview 之后，再调 get_browser_logs 检查预览有没有运行报错
+6. 如果有报错：用 read_file 读出错文件 → 定位问题 → write_file 修复 →
+   update_preview → 再次 get_browser_logs 确认。最多修复 3 轮，仍修不好就如实告诉用户卡在哪
+7. 确认无报错后，用一句话告诉用户做了什么
 
 【自检要点】
-- get_browser_logs 是你唯一能"看到"代码跑起来效果的方式，写完务必调用
+- write_file 只是暂存文件，必须调 update_preview 才会真正应用到预览并跑起来；
+  顺序务必是「写完一组 → update_preview → get_browser_logs」，否则查到的是改动前的旧状态
+- get_browser_logs 是你唯一能"看到"代码跑起来效果的方式，应用后务必调用
 - 常见错误：变量名拼写、import 路径、JSX 语法、用了未安装的依赖
 - 报错信息里通常带文件名和行号，照着定位
 
@@ -171,7 +175,22 @@ def build_tools(db: AsyncSession, session_id: str) -> list:
             await asyncio.sleep(0.25)
         return "预览运行正常，没有报错。"
 
-    return [write_file, read_file, list_files, get_browser_logs]
+    @tool
+    async def update_preview() -> str:
+        """把刚写的文件应用到预览，让它在浏览器里真正跑起来。
+
+        重要：write_file 只是把文件「暂存」下来，并不会立刻刷新预览 —— 这样用户
+        才不会看到「组件写好了、配套样式还没写」的半成品。等你写完一组完整、能正常
+        渲染的改动后，调用本工具「揭晓」一次，预览才会更新。
+
+        典型用法：write_file 写完所有相关文件 → update_preview → get_browser_logs 查报错。
+        """
+        # 这个工具本身不碰数据库，它只是一个「现在可以刷新预览了」的信号。
+        # 真正的 SSE 推送在 agent_loop 里做（和 write_file 推 file_write 同理），
+        # 因为 yield 事件得在生成器函数里，工具闭包里没法 yield。
+        return "已请求刷新预览。"
+
+    return [write_file, read_file, list_files, get_browser_logs, update_preview]
 
 
 # ── Agentic Loop ────────────────────────────────────────────────────────────────
@@ -314,8 +333,14 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
                     ToolMessage(content=str(tool_result), tool_call_id=tool_call["id"])
                 )
 
-                # write_file 落库成功后，立刻把整文件推给前端，
-                # 前端会 mount 到 WebContainer 触发 Vite 热更新（渐进式预览的核心爽点）。
+                # get_browser_logs 的结果（报错详情 / "运行正常"）打到后端日志，方便排查。
+                # 前端不展示，所以不推事件、也不入库。
+                if name == "get_browser_logs":
+                    print(f"[browser_logs] {tool_result}")
+
+                # write_file 落库成功后，把整文件推给前端。注意：前端只用它更新
+                # 代码视图 / 文件树，**不会**立刻同步进运行中的预览 —— 预览要等 AI 主动
+                # 调 update_preview 才揭晓，避免把「组件写好、样式没跟上」的半成品闪给用户。
                 if name == "write_file":
                     wrote_files = True
                     yield sse({
@@ -323,6 +348,10 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
                         "path": args["path"],
                         "content": args["content"],
                     })
+                # AI 觉得「这一组改动写完、可以渲染了」时调 update_preview，
+                # 这里推一个 preview_refresh 信号，前端收到才把暂存的文件同步进预览。
+                elif name == "update_preview":
+                    yield sse({"type": "preview_refresh"})
 
         # LLM 给出最终回复后，把 assistant 文本入库（空字符串就不存）
         if final_assistant_text:

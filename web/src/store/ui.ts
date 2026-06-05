@@ -61,6 +61,12 @@ type UIState = {
   previewReloadTick: number
   reloadPreview: () => void
 
+  /** 预览应用计数：自增即把当前暂存文件同步进运行中的预览（增量 syncFiles，走 vite HMR）。
+   *  与 reloadPreview 的区别：这个是「把新文件应用进去」（软更新），不重挂 iframe；
+   *  reloadPreview 是「整页重载」（硬刷新）。AI 调 update_preview / 流结束兜底时自增它。 */
+  previewApplyTick: number
+  requestPreviewApply: () => void
+
   // —— 控制台日志 ——
   /** 控制台是否展开（底部抽屉） */
   consoleOpen: boolean
@@ -111,6 +117,9 @@ export const useUIStore = create<UIState>((set) => ({
 
   previewReloadTick: 0,
   reloadPreview: () => set((s) => ({ previewReloadTick: s.previewReloadTick + 1 })),
+
+  previewApplyTick: 0,
+  requestPreviewApply: () => set((s) => ({ previewApplyTick: s.previewApplyTick + 1 })),
 
   // —— 控制台 ——
   consoleOpen: false,

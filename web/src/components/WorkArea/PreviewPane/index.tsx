@@ -17,6 +17,10 @@ export default function PreviewPane() {
   const currentVersion = useSessionStore((s) => s.currentVersion())
   // 当前会话 id —— 回传日志要带上它，后端按 session 分桶存
   const activeId = useSessionStore((s) => s.activeId)
+  // 当前会话是否在流式生成中 —— 生成途中不自动同步预览（等 AI 主动 update_preview）
+  const isStreaming = useSessionStore(
+    (s) => s.sessions.find((x) => x.id === s.activeId)?.isStreaming ?? false,
+  )
 
   const wcStatus = useUIStore((s) => s.wcStatus)
   const wcUrl = useUIStore((s) => s.wcUrl)
@@ -31,9 +35,14 @@ export default function PreviewPane() {
   const clearWcLogs = useUIStore((s) => s.clearWcLogs)
   // 刷新计数器：变化即触发 iframe 重新挂载
   const reloadTick = useUIStore((s) => s.previewReloadTick)
+  // 应用计数器：变化即把当前暂存文件增量同步进预览（AI 调 update_preview 时自增）
+  const applyTick = useUIStore((s) => s.previewApplyTick)
 
   // 标记上次同步的版本号，避免同 version 反复 sync
   const syncedVersionRef = useRef<string | null>(null)
+  // 标记上次「应用」用到的 applyTick —— 区分「是新的 update_preview 请求」还是
+  // 「流式途中 version 变了但还没到揭晓时机」
+  const appliedTickRef = useRef(0)
   // 容器当前归属哪个会话 —— 用来判断 activeId 变了要不要 teardown 重挂
   const containerSessionRef = useRef<string | null>(null)
   // 当前 iframe 的引用，用于校验 postMessage 来源
@@ -94,13 +103,22 @@ export default function PreviewPane() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, currentVersion.files])
 
-  // —— 切版本：同会话内文件变更走增量同步（依赖 vite HMR，不重启 dev）——
+  // —— 把文件变更增量同步进运行中的预览（依赖 vite HMR，不重启 dev）——
+  // 触发来源有两类：
+  //   1. 流式生成途中：AI 调 update_preview → applyTick 自增 → 揭晓一次完整改动；
+  //      本轮结束（isStreaming 翻 false 让本 effect 重跑）→ 兜底同步最终态。
+  //   2. 非流式：回滚版本等场景，version 一变就直接同步。
+  // 流式途中每个 file_write 都会 bump version，但我们故意不跟着同步 ——
+  // 否则又会把「组件写好、样式没跟上」的半成品闪给用户（这正是本次改造要解决的）。
   useEffect(() => {
     if (!isDevRunning()) return
     // 只同步「当前会话自己的」版本变更；切会话的重挂由上面的 effect 负责，
     // 这里若不挡住，会把新会话的文件 sync 进尚未销毁的旧容器。
     if (containerSessionRef.current !== activeId) return
     if (syncedVersionRef.current === currentVersion.id) return
+    // 流式途中、且不是「新的 update_preview 请求」→ 暂不同步，保持上一个稳定态
+    if (isStreaming && applyTick === appliedTickRef.current) return
+    appliedTickRef.current = applyTick
 
     setWCStatus('syncing')
     syncFiles(currentVersion.files, { onLog: setWCLog })
@@ -112,7 +130,7 @@ export default function PreviewPane() {
         setWCError(e instanceof Error ? e.message : String(e))
         setWCStatus('error')
       })
-  }, [activeId, currentVersion.id, currentVersion.files, setWCStatus, setWCLog, setWCError])
+  }, [activeId, currentVersion.id, currentVersion.files, applyTick, isStreaming, setWCStatus, setWCLog, setWCError])
 
   // —— 浏览器 console 桥接：iframe → 父页面 ——
   // iframe 里注入的脚本会 postMessage({ type: 'vibuild-console', level, text })，

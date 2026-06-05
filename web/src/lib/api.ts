@@ -35,6 +35,8 @@ export type SSEEvent =
   | { type: 'message_delta'; text: string }
   | { type: 'file_write'; path: string; content: string }
   | { type: 'file_delete'; path: string }
+  // AI 调 update_preview 时推这个：把暂存的文件揭晓到运行中的预览（无 payload，纯信号）
+  | { type: 'preview_refresh' }
   | { type: 'plan_update'; todos: unknown[] }
   | { type: 'tool_call'; name: string; args: object }
   | { type: 'version'; version_id: number; seq: number }

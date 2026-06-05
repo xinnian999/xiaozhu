@@ -29,6 +29,8 @@ export default function ChatSidebar() {
   // 本轮如果改了文件，结束时强制刷一下预览
   // 原因：vite HMR 对 index.html 改动不响应，React Fast Refresh 也偶尔失败
   const reloadPreview = useUIStore((s) => s.reloadPreview)
+  // 把暂存的文件应用到运行中的预览（AI 调 update_preview 时触发）
+  const requestPreviewApply = useUIStore((s) => s.requestPreviewApply)
 
   const [draft, setDraft] = useState('')
   // 首条消息自动建会话期间禁用输入，避免重复点
@@ -94,12 +96,17 @@ export default function ChatSidebar() {
             toolArgs: event.args as Record<string, unknown>,
           }))
         } else if (event.type === 'file_write') {
-          // LLM 写文件 —— 更新本地 files 快照，PreviewPane 会自动 syncFiles
+          // LLM 写文件 —— 只更新本地 files 快照（代码视图/文件树实时跟着变）。
+          // 注意：流式途中 PreviewPane 不会自动 syncFiles，运行中的预览保持上一个稳定态，
+          // 等收到 preview_refresh 才揭晓，避免闪半成品。
           applyFileWrite(event.path, event.content)
           filesChanged = true
         } else if (event.type === 'file_delete') {
           applyFileDelete(event.path)
           filesChanged = true
+        } else if (event.type === 'preview_refresh') {
+          // AI 觉得这一组改动写完、可渲染了 —— 把暂存文件应用进预览（增量 HMR，软更新）
+          requestPreviewApply()
         } else if (event.type === 'version') {
           // 产生了新版本：先把本轮已累积的叙述固化成消息（让最终回复气泡先落位），
           // 再插一张版本卡，保证卡片排在回复之后

@@ -23,5 +23,6 @@ export default defineConfig({
         // 不 rewrite：/api/sessions → http://localhost:8000/api/sessions
       },
     },
+    open: true,
   },
 });

@@ -19,19 +19,27 @@ from app.config import settings
 #   3. 解耦 —— 以后改清单只动这一处，前端从 GET /api/models 动态拉，不用跟着改。
 # 这就是「白名单」：它是可选模型的唯一真相源。
 #
-# 每项四个字段：
+# 每项三个字段：
 #   id    —— 真正传给中转的模型名（后端 / API 用）
 #   label —— 给前端下拉框展示的人类可读名
-#   icon  —— @lobehub/icons 的「组件标识符」（不是 URL！），格式 "{Name}" 或 "{Name}.{Variant}"，
-#            如 "Claude.Color" / "Qwen.Color"。前端拿这个字符串用 @lobehub/icons 解析成图标组件。
 #   group —— 该模型属于中转站的哪个「分组」。中转站按分组发不同 api_key，
 #            所以这里只存分组名（不存 key！），真正的 key 在 build_llm 里按分组从 .env 取。
 #            同一分组下的多个模型共用一个 key —— 这正是「分组」存在的意义。
+#            另：分组在本项目里就等于「厂商」，所以 logo 也按分组派生（见 GROUP_ICONS）。
 AVAILABLE_MODELS = [
-    {"id": "qwen3.6-plus", "label": "Qwen3.6 Plus", "icon": "Qwen.Color", "group": "qwen"},
-    {"id": "qwen3-coder-next", "label": "Qwen3 Coder Next", "icon": "Qwen.Color", "group": "qwen"},
-    {"id": "gpt-5.5", "label": "GPT-5.5", "icon": "OpenAI.Color", "group": "gpt"},
+    {"id": "qwen3.6-plus", "label": "Qwen3.6 Plus", "group": "qwen"},
+    {"id": "qwen3-coder-next", "label": "Qwen3 Coder Next", "group": "qwen"},
+    {"id": "gpt-5.5", "label": "GPT-5.5", "group": "gpt"},
 ]
+
+# 分组 → 品牌 logo（@lobehub/icons 的「组件标识符」，不是 URL！）。
+# 格式 "{Name}" 或 "{Name}.{Variant}"，如 "Qwen.Color" / "OpenAI"。前端拿这个字符串解析成图标组件。
+# logo 是「厂商」属性，而分组在本项目里就是厂商，所以同分组的模型共用一个 logo —— 没必要每个模型重复写。
+# 注意：不是每个厂商都有 .Color 彩色变体（如 OpenAI logo 本身是纯黑，只有默认 Mono 形态）。
+GROUP_ICONS = {
+    "qwen": "Qwen.Color",
+    "gpt": "OpenAI",
+}
 
 # 校验用的集合：判断「前端传来的 model 是否合法」时，用 set 查 O(1)，
 # 比每次遍历 AVAILABLE_MODELS 快，也读着更清楚（in 一个集合 = 在不在白名单里）。
@@ -48,9 +56,12 @@ def public_models() -> list[dict]:
     """给前端的模型清单。只吐 id / label / icon —— 故意不含 group，更不含 api_key：
     group 是后端内部「选哪个 key」的路由信息，前端不需要知道；
     api_key 是密钥，绝不能出现在任何响应里。
+
+    icon 不存在模型里，而是这里按 group 现派生出来：分组找不到对应 logo 就给空串，
+    前端解析不出会自动退回兜底图标，不会报错。
     """
     return [
-        {"id": m["id"], "label": m["label"], "icon": m["icon"]}
+        {"id": m["id"], "label": m["label"], "icon": GROUP_ICONS.get(m["group"], "")}
         for m in AVAILABLE_MODELS
     ]
 

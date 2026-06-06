@@ -148,6 +148,32 @@ export async function updateProfile(payload: ProfileUpdate): Promise<ApiUser> {
   return data
 }
 
+// ── 分享（上传构建产物 / 撤销）──────────────────────────────────
+// 上传的单个文件：path 相对路径，content 文本或 base64，is_base64 标记二进制。
+export type ShareAssetPayload = { path: string; content: string; is_base64: boolean }
+
+/** 上传 dist 并开启分享，返回 share_token。 */
+export async function shareBuild(
+  sessionId: string,
+  files: ShareAssetPayload[],
+): Promise<string> {
+  const { data } = await http.put<{ share_token: string }>(
+    `/api/sessions/${sessionId}/share`,
+    { files },
+  )
+  return data.share_token
+}
+
+/** 撤销分享：删除已上传的构建产物，旧链接立即失效。 */
+export async function revokeShare(sessionId: string): Promise<void> {
+  await http.delete(`/api/sessions/${sessionId}/share`)
+}
+
+/** 由 token 拼出访客可访问的完整分享链接（同源 + 结尾斜杠）。 */
+export function shareUrl(token: string): string {
+  return `${window.location.origin}/shared/${token}/`
+}
+
 // ── Sessions CRUD ───────────────────────────────────────────────
 
 export async function createSession(title?: string): Promise<ApiSession> {

@@ -1,0 +1,212 @@
+@use '@/styles/variables' as *;
+@use '@/styles/common' as *;
+
+// ============================================
+// 分享弹窗样式
+// ============================================
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: $space-4;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(2px);
+
+  .modal {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    max-width: 440px;
+    padding: $space-5;
+    border: 1px solid var(--color-border);
+    border-radius: $radius-lg;
+    background: var(--color-bg-soft);
+    box-shadow: var(--shadow-pop);
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: $space-4;
+
+      .title {
+        margin: 0;
+        font-size: $fs-16;
+        font-weight: $fw-semibold;
+        color: var(--color-text);
+      }
+
+      .closeBtn {
+        @include button-reset;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        border-radius: $radius-sm;
+        color: var(--color-text-mute);
+
+        &:hover {
+          background: var(--color-bg-hover);
+          color: var(--color-text);
+        }
+      }
+    }
+
+    // —— 构建中 / 出错的居中区 ——
+    .center {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: $space-3;
+      padding: $space-6 $space-4;
+      text-align: center;
+
+      .centerText {
+        margin: 0;
+        font-size: $fs-14;
+        font-weight: $fw-medium;
+        color: var(--color-text);
+      }
+
+      .errIcon {
+        color: var(--color-danger);
+      }
+    }
+
+    .desc {
+      margin: 0 0 $space-4;
+      font-size: $fs-13;
+      line-height: $lh-normal;
+      color: var(--color-text-dim);
+    }
+
+    // —— 链接行：输入框 + 复制 + 打开 ——
+    .linkRow {
+      display: flex;
+      align-items: center;
+      gap: $space-2;
+
+      .linkInput {
+        flex: 1;
+        min-width: 0;
+        height: 38px;
+        padding: 0 $space-3;
+        border: 1px solid var(--color-border);
+        border-radius: $radius-md;
+        background: var(--color-bg-mute);
+        color: var(--color-text);
+        font-size: $fs-13;
+        font-family: var(--font-mono);
+        outline: none;
+
+        &:focus {
+          border-color: var(--color-accent);
+        }
+      }
+
+      .iconBtn {
+        @include button-reset;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 38px;
+        height: 38px;
+        flex-shrink: 0;
+        border: 1px solid var(--color-border);
+        border-radius: $radius-md;
+        color: var(--color-text-dim);
+        transition: border-color $dur-fast $ease-out, color $dur-fast $ease-out;
+
+        &:hover {
+          border-color: var(--color-border-strong);
+          color: var(--color-text);
+        }
+      }
+    }
+
+    .hint {
+      margin: $space-3 0 0;
+      font-size: $fs-12;
+      line-height: $lh-normal;
+      color: var(--color-text-mute);
+    }
+
+    .actions {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: $space-5;
+    }
+
+    .primaryBtn {
+      @include button-reset;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 38px;
+      padding: 0 $space-5;
+      border-radius: $radius-md;
+      background: var(--color-accent);
+      color: #fff;
+      font-size: $fs-14;
+      font-weight: $fw-medium;
+
+      &:hover {
+        opacity: 0.9;
+      }
+    }
+
+    .dangerBtn {
+      @include button-reset;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 36px;
+      min-width: 88px;
+      padding: 0 $space-4;
+      border: 1px solid var(--color-border);
+      border-radius: $radius-md;
+      color: var(--color-danger);
+      font-size: $fs-13;
+      font-weight: $fw-medium;
+      transition: background $dur-fast $ease-out;
+
+      &:hover {
+        background: var(--color-accent-fade);
+      }
+
+      &:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+    }
+
+    .spin {
+      animation: share-spin 0.8s linear infinite;
+      color: var(--color-accent);
+    }
+  }
+}
+
+@keyframes share-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+// ============================================
+// 响应式：移动端从底部弹出
+// ============================================
+@include mobile {
+  .overlay {
+    align-items: flex-end;
+
+    .modal {
+      max-width: 100%;
+      border-radius: $radius-lg $radius-lg 0 0;
+    }
+  }
+}

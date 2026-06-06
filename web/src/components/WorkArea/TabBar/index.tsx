@@ -3,6 +3,8 @@ import { Eye, Code2, ChevronLeft, RotateCw, ExternalLink, Terminal, Save, Undo2,
 import { useUIStore, type WorkTab } from '@/store/ui'
 import { useSessionStore } from '@/store/session'
 import { toast } from '@/lib/toast'
+import { isDevRunning } from '@/lib/webcontainer'
+import ShareDialog from './ShareDialog'
 import styles from './index.module.scss'
 
 // ============================================
@@ -30,12 +32,26 @@ export default function TabBar() {
   const wcUrl = useUIStore((s) => s.wcUrl)
   const session = useSessionStore((s) => s.session)
   const currentVersion = useSessionStore((s) => s.currentVersion())
+  // 真实会话 id（分享要用它，session.id 是兼容旧组件的占位）
+  const activeId = useSessionStore((s) => s.activeId)
   // 未保存草稿数量：代码 tab 且 >0 时才显示保存 / 丢弃（返回 number，selector 稳定）
   const draftCount = useSessionStore((s) => Object.keys(s.activeSession()?.drafts ?? {}).length)
   // 保存过程中的忙碌态
   const [saving, setSaving] = useState(false)
+  // 分享弹窗开关
+  const [shareOpen, setShareOpen] = useState(false)
 
   const isCode = workTab === 'code'
+
+  // 打开分享：必须预览已经跑起来（dev server ready），否则容器里没法 vite build
+  const handleShare = () => {
+    if (!activeId) return
+    if (!isDevRunning()) {
+      toast('请等预览加载完成后再分享')
+      return
+    }
+    setShareOpen(true)
+  }
 
   // 保存草稿：提交后端 → upsert + 快照新版本 → 替换 files、清空草稿、追加版本卡
   // 这些都由 store 的 saveDrafts 串起来，这里只管忙碌态和 toast
@@ -120,7 +136,12 @@ export default function TabBar() {
               <span className={styles.urlVersionTag}>{currentVersion.id}</span>
             </div>
 
-            <button className={styles.urlIconBtn} aria-label="新窗口打开">
+            <button
+              className={styles.urlIconBtn}
+              onClick={handleShare}
+              aria-label="分享预览"
+              title="分享预览"
+            >
               <ExternalLink size={12} />
             </button>
           </div>
@@ -171,6 +192,11 @@ export default function TabBar() {
           </button>
         )}
       </div>
+
+      {/* 分享弹窗：打开即在容器里构建并上传，给出访客链接 */}
+      {shareOpen && activeId && (
+        <ShareDialog sessionId={activeId} onClose={() => setShareOpen(false)} />
+      )}
     </div>
   )
 }

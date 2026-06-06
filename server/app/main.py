@@ -13,9 +13,9 @@ from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from app.api import chat, files, logs, messages, sessions, users, versions
+from app.api import chat, files, logs, messages, sessions, share, users, versions
 from app.db import Base, engine
-from app.models import file, message, user, version  # noqa: F401 —— 让 SQLAlchemy 注册 File / Message / User / Version 表
+from app.models import file, message, shared_asset, user, version  # noqa: F401 —— 让 SQLAlchemy 注册 File / Message / SharedAsset / User / Version 表
 
 
 # ── 跨域隔离中间件（WebContainer 硬性前提）──────────────────
@@ -81,6 +81,7 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 # ── 路由注册 ─────────────────────────────────────────────────
 app.include_router(sessions.router)
 app.include_router(users.router)
+app.include_router(share.router)
 app.include_router(files.router)
 app.include_router(versions.router)
 app.include_router(messages.router)

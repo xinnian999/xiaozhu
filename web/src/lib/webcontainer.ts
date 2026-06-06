@@ -469,6 +469,87 @@ export async function syncFiles(
   return { added, modified, removed }
 }
 
+// ── 构建产物（分享用）─────────────────────────────────────────
+// 分享流程：在分享者自己的容器里 `vite build` 出 dist，把它读出来上传给后端，
+// 访客打开链接时后端把 dist 当静态站点直接发出去，秒开、不碰 WebContainer。
+
+/** 一个构建产物文件。二进制（图片/字体）用 base64 编码，由 isBase64 标记。 */
+export type BuiltFile = { path: string; content: string; isBase64: boolean }
+
+// 按扩展名判断「文本文件」——这些直接存原文，其余按二进制 base64 处理
+const TEXT_EXTS = new Set([
+  'html', 'htm', 'css', 'js', 'mjs', 'cjs', 'json', 'svg', 'txt',
+  'map', 'xml', 'webmanifest',
+])
+
+function isTextPath(path: string): boolean {
+  const ext = path.split('.').pop()?.toLowerCase() ?? ''
+  return TEXT_EXTS.has(ext)
+}
+
+/** 把字节数组转 base64（分块处理，避免大文件一次性 apply 撑爆调用栈）。 */
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  const CHUNK = 0x8000
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK))
+  }
+  return btoa(binary)
+}
+
+/** 递归列出某目录下所有文件的完整路径。 */
+async function listFilesRecursive(wc: WebContainer, dir: string): Promise<string[]> {
+  const out: string[] = []
+  const entries = await wc.fs.readdir(dir, { withFileTypes: true })
+  for (const e of entries) {
+    const full = `${dir}/${e.name}`
+    if (e.isDirectory()) {
+      out.push(...await listFilesRecursive(wc, full))
+    } else {
+      out.push(full)
+    }
+  }
+  return out
+}
+
+/**
+ * 在当前容器里构建出 dist，并把它读成一组文件返回（供上传分享）。
+ *
+ * 直接调 `vite build --base=./` 而不是 `npm run build`：
+ *   - 模板的 build 脚本是 `tsc && vite build`，AI 生成的代码常有类型报错，
+ *     tsc 会直接中断构建。分享只要能跑起来的产物，不该被类型检查卡住。
+ *   - `--base=./` 让产物用相对路径引资源，才能被挂在 /shared/{token}/ 子路径下正常加载。
+ */
+export async function buildDist(hooks?: { onLog?: (line: string) => void }): Promise<BuiltFile[]> {
+  const wc = await getContainer()
+  hooks?.onLog?.('vite build')
+  const build = await wc.spawn('npx', ['vite', 'build', '--base=./'])
+  pipeRawToBus(build.output, 'vite build (分享)')
+  const code = await build.exit
+  if (code !== 0) {
+    throw new Error(`构建失败 (exit ${code})，请确认项目能正常构建`)
+  }
+
+  const paths = await listFilesRecursive(wc, 'dist')
+  if (paths.length === 0) {
+    throw new Error('构建产物为空（dist 没有文件）')
+  }
+
+  const files: BuiltFile[] = []
+  for (const full of paths) {
+    const rel = full.replace(/^dist\//, '')  // 去掉 dist/ 前缀，存相对路径
+    if (isTextPath(rel)) {
+      const content = await wc.fs.readFile(full, 'utf-8')
+      files.push({ path: rel, content, isBase64: false })
+    } else {
+      const bytes = await wc.fs.readFile(full)
+      files.push({ path: rel, content: bytesToBase64(bytes), isBase64: true })
+    }
+  }
+  hooks?.onLog?.(`dist 读取完成，共 ${files.length} 个文件`)
+  return files
+}
+
 /** 当前是否已 boot（用于决定走全量还是增量） */
 export function isBooted(): boolean {
   return containerPromise !== null

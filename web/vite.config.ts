@@ -22,6 +22,12 @@ export default defineConfig({
         changeOrigin: true,
         // 不 rewrite：/api/sessions → http://localhost:8000/api/sessions
       },
+      // 分享的静态预览也走后端：开发期访客链接 /shared/{token}/ 才能打开
+      // （生产环境前后端同源，由后端直接托管，无需代理）
+      "/shared": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
     },
     open: true,
   },

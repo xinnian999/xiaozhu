@@ -47,6 +47,17 @@ class Session(Base):
     # 会话标题，可为空 —— 第一条消息发出后再自动填充
     title: Mapped[str | None] = mapped_column(String, nullable=True)
 
+    # 分享令牌（capability URL 的钥匙）：
+    #   None  → 未分享（私有，别人访问会话一律 404）
+    #   非空  → 已分享，任何人凭这个 token 走公开只读通道 /api/shared/{token} 即可查看
+    #   unique=True：token 必须全局唯一，才能反查到唯一会话；
+    #     可空 + unique 在 SQL 里是允许的（多个 NULL 不算重复）。
+    #   index=True：公开访问要按 token 查会话，加索引让查询快。
+    #   撤销分享 = 把它置回 None；重新生成 = 换一个新 token（旧链接立即失效）。
+    share_token: Mapped[str | None] = mapped_column(
+        String, unique=True, index=True, nullable=True
+    )
+
     # server_default=func.now() 是 SQL 侧的默认值，让数据库自己写当前时间，
     # 比 Python 侧设置更准确（不受时区/服务器时间误差影响）。
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -76,3 +87,8 @@ class SessionRead(BaseModel):
     title: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class ShareInfo(BaseModel):
+    """分享接口（生成/查询）返回：当前会话的分享 token。"""
+    share_token: str

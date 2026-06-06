@@ -1,0 +1,180 @@
+@use '@/styles/variables' as *;
+@use '@/styles/common' as *;
+
+// ============================================
+// 登录门样式
+// ============================================
+
+.gate {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: $space-6;
+  background: var(--color-bg);
+  @include grid-bg(28px); // 蓝图网格底纹，和整体风格一致
+
+  .card {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    max-width: 360px;
+    padding: $space-8 $space-6;
+    border: 1px solid var(--color-border);
+    border-radius: $radius-lg;
+    background: var(--color-bg-soft);
+    box-shadow: var(--shadow-pop);
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: $space-2;
+      margin-bottom: $space-6;
+
+      .brandMark {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        border-radius: $radius-sm;
+        background: var(--color-accent);
+        color: #fff;
+        font-family: var(--font-mono);
+        font-size: $fs-13;
+        font-weight: $fw-bold;
+      }
+
+      .brandText {
+        font-family: var(--font-mono);
+        font-size: $fs-16;
+        font-weight: $fw-semibold;
+        color: var(--color-text);
+      }
+    }
+
+    .title {
+      margin: 0;
+      font-size: $fs-24;
+      font-weight: $fw-semibold;
+      color: var(--color-text);
+    }
+
+    .subtitle {
+      margin: $space-2 0 $space-6;
+      font-size: $fs-13;
+      color: var(--color-text-dim);
+    }
+
+    // —— 输入项：图标 + 输入框 ——
+    .field {
+      display: flex;
+      align-items: center;
+      gap: $space-2;
+      margin-bottom: $space-3;
+      padding: 0 $space-3;
+      border: 1px solid var(--color-border);
+      border-radius: $radius-md;
+      background: var(--color-bg-mute);
+      transition: border-color $dur-fast $ease-out;
+
+      &:focus-within {
+        border-color: var(--color-accent);
+      }
+
+      .fieldIcon {
+        flex-shrink: 0;
+        color: var(--color-text-mute);
+      }
+
+      .input {
+        flex: 1;
+        height: 42px;
+        border: none;
+        outline: none;
+        background: transparent;
+        color: var(--color-text);
+        font-size: $fs-14;
+
+        &::placeholder {
+          color: var(--color-text-faint);
+        }
+      }
+    }
+
+    .error {
+      margin-bottom: $space-3;
+      padding: $space-2 $space-3;
+      border-radius: $radius-sm;
+      background: var(--color-accent-fade);
+      color: var(--color-accent);
+      font-size: $fs-12;
+    }
+
+    .submit {
+      @include button-reset;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 42px;
+      margin-top: $space-2;
+      border-radius: $radius-md;
+      background: var(--color-accent);
+      color: #fff;
+      font-size: $fs-14;
+      font-weight: $fw-semibold;
+      transition: opacity $dur-fast $ease-out;
+
+      &:hover {
+        opacity: 0.9;
+      }
+
+      &:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
+      .spin {
+        animation: spin 0.8s linear infinite;
+      }
+    }
+
+    .switch {
+      margin-top: $space-5;
+      text-align: center;
+      font-size: $fs-13;
+      color: var(--color-text-dim);
+
+      .switchBtn {
+        @include button-reset;
+        margin-left: $space-1;
+        color: var(--color-accent);
+        font-weight: $fw-medium;
+
+        &:hover {
+          text-decoration: underline;
+        }
+      }
+    }
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+// ============================================
+// 响应式：移动端
+// ============================================
+@include mobile {
+  .gate {
+    padding: $space-4;
+
+    .card {
+      max-width: 100%;
+      padding: $space-6 $space-5;
+    }
+  }
+}

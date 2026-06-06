@@ -1,0 +1,124 @@
+@use '@/styles/variables' as *;
+@use '@/styles/common' as *;
+
+// ============================================
+// 用户标签 + 气泡菜单样式
+// ============================================
+.menu {
+  position: relative;
+
+  // —— 触发器：头像 + 昵称 ——
+  .trigger {
+    @include button-reset;
+    display: inline-flex;
+    align-items: center;
+    gap: $space-2;
+    height: 34px;
+    padding: 0 $space-2;
+    border-radius: $radius-md;
+    color: var(--color-text-dim);
+    transition: background $dur-base $ease-out, color $dur-base $ease-out;
+
+    &:hover,
+    &.triggerOpen {
+      background: var(--color-bg-hover);
+      color: var(--color-text);
+    }
+
+    .nickname {
+      max-width: 120px;
+      font-size: $fs-13;
+      font-weight: $fw-medium;
+      @include truncate;
+    }
+
+    .caret {
+      color: var(--color-text-mute);
+    }
+  }
+
+  // —— 气泡菜单 ——
+  .panel {
+    position: absolute;
+    top: calc(100% + #{$space-2});
+    right: 0;
+    z-index: 30;
+    width: 220px;
+    padding: $space-2;
+    border: 1px solid var(--color-border);
+    border-radius: $radius-md;
+    background: var(--color-bg-elev);
+    box-shadow: var(--shadow-pop);
+
+    .profile {
+      display: flex;
+      align-items: center;
+      gap: $space-3;
+      padding: $space-2 $space-2 $space-3;
+
+      .profileText {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0; // 让内部 truncate 生效
+
+        .profileName {
+          font-size: $fs-14;
+          font-weight: $fw-semibold;
+          color: var(--color-text);
+          @include truncate;
+        }
+
+        .profileEmail {
+          font-size: $fs-12;
+          color: var(--color-text-mute);
+          @include truncate;
+        }
+      }
+    }
+
+    .divider {
+      height: 1px;
+      margin: 0 $space-1 $space-2;
+      background: var(--color-border);
+    }
+
+    .item {
+      @include button-reset;
+      display: flex;
+      align-items: center;
+      gap: $space-3;
+      width: 100%;
+      height: 36px;
+      padding: 0 $space-2;
+      border-radius: $radius-sm;
+      color: var(--color-text-dim);
+      font-size: $fs-13;
+      transition: background $dur-fast $ease-out, color $dur-fast $ease-out;
+
+      &:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text);
+      }
+
+      // 退出登录：hover 时变危险色
+      &.danger:hover {
+        color: var(--color-danger);
+      }
+    }
+  }
+}
+
+// ============================================
+// 响应式：移动端隐藏昵称，只留头像（省空间）
+// ============================================
+@include mobile {
+  .menu {
+    .trigger {
+      .nickname,
+      .caret {
+        display: none;
+      }
+    }
+  }
+}

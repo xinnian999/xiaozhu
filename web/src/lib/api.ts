@@ -5,6 +5,30 @@
 import axios from 'axios'
 import { toast } from '@/lib/toast'
 
+// ── 登录 token 的存取 ───────────────────────────────────────────
+// token 存在 localStorage：刷新页面 / 重开标签页都还在，做到"记住登录"。
+const TOKEN_KEY = 'vibuild:token'
+
+export function getToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY)
+}
+
+export function setToken(token: string | null): void {
+  if (token) localStorage.setItem(TOKEN_KEY, token)
+  else localStorage.removeItem(TOKEN_KEY)
+}
+
+/** 带上 Authorization 头（给原生 fetch 用：streamChat / pushLogs 不走 axios）。 */
+function authHeaders(): Record<string, string> {
+  const token = getToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
+// 不触发"自动登出跳转"的接口：
+//   - login/register：401 是"密码错/邮箱占用"的业务结果，由登录页自己提示，不该跳转
+//   - me：恢复登录态时用，401 表示 token 失效，由 auth store 自己 catch 处理
+const SILENT_AUTH_PATHS = ['/api/users/login', '/api/users/register', '/api/users/me']
+
 // ── axios 实例 ─────────────────────────────────────────────────
 // 走 Vite 代理，baseURL 留空即可（/api/xxx 会被代理到后端）
 export const http = axios.create({
@@ -13,9 +37,10 @@ export const http = axios.create({
   timeout: 10_000,
 })
 
-// 请求拦截器：统一加 token、日志等（目前先留空占位）
+// 请求拦截器：每个请求自动带上登录 token
 http.interceptors.request.use((config) => {
-  // 未来在这里加：config.headers.Authorization = `Bearer ${token}`
+  const token = getToken()
+  if (token) config.headers.Authorization = `Bearer ${token}`
   return config
 })
 
@@ -23,6 +48,19 @@ http.interceptors.request.use((config) => {
 http.interceptors.response.use(
   (res) => res,
   (err) => {
+    const status = err.response?.status
+    const url: string = err.config?.url ?? ''
+    const isSilent = SILENT_AUTH_PATHS.some((p) => url.includes(p))
+
+    // 已登录后 token 失效/过期：清掉本地 token 并回到登录页。
+    // 登录/注册/获取自身信息这三条除外（它们的 401 由调用方自行处理）。
+    if (status === 401 && !isSilent) {
+      setToken(null)
+      toast('登录已过期，请重新登录')
+      window.location.href = '/'
+      return Promise.reject(new Error('登录已过期'))
+    }
+
     const detail = err.response?.data?.detail ?? err.message
     toast(`请求失败：${detail}`)
     return Promise.reject(new Error(detail))
@@ -65,6 +103,49 @@ export type ApiModel = {
   id: string
   label: string
   icon: string
+}
+
+// ── 鉴权（注册 / 登录 / 获取自身信息）────────────────────────────
+
+export type ApiUser = {
+  id: string
+  email: string
+  nickname: string
+  avatar: string // 头像种子，前端据此渲染（见 Avatar 组件）
+  created_at: string
+}
+
+/** 改资料的请求体：字段都可选，传哪个改哪个。 */
+export type ProfileUpdate = {
+  nickname?: string
+  avatar?: string
+}
+
+/** 注册新用户。后端返回用户对象（不含 token），注册成功后通常紧跟一次登录。 */
+export async function register(email: string, password: string): Promise<ApiUser> {
+  const { data } = await http.post<ApiUser>('/api/users/register', { email, password })
+  return data
+}
+
+/** 登录：邮箱 + 密码换 token，返回 access_token 字符串。 */
+export async function login(email: string, password: string): Promise<string> {
+  const { data } = await http.post<{ access_token: string; token_type: string }>(
+    '/api/users/login',
+    { email, password },
+  )
+  return data.access_token
+}
+
+/** 拿当前登录用户信息：带着 token 调，token 失效会 401（用于恢复登录态时校验 token）。 */
+export async function getMe(): Promise<ApiUser> {
+  const { data } = await http.get<ApiUser>('/api/users/me')
+  return data
+}
+
+/** 修改当前用户资料（昵称 / 头像），返回更新后的用户对象。 */
+export async function updateProfile(payload: ProfileUpdate): Promise<ApiUser> {
+  const { data } = await http.patch<ApiUser>('/api/users/me', payload)
+  return data
 }
 
 // ── Sessions CRUD ───────────────────────────────────────────────
@@ -176,7 +257,7 @@ export async function pushLogs(sessionId: string, logs: PushLog[]): Promise<void
   try {
     await fetch(`/api/sessions/${sessionId}/logs`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ logs }),
     })
   } catch {
@@ -202,7 +283,7 @@ export async function* streamChat(
   try {
     res = await fetch('/api/chat', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       // model 为空（清单还没加载完）时不传，让后端用默认模型；有值才带上
       body: JSON.stringify({ message, session_id: sessionId, ...(model ? { model } : {}) }),
       signal,

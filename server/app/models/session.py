@@ -14,7 +14,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, func
+from sqlalchemy import DateTime, ForeignKey, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -34,6 +34,15 @@ class Session(Base):
     # UUID 存为字符串。SQLite 没有原生 UUID 类型，str(uuid.uuid4()) 生成唯一 ID。
     # default 是 Python 侧的默认值（ORM 插入时自动填充），不是 SQL DEFAULT。
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+
+    # 归属用户：外键指向 users.id。
+    #   ForeignKey("users.id")：数据库层面声明「这一列的值必须是 users 表里某个真实 id」，
+    #     防止出现「会话挂在一个不存在的用户名下」的脏数据。
+    #   nullable=False：每个会话必须有主人（老数据已清空，不存在无主会话）。
+    #   index=True：列表接口要按 user_id 过滤查询，加索引让「查某人的所有会话」更快。
+    user_id: Mapped[str] = mapped_column(
+        String, ForeignKey("users.id"), nullable=False, index=True
+    )
 
     # 会话标题，可为空 —— 第一条消息发出后再自动填充
     title: Mapped[str | None] = mapped_column(String, nullable=True)

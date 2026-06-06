@@ -18,6 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import log_store
 from app.db import get_db
+from app.deps import get_current_user
+from app.models.user import User
 # 模型注册表 + LLM 构造都集中在 app.llm，这里只是引用方
 from app.llm import (
     ALLOWED_MODEL_IDS,
@@ -468,6 +470,7 @@ async def list_models() -> list[dict]:
 async def chat(
     req: ChatRequest,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> StreamingResponse:
     """SSE 流式对话。"""
 
@@ -480,10 +483,16 @@ async def chat(
     elif req.model not in ALLOWED_MODEL_IDS:
         raise HTTPException(status_code=400, detail=f"不支持的模型：{req.model}")
 
-    # 先校验 session 存在 —— 否则后面工具一调用就报外键错，体验差。
-    # 这一步是普通查询，发生在 StreamingResponse 开始之前，
-    # 报 404 用 HTTPException 是标准 FastAPI 写法。
-    result = await db.execute(select(Session).where(Session.id == req.session_id))
+    # 先校验 session 存在「且属于当前用户」—— 否则后面工具一调用就报外键错，体验差，
+    # 更重要的是防止拿别人的 session_id 往别人项目里写代码。
+    # session_id 在请求体里（不在路径上），所以这里手动按 id + user_id 过滤，
+    # 查不到统一 404（不泄露会话是否存在）。
+    result = await db.execute(
+        select(Session).where(
+            Session.id == req.session_id,
+            Session.user_id == current_user.id,
+        )
+    )
     if result.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="Session not found")
 

@@ -6,6 +6,7 @@ import { useSessionStore } from '@/store/session'
 import { downloadSourceAsZip } from '@/lib/download'
 import ProjectMenu from './ProjectMenu'
 import VersionMenu from './VersionMenu'
+import UserMenu from '@/components/UserMenu'
 import styles from './index.module.scss'
 
 // ============================================
@@ -78,6 +79,9 @@ export default function TopBar() {
         <button className={styles.iconBtn} onClick={toggleTheme} aria-label="切换主题">
           {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
         </button>
+
+        {/* 用户标签：头像 + 昵称，点击展开气泡（改资料 / 退出登录） */}
+        <UserMenu />
       </div>
     </header>
   )

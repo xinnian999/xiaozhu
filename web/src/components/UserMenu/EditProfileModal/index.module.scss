@@ -1,0 +1,189 @@
+@use '@/styles/variables' as *;
+@use '@/styles/common' as *;
+
+// ============================================
+// 修改资料弹窗样式
+// ============================================
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: $space-4;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(2px);
+
+  .modal {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    max-width: 380px;
+    padding: $space-5 $space-5 $space-4;
+    border: 1px solid var(--color-border);
+    border-radius: $radius-lg;
+    background: var(--color-bg-soft);
+    box-shadow: var(--shadow-pop);
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: $space-4;
+
+      .title {
+        margin: 0;
+        font-size: $fs-16;
+        font-weight: $fw-semibold;
+        color: var(--color-text);
+      }
+
+      .closeBtn {
+        @include button-reset;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        border-radius: $radius-sm;
+        color: var(--color-text-mute);
+
+        &:hover {
+          background: var(--color-bg-hover);
+          color: var(--color-text);
+        }
+      }
+    }
+
+    .avatarRow {
+      display: flex;
+      align-items: center;
+      gap: $space-4;
+      margin-bottom: $space-5;
+
+      .shuffleBtn {
+        @include button-reset;
+        display: inline-flex;
+        align-items: center;
+        gap: $space-2;
+        height: 32px;
+        padding: 0 $space-3;
+        border: 1px solid var(--color-border);
+        border-radius: $radius-md;
+        color: var(--color-text-dim);
+        font-size: $fs-13;
+        transition: border-color $dur-fast $ease-out, color $dur-fast $ease-out;
+
+        &:hover {
+          border-color: var(--color-border-strong);
+          color: var(--color-text);
+        }
+      }
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: $space-2;
+      margin-bottom: $space-3;
+
+      .label {
+        font-size: $fs-12;
+        color: var(--color-text-mute);
+      }
+
+      .input {
+        height: 40px;
+        padding: 0 $space-3;
+        border: 1px solid var(--color-border);
+        border-radius: $radius-md;
+        background: var(--color-bg-mute);
+        color: var(--color-text);
+        font-size: $fs-14;
+        outline: none;
+        transition: border-color $dur-fast $ease-out;
+
+        &:focus {
+          border-color: var(--color-accent);
+        }
+
+        &:disabled {
+          color: var(--color-text-mute);
+          cursor: not-allowed;
+        }
+      }
+    }
+
+    .actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: $space-2;
+      margin-top: $space-4;
+
+      .cancelBtn,
+      .saveBtn {
+        @include button-reset;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        height: 38px;
+        min-width: 76px;
+        padding: 0 $space-4;
+        border-radius: $radius-md;
+        font-size: $fs-14;
+        font-weight: $fw-medium;
+      }
+
+      .cancelBtn {
+        border: 1px solid var(--color-border);
+        color: var(--color-text-dim);
+
+        &:hover {
+          background: var(--color-bg-hover);
+          color: var(--color-text);
+        }
+      }
+
+      .saveBtn {
+        background: var(--color-accent);
+        color: #fff;
+        transition: opacity $dur-fast $ease-out;
+
+        &:hover {
+          opacity: 0.9;
+        }
+
+        &:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+
+        .spin {
+          animation: modal-spin 0.8s linear infinite;
+        }
+      }
+    }
+  }
+}
+
+@keyframes modal-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+// ============================================
+// 响应式：移动端
+// ============================================
+@include mobile {
+  .overlay {
+    align-items: flex-end; // 移动端从底部弹出，更顺手
+
+    .modal {
+      max-width: 100%;
+      border-radius: $radius-lg $radius-lg 0 0;
+    }
+  }
+}

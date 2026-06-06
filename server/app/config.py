@@ -65,6 +65,16 @@ class Settings(BaseSettings):
     # 本地想开就在 server/.env 里加一行 DB_ECHO=true。
     db_echo: bool = False
 
+    # ── JWT 鉴权 ──────────────────────────────────────────────
+    # jwt_secret：签名密钥，token 防伪造的根本。必须在 .env 里配置，
+    #   且要够随机（用 secrets.token_urlsafe 生成）。泄露 = 任何人都能伪造身份。
+    #   这里给个空默认值只是为了类型完整；真实值从 .env 读，没配会在启动校验里暴露。
+    jwt_secret: str = ""
+    # 签名算法。HS256 = 用同一个密钥签名和验证（对称），最简单，单机够用。
+    jwt_algorithm: str = "HS256"
+    # token 有效期（分钟）。过期后需要重新登录。这里设 7 天，练手项目方便。
+    access_token_expire_minutes: int = 60 * 24 * 7
+
     # ── CORS ──────────────────────────────────────────────────
     # list[str] 让我们可以在 .env 里写逗号分隔的多个源，
     # pydantic-settings 会自动解析成列表。

@@ -10,9 +10,17 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
+from app.deps import get_owned_session
 from app.models.file import File, FileRead, FileWrite
 
-router = APIRouter(prefix="/api/sessions/{session_id}/files", tags=["files"])
+# dependencies=[Depends(get_owned_session)]：路由级守卫。
+# 这个 router 下每个接口在进入函数体前，都会先校验「路径里的 session 属于当前用户」，
+# 不属于（或未登录）直接 401/404，根本到不了文件读写逻辑。一处声明，全员生效。
+router = APIRouter(
+    prefix="/api/sessions/{session_id}/files",
+    tags=["files"],
+    dependencies=[Depends(get_owned_session)],
+)
 
 
 async def _get_or_404(session_id: str, path: str, db: AsyncSession) -> File:

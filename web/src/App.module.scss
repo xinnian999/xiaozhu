@@ -1,6 +1,18 @@
 @use '@/styles/variables' as *;
 @use '@/styles/common' as *;
 
+// 启动占位：登录态恢复完成前显示，避免"已登录却闪一下登录页"
+.booting {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100vw;
+  height: 100vh;
+  background: var(--color-bg);
+  color: var(--color-text-dim);
+  font-size: $fs-14;
+}
+
 .app {
   width: 100vw;
   height: 100vh;

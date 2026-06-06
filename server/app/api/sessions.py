@@ -6,13 +6,15 @@
   3. 所有数据库操作都要 await（因为我们用的是 async SQLAlchemy）。
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
+from app.deps import get_current_user, get_owned_session
 from app.models.file import File
 from app.models.session import Session, SessionCreate, SessionRead
+from app.models.user import User
 from app.templates import load_template
 
 # prefix="/api/sessions" → 这个 router 里所有路由都以 /api/sessions 开头
@@ -23,6 +25,7 @@ router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 async def create_session(
     body: SessionCreate,
     db: AsyncSession = Depends(get_db),  # FastAPI 自动注入
+    current_user: User = Depends(get_current_user),  # 必须登录才能建会话
 ) -> SessionRead:
     """创建一个新会话，并把 Vite + React 模板预置进去，返回完整的 session 对象。
 
@@ -39,7 +42,9 @@ async def create_session(
       4. await db.commit() —— 真正提交事务
       5. await db.refresh(obj) —— 从数据库重新读一次，拿到 server_default 填充的字段
     """
-    session = Session(title=body.title)
+    # user_id 来自 token 解出的当前用户，绝不从请求体取 ——
+    # 否则前端可以伪造别人的 user_id 把会话挂到别人名下。
+    session = Session(title=body.title, user_id=current_user.id)
     db.add(session)
     await db.flush()  # 拿到 session.id，准备给 files 当外键
 
@@ -58,24 +63,30 @@ async def create_session(
 @router.get("", response_model=list[SessionRead])
 async def list_sessions(
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> list[SessionRead]:
-    """返回所有会话，按创建时间倒序（最新的在前）。"""
-    result = await db.execute(select(Session).order_by(Session.created_at.desc()))
+    """返回**当前用户自己的**会话，按创建时间倒序（最新的在前）。
+
+    关键就是 .where(Session.user_id == current_user.id) 这个过滤条件 ——
+    多用户隔离的核心：每次查询都按当前用户收窄，绝不返回别人的数据。
+    """
+    result = await db.execute(
+        select(Session)
+        .where(Session.user_id == current_user.id)
+        .order_by(Session.created_at.desc())
+    )
     sessions = result.scalars().all()  # scalars() 把每行的第一列取出来，即 Session 对象
     return [SessionRead.model_validate(s) for s in sessions]
 
 
 @router.get("/{session_id}", response_model=SessionRead)
 async def get_session(
-    session_id: str,
-    db: AsyncSession = Depends(get_db),
+    session: Session = Depends(get_owned_session),
 ) -> SessionRead:
-    """按 ID 查询会话，不存在则返回 404。"""
-    # select(Session) 等价于 SQL: SELECT * FROM sessions WHERE id = :session_id
-    result = await db.execute(select(Session).where(Session.id == session_id))
-    session = result.scalar_one_or_none()  # 取第一行，没有则返回 None
+    """按 ID 查询会话；不存在、或不属于当前用户，都返回 404。
 
-    if session is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-
+    归属校验全部交给 get_owned_session 守卫完成（它内部按 id + user_id 过滤，
+    查不到就抛 404）。所以这里函数体只剩「把拿到的会话转成响应」一行，
+    既消除了重复查询，又和子资源接口用的是同一套归属逻辑。
+    """
     return SessionRead.model_validate(session)

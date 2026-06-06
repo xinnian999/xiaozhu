@@ -10,11 +10,17 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
+from app.deps import get_owned_session
 from app.models.file import File, FileRead
 from app.models.version import Version, VersionFile, VersionRead
 from app.versioning import snapshot_current_files
 
-router = APIRouter(prefix="/api/sessions/{session_id}/versions", tags=["versions"])
+# 路由级守卫：版本的查看 / 保存 / 回滚都只限会话主人（详见 files.py 的说明）
+router = APIRouter(
+    prefix="/api/sessions/{session_id}/versions",
+    tags=["versions"],
+    dependencies=[Depends(get_owned_session)],
+)
 
 
 # ── 请求体 ──────────────────────────────────────────────────────────────────────

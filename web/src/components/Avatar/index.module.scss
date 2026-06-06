@@ -1,0 +1,16 @@
+@use '@/styles/variables' as *;
+
+// ============================================
+// Avatar 样式（静态部分；尺寸和渐变由内联 style 注入）
+// ============================================
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: $radius-full;
+  flex-shrink: 0;
+  line-height: 1;
+  user-select: none;
+  // 内圈细描边，让头像在深浅背景上都有清晰边界
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+}

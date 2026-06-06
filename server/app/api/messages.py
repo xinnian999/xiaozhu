@@ -8,9 +8,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
+from app.deps import get_owned_session
 from app.models.message import Message, MessageRead
 
-router = APIRouter(prefix="/api/sessions/{session_id}/messages", tags=["messages"])
+# 路由级守卫：只有会话的主人能看自己会话的消息（详见 files.py 的说明）
+router = APIRouter(
+    prefix="/api/sessions/{session_id}/messages",
+    tags=["messages"],
+    dependencies=[Depends(get_owned_session)],
+)
 
 
 @router.get("", response_model=list[MessageRead])

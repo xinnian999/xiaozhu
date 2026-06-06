@@ -29,3 +29,18 @@
 
 ## 后端server
 这是个学习项目，因为用户不擅长后端，主要目的是为了学习后端开发，以及python语言。所以后端开发节奏一点要放慢。 依照 @TECH_DESIGN.md 文档的规划，听用户指挥，一次只生成一个小功能，确保用户能理解每一个功能的实现原理和代码。
+
+### 数据库迁移（Alembic）
+- 表结构由 **Alembic 迁移**统一管理，**不再用 `create_all` 自动建表**（它只建新表、不会给老表加列，会导致线上 schema 漂移）。
+- **改了 `app/models/*.py` 后，必须走迁移**，流程：
+  1. `uv run alembic revision --autogenerate -m "描述改动"` —— 自动对比模型与库、生成迁移脚本
+  2. 打开 `alembic/versions/` 里新脚本，**人工 review** `upgrade()/downgrade()` 是否符合预期
+  3. `uv run alembic upgrade head` —— 本地应用
+- 新建/拉取迁移后，库要保持最新：`uv run alembic upgrade head`（本地首次建库也靠它）。
+- 加新 model 时，记得在 `alembic/env.py` 的 import 里也引入它，否则 autogenerate 看不到。
+- SQLite 的 ALTER 能力弱，`env.py` 已开 `render_as_batch=True`，删列/改约束才能正常迁移。
+- **生产**：容器启动命令会自动 `alembic upgrade head`（见 Dockerfile），**严禁手动改线上表结构**。给"已有表但没纳入 alembic 的老库"接入时，用 `alembic stamp` 盖基线、不要真建表。
+
+### 后端配置
+- `JWT_SECRET` 为**必填**：用 `python -c "import secrets; print(secrets.token_urlsafe(48))"` 生成，写进 `.env`（生产写部署目录的 `.env`）。为空时应用启动会直接报错退出（`app/main.py` 的启动自检）。
+- 数据库地址用 `DATABASE_URL` 环境变量覆盖（生产指向挂载的持久化目录，见 docker-compose）。

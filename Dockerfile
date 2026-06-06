@@ -46,10 +46,13 @@ COPY server/pyproject.toml server/uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 # 拷后端运行时真正需要的东西：
-#   app/        业务代码
-#   templates/  新会话用的 vite-react 骨架（templates.py 运行时会读取）
+#   app/         业务代码
+#   templates/   新会话用的 vite-react 骨架（templates.py 运行时会读取）
+#   alembic/ + alembic.ini  数据库迁移脚本与配置（启动时 upgrade 用）
 COPY server/app ./app
 COPY server/templates ./templates
+COPY server/alembic ./alembic
+COPY server/alembic.ini ./alembic.ini
 
 # 把阶段1构建好的前端产物放到 /app/static
 # main.py 用 Path(__file__).parent.parent / "static" 定位，正好命中这里。
@@ -59,6 +62,9 @@ COPY --from=web-builder /app/web/dist ./static
 # 不写进镜像，运行时由 docker 用环境变量注入（见 docker-compose）。
 EXPOSE 8000
 
-# 直接用 venv 里的 uvicorn 启动：启动时不再走 uv 的依赖求解，更快也更确定。
+# 启动命令分两步：先把数据库迁移到最新（alembic upgrade head），再起 uvicorn。
+#   - upgrade head 是幂等的：已是最新就什么都不做；有新迁移才执行，且不丢数据。
+#     这就取代了原来的 create_all，从根上解决「改了模型、线上老库没跟着改」的问题。
+#   - 用 sh -c 串起两条命令；exec 让 uvicorn 接管 PID 1，信号（停容器）能正确传到它。
 # --host 0.0.0.0 让容器外能访问（默认只听 127.0.0.1，在容器里等于谁都连不上）。
-CMD ["/app/.venv/bin/uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "/app/.venv/bin/alembic upgrade head && exec /app/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000"]

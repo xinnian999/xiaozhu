@@ -14,8 +14,8 @@ from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.api import chat, files, logs, messages, sessions, share, users, versions
-from app.db import Base, engine
-from app.models import file, message, shared_asset, user, version  # noqa: F401 —— 让 SQLAlchemy 注册 File / Message / SharedAsset / User / Version 表
+from app.config import settings
+from app.db import engine
 
 
 # ── 跨域隔离中间件（WebContainer 硬性前提）──────────────────
@@ -57,10 +57,20 @@ class CrossOriginIsolationMiddleware:
 # yield 之前是 startup 逻辑，yield 之后是 shutdown 逻辑。
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动时：自动创建所有在 Base 里注册的表（如果表不存在）
-    # 这等价于 `CREATE TABLE IF NOT EXISTS ...`，不会删除已有数据。
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # 启动自检：JWT_SECRET 必须配置，否则签发 token 会在运行时报
+    # "HMAC key must not be empty"。在这里直接拦下，让「配置漏了」在启动时就暴露，
+    # 而不是等用户登录时才 500。
+    if not settings.jwt_secret:
+        raise RuntimeError(
+            "JWT_SECRET 未配置！请在 .env 里设置一个随机密钥，例如：\n"
+            "  python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+        )
+
+    # 表结构不再用 create_all 自动建，改由 Alembic 迁移统一管理（见 alembic/）。
+    #   - Docker：容器启动命令里先跑 `alembic upgrade head` 再起 uvicorn。
+    #   - 本地：拉到新迁移后手动 `uv run alembic upgrade head`。
+    # 这样「改模型 → 生成迁移 → upgrade」是唯一的建表/改表入口，
+    # 彻底告别 create_all「只建新表、不改老表」导致的线上 schema 漂移。
     yield
     # shutdown 时：关闭连接池（FastAPI 进程退出时自动触发）
     await engine.dispose()

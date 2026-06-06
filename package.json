@@ -11,7 +11,8 @@
     "build:prod": "bun run build && rm -rf server/static && cp -r web/dist server/static",
     "start:prod": "uv run --directory server uvicorn app.main:app --port 8099",
     "preview": "bun run build:prod && bun run start:prod",
-    "lint": "bun run --cwd web lint"
+    "lint": "bun run --cwd web lint",
+    "gen-snapshot": "bun run --cwd web gen-snapshot"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

@@ -27,8 +27,8 @@ from app.config import settings
 #            同一分组下的多个模型共用一个 key —— 这正是「分组」存在的意义。
 #            另：分组在本项目里就等于「厂商」，所以 logo 也按分组派生（见 GROUP_ICONS）。
 AVAILABLE_MODELS = [
-    {"id": "qwen3.6-plus", "label": "Qwen3.6 Plus", "group": "qwen"},
     {"id": "qwen3-coder-next", "label": "Qwen3 Coder Next", "group": "qwen"},
+    {"id": "qwen3.6-plus", "label": "Qwen3.6 Plus", "group": "qwen"},
     {"id": "gpt-5.5", "label": "GPT-5.5", "group": "gpt"},
 ]
 

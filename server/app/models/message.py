@@ -13,10 +13,10 @@ kind 还有第二个用途：加载历史喂给 LLM 当上下文时，只取 kin
 把工具行过滤掉 —— 工具的效果已经落在 files 表的现状里，重放反而会误导模型。
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer
 from sqlalchemy import JSON, DateTime, ForeignKey, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -72,4 +72,17 @@ class MessageRead(BaseModel):
     tool_name: str | None = None
     tool_args: dict | None = None
     created_at: datetime
+
+    @field_serializer("created_at")
+    def serialize_created_at(self, dt: datetime) -> str:
+        """把 created_at 序列化成带 UTC 时区的 ISO 字符串。
+
+        DB 里存的是 naive（无时区）的 UTC 时间（SQLite 的 func.now() 返回 UTC）。
+        直接序列化会得到 "2026-06-05T15:18:00"，没有时区后缀，
+        前端 new Date() 会误当成本地时间，导致差了一个时区的小时数。
+        这里补上 UTC 时区 → "2026-06-05T15:18:00+00:00"，前端就能正确换算到本地。
+        """
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.isoformat()
 

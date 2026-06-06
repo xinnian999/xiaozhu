@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { FileText, FilePlus, FolderOpen, Wrench, Bug, ChevronRight, GitCommit, RotateCcw, Loader2 } from 'lucide-react'
+import { FileText, FilePlus, FilePen, FolderOpen, Wrench, Bug, ChevronRight, GitCommit, RotateCcw, Loader2, Check } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { formatClock } from '@/lib/format'
@@ -12,6 +12,8 @@ type Props = {
   message: Message
   /** 是否正在流式输出（显示光标动画，隐藏时间戳） */
   isStreaming?: boolean
+  /** 是否是对话里最后一条文本消息 —— 只有它才显示时间，作为本轮结束的标记 */
+  isLast?: boolean
 }
 
 // ============================================
@@ -20,7 +22,7 @@ type Props = {
 // - kind === 'tool'：渲染成"工具调用进度卡"，紧凑显示工具名 + 关键参数
 // - kind === 'version'：渲染成"版本卡"，附带回滚按钮
 // - 其余情况：渲染成普通文本气泡
-export default function MessageBubble({ message, isStreaming = false }: Props) {
+export default function MessageBubble({ message, isStreaming = false, isLast = false }: Props) {
   if (message.kind === 'tool') {
     return <ToolCallChip message={message} />
   }
@@ -52,7 +54,7 @@ export default function MessageBubble({ message, isStreaming = false }: Props) {
           {isStreaming && <span className={styles.cursor} aria-hidden />}
         </div>
 
-        {!isStreaming && (
+        {!isStreaming && isLast && (
           <time className={styles.time} dateTime={new Date(message.createdAt).toISOString()}>
             {formatClock(message.createdAt)}
           </time>
@@ -67,9 +69,11 @@ export default function MessageBubble({ message, isStreaming = false }: Props) {
       <div className={styles.content}>
         <p className={styles.text}>{message.text}</p>
 
-        <time className={styles.time} dateTime={new Date(message.createdAt).toISOString()}>
-          {formatClock(message.createdAt)}
-        </time>
+        {isLast && (
+          <time className={styles.time} dateTime={new Date(message.createdAt).toISOString()}>
+            {formatClock(message.createdAt)}
+          </time>
+        )}
       </div>
     </article>
   )
@@ -133,9 +137,24 @@ function ToolCallChip({ message }: { message: Message }) {
 // 因此回滚后又会再插一张新的版本卡。
 function VersionCard({ message }: { message: Message }) {
   const rollbackToVersion = useSessionStore((s) => s.rollbackToVersion)
+  // 当前会话所有版本卡里最大的 seq —— 它就是「当前（最新）版本」。
+  // selector 只返回一个数字（基本类型），引用稳定，不会触发多余重渲染。
+  const latestSeq = useSessionStore((s) => {
+    const sess = s.activeSession()
+    if (!sess) return null
+    let max = -1
+    for (const m of sess.messages) {
+      if (m.kind === 'version' && typeof m.versionSeq === 'number' && m.versionSeq > max) {
+        max = m.versionSeq
+      }
+    }
+    return max === -1 ? null : max
+  })
   const [busy, setBusy] = useState(false)
   const seq = message.versionSeq
   const versionId = message.versionId
+  // 是不是当前版本：回滚到自己没有意义，所以当前版本不提供回滚入口
+  const isCurrent = seq != null && latestSeq != null && seq === latestSeq
 
   const handleRollback = async () => {
     if (busy || versionId == null) return
@@ -158,16 +177,24 @@ function VersionCard({ message }: { message: Message }) {
       <span className={styles.versionCardLabel}>
         已生成版本 <b className={styles.versionCardSeq}>v{seq ?? '?'}</b>
       </span>
-      <button
-        className={styles.versionCardBtn}
-        onClick={handleRollback}
-        disabled={busy || versionId == null}
-        aria-label={seq != null ? `回滚到 v${seq}` : '回滚'}
-        title="回滚到此版本（会生成一个新版本）"
-      >
-        {busy ? <Loader2 size={12} className={styles.versionSpin} /> : <RotateCcw size={12} />}
-        <span>回滚</span>
-      </button>
+      {isCurrent ? (
+        // 当前版本：展示「当前」标记，不提供回滚（回滚到自己没意义）
+        <span className={styles.versionCardCurrent}>
+          <Check size={12} />
+          <span>当前</span>
+        </span>
+      ) : (
+        <button
+          className={styles.versionCardBtn}
+          onClick={handleRollback}
+          disabled={busy || versionId == null}
+          aria-label={seq != null ? `回滚到 v${seq}` : '回滚'}
+          title="回滚到此版本（会生成一个新版本）"
+        >
+          {busy ? <Loader2 size={12} className={styles.versionSpin} /> : <RotateCcw size={12} />}
+          <span>回滚</span>
+        </button>
+      )}
     </div>
   )
 }
@@ -193,6 +220,9 @@ function describeToolCall(
   switch (name) {
     case 'write_file':
       return { icon: <FilePlus size={12} />, label: `写入 ${path}` }
+    case 'edit_file':
+      // 局部编辑：只改文件里的一小段（差分编辑），区别于 write_file 的整文件写入
+      return { icon: <FilePen size={12} />, label: `编辑 ${path}` }
     case 'read_file':
       return { icon: <FileText size={12} />, label: `读取 ${path}` }
     case 'list_files':

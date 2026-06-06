@@ -351,6 +351,17 @@
       animation: version-spin 0.8s linear infinite;
     }
   }
+
+  // 当前版本标记：非交互，区别于可点击的回滚按钮
+  .versionCardCurrent {
+    display: inline-flex;
+    align-items: center;
+    gap: $space-1;
+    flex-shrink: 0;
+    padding: 3px $space-2;
+    color: var(--color-accent);
+    font-size: $fs-11;
+  }
 }
 
 @keyframes version-spin {

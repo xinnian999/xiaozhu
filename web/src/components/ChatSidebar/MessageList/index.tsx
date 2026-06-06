@@ -50,10 +50,22 @@ export default function MessageList() {
     )
   }
 
+  // 只在「最后一条文本消息」下方显示时间，作为这轮对话结束的标记。
+  // 从后往前找第一条文本消息（跳过工具卡 / 版本卡 —— 它们本就不显示时间，
+  // 否则末尾跟着一张版本卡时会导致整段对话都不显示时间）。
+  let lastTextIndex = -1
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const k = messages[i].kind
+    if (!k || k === 'text') {
+      lastTextIndex = i
+      break
+    }
+  }
+
   return (
     <div className={styles.list}>
-      {messages.map((msg) => (
-        <MessageBubble key={msg.id} message={msg} />
+      {messages.map((msg, i) => (
+        <MessageBubble key={msg.id} message={msg} isLast={i === lastTextIndex} />
       ))}
 
       {/* 生成中：不再逐字显示打字，改成带扫光动画的「正在思考中」 */}

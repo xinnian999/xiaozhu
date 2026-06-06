@@ -48,19 +48,29 @@ SYSTEM_PROMPT = """你是 Vibuild，一个 AI 前端代码生成助手。
 - src/index.css 是全局样式（已存在，可改）
 - 需要更多组件时，在 src/components/ 下新建
 
+【样式】
+- 项目已集成 Tailwind CSS，优先用 Tailwind 工具类（className="flex p-4 ..."）写样式
+- src/index.css 已含 @tailwind 指令，一般不用动；只有定义全局/复杂样式时才改它
+- 不要 import 额外 UI 库，用 Tailwind 工具类组合即可
+
+【写文件：新建用 write_file，改已有用 edit_file】
+- 新建文件：write_file(path, content)，content 是完整文件内容。
+- 修改已有文件：先 read_file 读出原文，再用 edit_file(path, old_string, new_string)
+  只替换要改的那一小段。**不要**为了改几行就 write_file 把整个文件重写一遍 ——
+  那样又慢又费 token。old_string 要按原文逐字复制、并带足够上下文行，保证在文件里唯一。
+
 【工作流程】
 1. 先调 list_files 看当前项目结构
-2. 修改已有文件前，必须先用 read_file 读取原内容
-3. 用 write_file 写入文件（path 是相对路径，content 是完整内容，不能省略）
-4. 一组完整、能正常渲染的改动都写完后，调 update_preview 把它们应用到预览
-   （在此之前 write_file 只是暂存，预览不会刷新，用户看不到半成品）
-5. 调 update_preview 之后，再调 get_browser_logs 检查预览有没有运行报错
-6. 如果有报错：用 read_file 读出错文件 → 定位问题 → write_file 修复 →
+2. 新建文件直接 write_file；改已有文件先 read_file，再用 edit_file 只改要动的部分
+3. 一组完整、能正常渲染的改动都写完后，调 update_preview 把它们应用到预览
+   （在此之前写的/改的文件只是暂存，预览不会刷新，用户看不到半成品）
+4. 调 update_preview 之后，再调 get_browser_logs 检查预览有没有运行报错
+5. 如果有报错：用 read_file 读出错文件 → 定位问题 → edit_file 修复对应片段 →
    update_preview → 再次 get_browser_logs 确认。最多修复 3 轮，仍修不好就如实告诉用户卡在哪
-7. 确认无报错后，用一句话告诉用户做了什么
+6. 确认无报错后，用一句话告诉用户做了什么
 
 【自检要点】
-- write_file 只是暂存文件，必须调 update_preview 才会真正应用到预览并跑起来；
+- write_file / edit_file 只是暂存改动，必须调 update_preview 才会真正应用到预览并跑起来；
   顺序务必是「写完一组 → update_preview → get_browser_logs」，否则查到的是改动前的旧状态
 - get_browser_logs 是你唯一能"看到"代码跑起来效果的方式，应用后务必调用
 - 常见错误：变量名拼写、import 路径、JSX 语法、用了未安装的依赖
@@ -138,6 +148,42 @@ def build_tools(db: AsyncSession, session_id: str) -> list:
         return f"已写入 {path}"
 
     @tool
+    async def edit_file(path: str, old_string: str, new_string: str) -> str:
+        """局部编辑已有文件：把文件里的 old_string 整段替换成 new_string。
+
+        改已有文件时优先用它而不是 write_file —— 你只需输出「要改的那一小段」，
+        不必重写整个文件，省 token、也快得多。
+        要求：old_string 必须在文件中**唯一且完整**匹配（带上足够的上下文行来区分），
+        否则无法确定改哪一处。新建文件请用 write_file。
+        """
+        result = await db.execute(
+            select(File).where(File.session_id == session_id, File.path == path)
+        )
+        f = result.scalar_one_or_none()
+        # 下面三种情况都不抛异常，而是返回说明性字符串 —— 它会作为 ToolMessage 回喂给
+        # LLM，让模型自己读懂「为什么没改成」并纠正（比如改用 write_file、或补上下文）。
+        if f is None:
+            return f"文件 {path} 不存在，无法编辑。新建文件请用 write_file。"
+        count = f.content.count(old_string)
+        if count == 0:
+            return (
+                f"未找到要替换的内容：old_string 在 {path} 里不存在。"
+                "请先用 read_file 读出原文，按原文逐字提供 old_string。"
+            )
+        if count > 1:
+            return (
+                f"old_string 在 {path} 里出现了 {count} 次，无法确定改哪一处。"
+                "请在 old_string 里多带几行上下文，让它在文件中唯一。"
+            )
+        # 唯一命中：替换并存回完整内容。注意 str.replace 第三参数限定只替 1 次，
+        # 双保险（前面已确认 count==1）。
+        f.content = f.content.replace(old_string, new_string, 1)
+        await db.commit()
+        # 和 write_file 一样打写入屏障，供 get_browser_logs 判断这次改动有没有跑出错
+        log_store.mark_write(session_id)
+        return f"已编辑 {path}"
+
+    @tool
     async def read_file(path: str) -> str:
         """读取文件内容。修改已有文件前必须先调此工具，否则会覆盖原有代码。"""
         result = await db.execute(
@@ -190,7 +236,7 @@ def build_tools(db: AsyncSession, session_id: str) -> list:
         # 因为 yield 事件得在生成器函数里，工具闭包里没法 yield。
         return "已请求刷新预览。"
 
-    return [write_file, read_file, list_files, get_browser_logs, update_preview]
+    return [write_file, edit_file, read_file, list_files, get_browser_logs, update_preview]
 
 
 # ── Agentic Loop ────────────────────────────────────────────────────────────────
@@ -270,9 +316,21 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
                 })
                 break
 
-            # ainvoke：等待 LLM 完整回复（非流式）
-            response = await llm.ainvoke(messages)
-            messages.append(response)  # 把回复追加进历史
+            # astream：流式收取这一轮回复。它吐出一连串 AIMessageChunk（消息碎片），
+            # 我们一边把新增文本实时推给前端（打字效果），一边用 `+` 把碎片累加回一个
+            # 完整的 AIMessage —— AIMessageChunk 的 `+` 会自动拼接文本、聚合 tool_calls
+            # 的碎片参数。累加完的 response 和原来 ainvoke 的结果等价，所以下面执行工具
+            # 的逻辑一行都不用改。
+            response: AIMessage | None = None
+            async for chunk in llm.astream(messages):
+                # 第一个碎片直接当起点，之后逐个累加
+                response = chunk if response is None else response + chunk
+                # 把「这个碎片」新增的文本增量实时推给前端。注意只推 chunk 自己的
+                # 增量，不是累加后的全文，否则前端会收到越来越长的重复文本。
+                delta = extract_text(chunk)
+                if delta:
+                    yield sse({"type": "message_delta", "text": delta})
+            messages.append(response)  # 把拼好的完整回复追加进历史
 
             # content 和 tool_calls 是两个独立字段：模型可能只说话、只调工具，
             # 也可能「边说边调」。所以每一轮都先把文本取出来。
@@ -294,19 +352,19 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
                 break
 
             if not response.tool_calls:
-                # 最终回复：推给前端并入库（空字符串就不存）
+                # 最终回复：文本已在上面的流式循环里逐字推过了，这里不再重复推，
+                # 只记下来用于结束时入库（空字符串就不存）。
                 if text:
-                    yield sse({"type": "message_delta", "text": text})
                     final_assistant_text = text
                 print(f"[最终回复] content={text}")
                 break
 
             # 这一轮要调工具，但模型可能同时说了话（开场白 / 进度解释，
-            # 如「好的，我先看看项目结构」）。这类过场叙述也是对话流的一部分，
-            # 既推给前端展示，也入库（kind='text'），刷新后能完整还原。
+            # 如「好的，我先看看项目结构」）。这类过场叙述也是对话流的一部分：
+            # 实时展示已经由流式循环完成，这里只负责入库（kind='text'），
+            # 让刷新后能完整还原。
             if text:
                 print(f"[response] content={text} (同轮调用了工具)")
-                yield sse({"type": "message_delta", "text": text})
                 await save_message("assistant", text)
 
             # LLM 要调用一个或多个工具
@@ -348,6 +406,26 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
                         "path": args["path"],
                         "content": args["content"],
                     })
+                # edit_file 只改了局部，args 里没有完整内容（那正是省 token 的关键）。
+                # 但前端要整文件 mount 进 WebContainer，所以这里把改完后的完整内容从库里
+                # 读回来，再用同一个 file_write 事件推下去 —— 对前端来说和 write_file 没区别。
+                # 只在「真的改成功」时才推：edit_file 成功返回 "已编辑 {path}"，失败（文件不
+                # 存在 / 没匹配上 / 匹配多处）返回别的说明文字。用这个判定，避免给一次没改动的
+                # 失败也推 file_write、还误打一个空版本快照。
+                elif name == "edit_file" and tool_result == f"已编辑 {args['path']}":
+                    res = await db.execute(
+                        select(File.content).where(
+                            File.session_id == req.session_id, File.path == args["path"]
+                        )
+                    )
+                    content = res.scalar_one_or_none()
+                    if content is not None:
+                        wrote_files = True
+                        yield sse({
+                            "type": "file_write",
+                            "path": args["path"],
+                            "content": content,
+                        })
                 # AI 觉得「这一组改动写完、可以渲染了」时调 update_preview，
                 # 这里推一个 preview_refresh 信号，前端收到才把暂存的文件同步进预览。
                 elif name == "update_preview":

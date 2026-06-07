@@ -51,6 +51,9 @@ export default function PreviewPane() {
   const containerSessionRef = useRef<string | null>(null)
   // 当前 iframe 的引用，用于校验 postMessage 来源
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
+  // Node（Vite）编译错误的去重状态。放 ref（而非订阅闭包内的局部变量）是为了能在
+  // 「应用新代码到预览」时被重置 —— 这是修复「自检漏报」的关键，详见下方两处 effect 注释。
+  const serverErrDedupeRef = useRef<{ text: string; at: number }>({ text: '', at: 0 })
 
   // —— 预览历史栈：父页面侧重建一份 iframe 内的浏览历史，用来算「能否前进/后退」——
   // iframe 跨域拿不到它真实的 history.length / 当前位置，只能靠导航桥上报的
@@ -136,11 +139,33 @@ export default function PreviewPane() {
     if (isStreaming && applyTick === appliedTickRef.current) return
     appliedTickRef.current = applyTick
 
+    // 关键：进入新一轮「揭晓代码到预览」。重置 Vite 编译错误的去重状态，
+    // 让这一轮即便报出与上一轮「文本完全相同」的编译错误，也能重新回传后端。
+    // 否则（这正是「自检经常检测不到」的根因）：AI 改了代码但没修对 → Vite 重新
+    // 编译报【相同】错误 → 被旧去重在 5s 窗口内挡掉、不回传 → 后端写入屏障之后
+    // 收不到任何日志 → get_browser_logs 误判「运行正常」→ AI 以为修好了，实际预览仍红屏。
+    serverErrDedupeRef.current = { text: '', at: 0 }
+
     setWCStatus('syncing')
     syncFiles(currentVersion.files, { onLog: setWCLog })
       .then(() => {
         syncedVersionRef.current = currentVersion.id
         setWCStatus('ready')
+        // 揭晓新代码后，让 iframe 重报当前红屏态：覆盖「本轮没改动、但仍红屏的文件」
+        // —— 它不会被 Vite 增量编译重新 transform、错误不会重进日志流，只能靠主动重报。
+        // HMR 重新编译有延迟，所以错开几拍，确保落在后端 get_browser_logs 的轮询窗口内。
+        const win = iframeRef.current?.contentWindow
+        if (win) {
+          for (const delay of [800, 2000, 4000]) {
+            setTimeout(() => {
+              try {
+                win.postMessage({ type: 'vibuild-recheck' }, '*')
+              } catch {
+                // iframe 可能已卸载/跨域失效，忽略即可
+              }
+            }, delay)
+          }
+        }
       })
       .catch((e) => {
         setWCError(e instanceof Error ? e.message : String(e))
@@ -200,6 +225,21 @@ export default function PreviewPane() {
         return
       }
 
+      // —— Vite 编译错误红屏 overlay 状态上报 ——
+      // present=true：预览此刻正红屏（编译错误）。直接回传后端当「当前报错态」，
+      // 这样即便错误来自本轮没改动的文件（不会重新进 dev server 日志流），
+      // get_browser_logs 也能知道「预览还红着」，不再误判「运行正常」。
+      // present=false 不回传（避免把「没红屏」误当成一条 error 反噬自检）。
+      if (data.type === 'vibuild-vite-overlay') {
+        if (data.present) {
+          const text = `[vite] 预览编译错误（红屏）：${String(data.text ?? '').trim()}`
+          pushWcLog({ level: 'error', text })
+          const sid = activeIdRef.current
+          if (sid) pushLogs(sid, [{ level: 'error', text, ts: Date.now() }])
+        }
+        return
+      }
+
       if (data.type !== 'vibuild-console') return
       const level: LogLevel = ['log', 'info', 'warn', 'error'].includes(data.level) ? data.level : 'log'
       const text = String(data.text ?? '')
@@ -235,13 +275,15 @@ export default function PreviewPane() {
   useEffect(() => {
     // 去重：Vite 对同一个坏文件每来一个请求就重打一遍相同的错，5s 内同文本
     // 只处理一次，免得把后端那个 50 条上限的缓冲挤爆、真报错反被挤掉。
-    let lastText = ''
-    let lastAt = 0
+    // 注意：去重状态放在 serverErrDedupeRef，会在每次「揭晓新代码到预览」时被
+    // 重置（见上面 syncFiles 的 effect）。所以这里只在【同一轮内】对相同错误去重，
+    // 【跨轮】的相同错误必定放行 —— 这是保证「修复后没修对」能被自检发现、不漏报的关键。
     const unsub = subscribeServerErrors((text) => {
       const now = Date.now()
-      if (text === lastText && now - lastAt < 5000) return
-      lastText = text
-      lastAt = now
+      const dedupe = serverErrDedupeRef.current
+      if (text === dedupe.text && now - dedupe.at < 5000) return
+      dedupe.text = text
+      dedupe.at = now
       // 给人看：进控制台「浏览器」面板（和浏览器报错并列展示）
       pushWcLog({ level: 'error', text })
       // 给 agent 看：回传后端 log_store，get_browser_logs 就能读到

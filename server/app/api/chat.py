@@ -230,15 +230,30 @@ def build_tools(db: AsyncSession, session_id: str) -> list:
 
         返回这次写入之后浏览器产生的 error / warning；没有就说明运行正常。
         """
-        # 时序：写完文件后浏览器要经历「收到文件 → HMR → 重新执行 → 报错」，
-        # 需要一点时间。这里轮询等「写入屏障之后的新日志」出现，最多等约 3 秒。
+        # 时序：写完文件后浏览器要经历「收到文件 → HMR → 重新编译 → 报错回传」，
+        # 需要一点时间。这里轮询等「写入屏障之后的新日志」出现，最多等约 6 秒。
         #   - 错误早到了：第一轮就拿到，立即返回。
         #   - 错误还没到：每 0.25s 查一次，等它出现。
         #   - 代码没问题：前端不会推任何 error/warn，一直等到超时 → 返回「正常」。
-        for _ in range(12):  # 12 × 0.25s = 3s
+        # 为什么是 6 秒而不是更短：功能多的大项目（多组件 + 重依赖）一次增量编译可能
+        # 三四秒才报出错误，窗口太短会在错误回传前就超时返回「正常」，造成自检漏报。
+        # 命中即返回，所以正常项目不会真的等满 6 秒，延长窗口只惠及「编译慢」的情况。
+        for _ in range(24):  # 24 × 0.25s = 6s
             logs = log_store.logs_since_write(session_id)
             if logs:
-                lines = "\n".join(f"[{x.level}] {x.text}" for x in logs)
+                # 同一个编译错误往往被重复上报：dev server stdout 扫描、iframe 红屏
+                # overlay、以及「揭晓后多拍 recheck」都会各打一遍。这里按 (level, text)
+                # 去重再列出，避免相同报错刷很多行 —— 既省 AI 的阅读 token，也防止把
+                # 后端那 50 条上限的缓冲挤爆、把别的真报错挤掉。
+                seen: set[tuple[str, str]] = set()
+                uniq = []
+                for x in logs:
+                    key = (x.level, x.text)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    uniq.append(x)
+                lines = "\n".join(f"[{x.level}] {x.text}" for x in uniq)
                 return f"预览有以下报错/警告，请定位并修复：\n{lines}"
             await asyncio.sleep(0.25)
         return "预览运行正常，没有报错。"

@@ -228,6 +228,60 @@ const NAV_BRIDGE_SCRIPT = `<script>(function(){
   }
 })();</script>`
 
+// ── Vite 编译错误 overlay 监测脚本 ─────────────────────────────
+// 为什么单独搞这个：Vite 把编译错误（语法错误、import 解析失败等）以
+// <vite-error-overlay> 自定义元素注入 iframe 的 document.body，渲染成那块红屏。
+// 它【不】走 console，所以 console 桥抓不到；它也【不】每轮都重新打印到 dev server
+// 的 stdout —— 一个本轮没被改动的坏文件，Vite 增量编译不会重新 transform 它，
+// 它的报错就永远停在"上一次"的日志里。于是会出现这种最常见的自检漏报：
+//   AI 修好了 A 文件 → update_preview → get_browser_logs 只看到"屏障之后没有新报错"
+//   → 误判"运行正常" → 可 B 文件其实一直红着，用户看到的预览仍是红屏。
+//
+// 这块红屏 overlay 才精确等于"用户此刻看到的报错状态"。所以这里直接盯它：
+// 出现/消失时上报，并支持父页面在"应用新代码到预览"后主动 recheck，把当前红屏态
+// 重新汇报一遍 —— 哪怕坏文件本轮没被碰过，自检也能知道"预览还红着"。
+const OVERLAY_BRIDGE_SCRIPT = `<script>(function(){
+  if (window.__vibuildOverlayBridged) return;
+  window.__vibuildOverlayBridged = true;
+  var lastKey = '';  // 上次上报的状态签名，仅在状态变化时 post，避免刷屏
+  function readOverlay(){
+    var el = document.querySelector('vite-error-overlay');
+    if (!el) return { present: false, text: '' };
+    var text = '';
+    try {
+      var root = el.shadowRoot || el;
+      var parts = ['.message-body', '.message', '.file', '.frame'];
+      for (var i=0;i<parts.length;i++){
+        var n = root.querySelector(parts[i]);
+        if (n && n.textContent) text += n.textContent + '\\n';
+      }
+      if (!text) text = el.textContent || 'Vite 编译错误';
+    } catch(e) { text = 'Vite 编译错误'; }
+    return { present: true, text: text.replace(/\\s+/g,' ').trim().slice(0, 2000) };
+  }
+  function report(force){
+    var s = readOverlay();
+    var key = s.present ? ('1|' + s.text) : '0';
+    if (!force && key === lastKey) return;
+    lastKey = key;
+    try { window.parent.postMessage({ type: 'vibuild-vite-overlay', present: s.present, text: s.text }, '*'); } catch(e) {}
+  }
+  // overlay 是 body 的直接子节点，监听 body 的 childList 即可捕获它的增删（性能也好）。
+  var mo = new MutationObserver(function(){ report(false); });
+  function startObserve(){
+    try { mo.observe(document.body, { childList: true }); } catch(e){}
+    report(true);
+  }
+  if (document.body) startObserve();
+  else document.addEventListener('DOMContentLoaded', startObserve);
+  // 父页面在"揭晓新代码到预览"后会发 recheck：强制重报当前红屏态（即便 overlay 没增删），
+  // 用来覆盖"本轮没改动、但仍红屏的文件"——它的错误不会重新进日志流，只能靠主动重报。
+  window.addEventListener('message', function(e){
+    var d = e.data;
+    if (d && d.type === 'vibuild-recheck') report(true);
+  });
+})();</script>`
+
 /** 把一段脚本注入 index.html 的 <head> 末尾（没有 </head> 就放 <body> 前）。
  *  flag 用于幂等判断：html 里已含该标记就跳过，避免重复注入。 */
 function injectScript(files: FileMap, script: string, flag: string): FileMap {
@@ -245,6 +299,7 @@ function injectScript(files: FileMap, script: string, flag: string): FileMap {
 function injectConsoleBridge(files: FileMap): FileMap {
   let next = injectScript(files, CONSOLE_BRIDGE_SCRIPT, '__vibuildConsoleBridged')
   next = injectScript(next, NAV_BRIDGE_SCRIPT, '__vibuildNavBridged')
+  next = injectScript(next, OVERLAY_BRIDGE_SCRIPT, '__vibuildOverlayBridged')
   return next
 }
 

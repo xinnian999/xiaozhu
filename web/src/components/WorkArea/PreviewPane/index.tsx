@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { AlertTriangle } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
 import { useUIStore, type WCStatus, type LogLevel } from '@/store/ui'
-import { bootAndRun, syncFiles, resetContainer, isBooted, isDevRunning } from '@/lib/webcontainer'
+import { bootAndRun, syncFiles, resetContainer, isBooted, isDevRunning, subscribeServerErrors } from '@/lib/webcontainer'
 import { pushLogs, type PushLog } from '@/lib/api'
 import styles from './index.module.scss'
 
@@ -176,6 +176,29 @@ export default function PreviewPane() {
       }
       flush()
     }
+  }, [pushWcLog])
+
+  // —— Node 进程（Vite）编译错误：订阅 → 控制台面板 + 回传后端 ——
+  // Vite 编译报错只走 node 输出、不走浏览器 console，所以走单独通道抓。
+  // 抓到后一边推进「浏览器」日志面板让用户看到，一边回传后端让 agent 的
+  // get_browser_logs 能看到「代码连编译都没过」这类最常见的错误。
+  useEffect(() => {
+    // 去重：Vite 对同一个坏文件每来一个请求就重打一遍相同的错，5s 内同文本
+    // 只处理一次，免得把后端那个 50 条上限的缓冲挤爆、真报错反被挤掉。
+    let lastText = ''
+    let lastAt = 0
+    const unsub = subscribeServerErrors((text) => {
+      const now = Date.now()
+      if (text === lastText && now - lastAt < 5000) return
+      lastText = text
+      lastAt = now
+      // 给人看：进控制台「浏览器」面板（和浏览器报错并列展示）
+      pushWcLog({ level: 'error', text })
+      // 给 agent 看：回传后端 log_store，get_browser_logs 就能读到
+      const sid = activeIdRef.current
+      if (sid) pushLogs(sid, [{ level: 'error', text, ts: now }])
+    })
+    return unsub
   }, [pushWcLog])
 
   // ready 时延迟 900ms 再显示 iframe，让进度条动画有时间跑到 100%

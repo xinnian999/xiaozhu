@@ -60,6 +60,64 @@ export function subscribeProcessOutput(listener: OutputListener): () => void {
   return () => listeners.delete(listener)
 }
 
+// ── Node 进程错误检测 ──────────────────────────────────────────
+// 背景：Vite 编译错误（语法错误、import 解析失败等）只打到 dev server 的
+// stdout/stderr，走上面的总线交给 xterm 渲染给人看；它【不】走浏览器 console
+// （Vite 是通过 HMR websocket 推成页面红色 overlay 的，不触发 window.onerror /
+// console.error），所以注入的 console bridge 抓不到，后端 agent 的
+// get_browser_logs 自然也看不见——这正是「Node 报错了但 AI 没捕获到」的根因。
+//
+// 这里在 dev 输出流上加一层轻量检测：按行扫描、识别 Vite/esbuild/babel 的报错
+// 特征行，转成结构化错误事件转发出去，由 PreviewPane 推给后端，补上这块盲区。
+// 注意只做「识别 + 转发」，不接管渲染——渲染仍归 xterm。
+type ServerErrorListener = (text: string) => void
+const serverErrorListeners = new Set<ServerErrorListener>()
+
+/** 订阅 Node 进程（Vite）编译错误。返回取消订阅函数。 */
+export function subscribeServerErrors(listener: ServerErrorListener): () => void {
+  serverErrorListeners.add(listener)
+  return () => serverErrorListeners.delete(listener)
+}
+
+// 去掉 ANSI 转义序列（颜色 / 光标控制 / OSC），只留可读文本，方便匹配与回传。
+function stripAnsi(s: string): string {
+  return s
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '')
+}
+
+// 编译错误的特征行：命中其一即认为这一行是报错。覆盖 Vite 插件报错、
+// dev server 内部错误、esbuild/babel 语法错误、模块解析失败等常见形态。
+const SERVER_ERROR_RE =
+  /(\[vite\][^\n]*(error|failed))|\[plugin:[^\]]+\]|internal server error|pre-transform error|transform failed|failed to (load|resolve|parse|compile)|unexpected token/i
+
+// 行缓冲：raw chunk 可能在任意位置（甚至一行中间）截断，攒到换行再判断整行。
+let errLineBuf = ''
+
+/** 把一段 dev 原始输出喂进错误检测器，命中报错行就通知订阅者。 */
+function scanForServerErrors(rawChunk: string): void {
+  errLineBuf += stripAnsi(rawChunk)
+  const lines = errLineBuf.split('\n')
+  // 最后一段可能是被截断的半行，留到下一个 chunk 再拼。
+  errLineBuf = lines.pop() ?? ''
+  for (const raw of lines) {
+    const line = raw.trim()
+    if (!line || !SERVER_ERROR_RE.test(line)) continue
+    // WebContainer 里文件是绝对路径（/home/<随机>/src/...），但 agent 认的是
+    // 相对路径（src/...）。去掉这段前缀，报错里的路径才能和文件树对上。
+    const normalized = line.replace(/\/home\/[^/\s]+\//g, '')
+    for (const fn of serverErrorListeners) {
+      try {
+        fn(normalized)
+      } catch (e) {
+        console.error('server error listener error', e)
+      }
+    }
+  }
+}
+
 /** 启动（首次调用真正 boot，之后返回同一个实例） */
 export function getContainer(): Promise<WebContainer> {
   if (!containerPromise) {
@@ -214,13 +272,18 @@ console.log('relinked ' + linked + ' bin entries');
 function pipeRawToBus(
   output: ReadableStream<string>,
   banner: string,
+  // scanErrors：是否额外把输出喂给错误检测器（只有常驻的 dev server 需要，
+  // install / relink / build 那些一次性进程靠 exit code 判断成败，不必扫）。
+  opts?: { scanErrors?: boolean },
 ) {
   // \r\n 是 xterm 期望的换行；颜色码让 banner 醒目些
   broadcast(`\x1b[36m\r\n— ${banner} —\x1b[0m\r\n`)
   return output.pipeTo(
     new WritableStream({
       write(chunk) {
-        broadcast(chunk.toString())
+        const s = chunk.toString()
+        broadcast(s)
+        if (opts?.scanErrors) scanForServerErrors(s)
       },
     }),
   )
@@ -387,7 +450,9 @@ export async function bootAndRun(
     hooks.onLog('npm run dev')
     const dev = await wc.spawn('npm', ['run', 'dev'])
     devServerStarted = true
-    pipeRawToBus(dev.output, 'npm run dev')
+    // dev server 的输出要扫错误：Vite 编译报错只在这条流里，扫出来回传后端
+    // 才能让 agent 的 get_browser_logs 看到。
+    pipeRawToBus(dev.output, 'npm run dev', { scanErrors: true })
 
     // server-ready 时先预热 Vite，再通知 UI 显示 iframe
     // 原因：server-ready 只代表端口开了，Vite 第一次处理请求时才做 esbuild
@@ -579,6 +644,8 @@ export async function resetContainer(): Promise<void> {
   containerPromise = null
   devServerStarted = false
   lastFiles = null
+  // 清掉错误检测器的半行缓冲，避免上个项目残留的半行和新项目拼成假报错。
+  errLineBuf = ''
   // 清空日志回放缓冲，并给已挂载的 xterm 发「清屏 + 清回滚」指令，
   // 否则上个项目的 npm / dev 日志会一直留在终端里。
   history = ''

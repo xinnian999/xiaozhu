@@ -166,16 +166,6 @@
           @include truncate;
           flex: 1;
         }
-
-        .urlVersionTag {
-          font-size: $fs-10;
-          color: var(--color-text-mute);
-          padding: 1px 5px;
-          background: var(--color-bg-elev);
-          border-radius: 3px;
-          letter-spacing: 0.05em;
-          flex-shrink: 0;
-        }
       }
     }
   }

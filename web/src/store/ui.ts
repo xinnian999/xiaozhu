@@ -67,6 +67,22 @@ type UIState = {
   previewApplyTick: number
   requestPreviewApply: () => void
 
+  // —— 预览路由导航（地址栏 + 前进后退）——
+  // iframe 跨域，父页面读不到它的 URL，靠注入的导航桥 postMessage 上报，
+  // 这里集中存：当前路径、能否前进/后退（由 PreviewPane 维护的历史栈算出）。
+  /** 当前预览路由路径（pathname+search+hash），默认 '/' */
+  previewPath: string
+  previewCanBack: boolean
+  previewCanForward: boolean
+  setPreviewNav: (s: { path: string; canBack: boolean; canForward: boolean }) => void
+  /** 切会话 / 重挂时复位回初始态 */
+  resetPreviewNav: () => void
+
+  /** 发给 iframe 的导航指令：seq 自增触发 PreviewPane 把指令 postMessage 进 iframe。
+   *  用计数器而非直接调用，是因为只有 PreviewPane 持有 iframe 引用。 */
+  previewNavCmd: { seq: number; action: 'back' | 'forward' | 'reload' }
+  sendPreviewNav: (action: 'back' | 'forward' | 'reload') => void
+
   // —— 控制台日志 ——
   /** 控制台是否展开（底部抽屉） */
   consoleOpen: boolean
@@ -120,6 +136,18 @@ export const useUIStore = create<UIState>((set) => ({
 
   previewApplyTick: 0,
   requestPreviewApply: () => set((s) => ({ previewApplyTick: s.previewApplyTick + 1 })),
+
+  previewPath: '/',
+  previewCanBack: false,
+  previewCanForward: false,
+  setPreviewNav: ({ path, canBack, canForward }) =>
+    set({ previewPath: path, previewCanBack: canBack, previewCanForward: canForward }),
+  resetPreviewNav: () =>
+    set({ previewPath: '/', previewCanBack: false, previewCanForward: false }),
+
+  previewNavCmd: { seq: 0, action: 'reload' },
+  sendPreviewNav: (action) =>
+    set((s) => ({ previewNavCmd: { seq: s.previewNavCmd.seq + 1, action } })),
 
   // —— 控制台 ——
   consoleOpen: false,

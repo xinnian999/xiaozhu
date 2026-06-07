@@ -37,6 +37,10 @@ export default function PreviewPane() {
   const reloadTick = useUIStore((s) => s.previewReloadTick)
   // 应用计数器：变化即把当前暂存文件增量同步进预览（AI 调 update_preview 时自增）
   const applyTick = useUIStore((s) => s.previewApplyTick)
+  // 导航指令（后退/前进/刷新）：seq 变化即把指令 postMessage 进 iframe
+  const navCmd = useUIStore((s) => s.previewNavCmd)
+  // 复位地址栏导航状态（切会话时用）
+  const resetPreviewNav = useUIStore((s) => s.resetPreviewNav)
 
   // 标记上次同步的版本号，避免同 version 反复 sync
   const syncedVersionRef = useRef<string | null>(null)
@@ -47,6 +51,13 @@ export default function PreviewPane() {
   const containerSessionRef = useRef<string | null>(null)
   // 当前 iframe 的引用，用于校验 postMessage 来源
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
+
+  // —— 预览历史栈：父页面侧重建一份 iframe 内的浏览历史，用来算「能否前进/后退」——
+  // iframe 跨域拿不到它真实的 history.length / 当前位置，只能靠导航桥上报的
+  // push/replace/pop 事件在这里维护一个栈 + 游标。pop（前进后退）无法直接知道方向，
+  // 通过比对目标路径是上一个还是下一个来推断。
+  const histStackRef = useRef<string[]>([])
+  const histIdxRef = useRef(-1)
 
   // —— 日志回传给后端 ——
   // activeId 放进 ref：下面的回调/定时器是在 effect 里建的闭包，
@@ -73,6 +84,11 @@ export default function PreviewPane() {
     if (prevSession === activeId && isBooted()) return
     // 立刻把容器归属占位成当前会话，避免 boot 完成前本 effect 被重复触发又启一遍
     containerSessionRef.current = activeId
+    // 复位地址栏 / 前进后退栈 —— 新会话从 '/' 重新开始，等 iframe 里的导航桥
+    // 重新上报 init 再填回去
+    histStackRef.current = []
+    histIdxRef.current = -1
+    resetPreviewNav()
 
     let cancelled = false
     ;(async () => {
@@ -148,9 +164,43 @@ export default function PreviewPane() {
 
     const handle = (e: MessageEvent) => {
       const data = e.data
-      if (!data || data.type !== 'vibuild-console') return
+      if (!data) return
       // 来源校验：必须来自当前 iframe 的 contentWindow，防止其他 tab 的脏数据
       if (iframeRef.current && e.source !== iframeRef.current.contentWindow) return
+
+      // —— 路由导航上报：维护历史栈，更新地址栏 + 前进后退可用态 ——
+      if (data.type === 'vibuild-nav') {
+        const path = typeof data.path === 'string' ? data.path : '/'
+        const stack = histStackRef.current
+        let idx = histIdxRef.current
+        if (data.kind === 'init') {
+          // 整页加载（首次 / location.reload）：重置成单条历史
+          histStackRef.current = [path]
+          idx = 0
+        } else if (data.kind === 'replace') {
+          // 替换当前条目（如 <Navigate replace>），不增长历史
+          if (idx >= 0) stack[idx] = path
+          else { histStackRef.current = [path]; idx = 0 }
+        } else if (data.kind === 'pop') {
+          // 前进/后退：popstate 不带方向，比对目标是上一条还是下一条来推断
+          if (idx > 0 && stack[idx - 1] === path) idx -= 1
+          else if (idx < stack.length - 1 && stack[idx + 1] === path) idx += 1
+          else { const t = stack.slice(0, idx + 1); t.push(path); histStackRef.current = t; idx = t.length - 1 }
+        } else {
+          // push（含未知类型兜底）：截掉游标之后的「前进分支」，压入新路径
+          const t = stack.slice(0, idx + 1)
+          t.push(path)
+          histStackRef.current = t
+          idx = t.length - 1
+        }
+        histIdxRef.current = idx
+        const len = histStackRef.current.length
+        // 用 getState 直接写，避免把 setter 加进 effect 依赖反复重订阅
+        useUIStore.getState().setPreviewNav({ path, canBack: idx > 0, canForward: idx < len - 1 })
+        return
+      }
+
+      if (data.type !== 'vibuild-console') return
       const level: LogLevel = ['log', 'info', 'warn', 'error'].includes(data.level) ? data.level : 'log'
       const text = String(data.text ?? '')
       pushWcLog({ level, text })
@@ -200,6 +250,16 @@ export default function PreviewPane() {
     })
     return unsub
   }, [pushWcLog])
+
+  // —— 把导航指令（后退/前进/刷新）postMessage 进 iframe ——
+  // 只有本组件持有 iframe 引用，所以 TabBar 的按钮通过 store 的 previewNavCmd
+  // 计数器间接触发这里。seq=0 是初始值，跳过。
+  useEffect(() => {
+    if (navCmd.seq === 0) return
+    const win = iframeRef.current?.contentWindow
+    if (!win) return
+    win.postMessage({ type: 'vibuild-nav-cmd', action: navCmd.action }, '*')
+  }, [navCmd])
 
   // ready 时延迟 900ms 再显示 iframe，让进度条动画有时间跑到 100%
   // syncing 是增量文件同步，iframe 保持可见，交给 vite HMR 处理，不触发 overlay

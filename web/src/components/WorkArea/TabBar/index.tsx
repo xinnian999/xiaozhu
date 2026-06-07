@@ -26,12 +26,15 @@ export default function TabBar() {
   const consoleOpen = useUIStore((s) => s.consoleOpen)
   const toggleConsole = useUIStore((s) => s.toggleConsole)
   const logCount = useUIStore((s) => s.wcLogs.length)
-  // 刷新预览：bump 一下 store 里的计数，PreviewPane 会重新挂载 iframe
-  const reloadPreview = useUIStore((s) => s.reloadPreview)
-  // 预览只在 dev server ready 时才有 URL，没有 URL 时刷新没意义
+  // 发预览导航指令（后退/前进/刷新）—— PreviewPane 收到后 postMessage 进 iframe。
+  // 刷新走 'reload'（iframe 内 location.reload，保留当前路由），不再整页重挂 iframe。
+  const sendPreviewNav = useUIStore((s) => s.sendPreviewNav)
+  // 当前预览路由 + 前进后退可用态（由导航桥上报、PreviewPane 维护）
+  const previewPath = useUIStore((s) => s.previewPath)
+  const canBack = useUIStore((s) => s.previewCanBack)
+  const canForward = useUIStore((s) => s.previewCanForward)
+  // 预览只在 dev server ready 时才有 URL，没有 URL 时这些操作没意义
   const wcUrl = useUIStore((s) => s.wcUrl)
-  const session = useSessionStore((s) => s.session)
-  const currentVersion = useSessionStore((s) => s.currentVersion())
   // 真实会话 id（分享要用它，session.id 是兼容旧组件的占位）
   const activeId = useSessionStore((s) => s.activeId)
   // 未保存草稿数量：代码 tab 且 >0 时才显示保存 / 丢弃（返回 number，selector 稳定）
@@ -114,15 +117,27 @@ export default function TabBar() {
       <div className={styles.center}>
         {!isCode && (
           <div className={styles.urlBar}>
-            <button className={styles.urlIconBtn} aria-label="后退">
+            <button
+              className={styles.urlIconBtn}
+              onClick={() => sendPreviewNav('back')}
+              disabled={!wcUrl || !canBack}
+              aria-label="后退"
+              title="后退"
+            >
               <ChevronLeft size={13} />
             </button>
-            <button className={styles.urlIconBtn} aria-label="前进">
+            <button
+              className={styles.urlIconBtn}
+              onClick={() => sendPreviewNav('forward')}
+              disabled={!wcUrl || !canForward}
+              aria-label="前进"
+              title="前进"
+            >
               <ChevronLeft size={13} style={{ transform: 'rotate(180deg)' }} />
             </button>
             <button
               className={styles.urlIconBtn}
-              onClick={reloadPreview}
+              onClick={() => sendPreviewNav('reload')}
               disabled={!wcUrl}
               aria-label="刷新预览"
               title="刷新预览"
@@ -132,8 +147,8 @@ export default function TabBar() {
 
             <div className={styles.urlInput}>
               <span className={styles.urlBrand} aria-hidden>vb</span>
-              <span className={styles.urlPath}>{session.name.toLowerCase().replace(/\s+/g, '-')}.vibuild.app</span>
-              <span className={styles.urlVersionTag}>{currentVersion.id}</span>
+              {/* 直接显示当前路由路径（默认 '/'），不再拼假域名 / 版本号 */}
+              <span className={styles.urlPath}>{previewPath || '/'}</span>
             </div>
 
             <button

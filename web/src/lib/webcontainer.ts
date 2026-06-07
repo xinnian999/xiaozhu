@@ -188,16 +188,64 @@ const CONSOLE_BRIDGE_SCRIPT = `<script>(function(){
   });
 })();</script>`
 
-/** 把 console bridge 注入到 index.html 里（如果还没注入） */
-function injectConsoleBridge(files: FileMap): FileMap {
+// ── 路由导航桥接脚本 ──────────────────────────────────────────
+// 同样注入到 iframe 的 index.html，解决「预览跨域，父页面读不到 iframe 的 URL」：
+// - 业务代码（React Router）切换路由走的是 history.pushState / replaceState，
+//   这里把这两个方法包一层，切换后用 postMessage 把新路径报给父页面（地址栏要显示）；
+// - 监听 popstate / hashchange，浏览器前进后退时同样上报；
+// - 反向：监听父页面发来的 vibuild-nav-cmd 指令，在 iframe 内执行
+//   history.back() / forward() / location.reload()（这些跨域只能由 iframe 自己调）。
+// 必须先于业务代码执行，所以和 console 桥一样放 <head> 末尾。
+//
+// 设计要点：
+// - __vibuildNavBridged 旗标避免 HMR 重新执行时重复包裹 history 方法
+// - kind 标明这次是 push / replace / pop / init，父页面据此维护前进后退栈
+const NAV_BRIDGE_SCRIPT = `<script>(function(){
+  if (window.__vibuildNavBridged) return;
+  window.__vibuildNavBridged = true;
+  function cur(){ return location.pathname + location.search + location.hash; }
+  function report(kind){
+    try { window.parent.postMessage({ type: 'vibuild-nav', kind: kind, path: cur() }, '*'); } catch(e) {}
+  }
+  var _push = history.pushState;
+  history.pushState = function(){ var r = _push.apply(this, arguments); report('push'); return r; };
+  var _replace = history.replaceState;
+  history.replaceState = function(){ var r = _replace.apply(this, arguments); report('replace'); return r; };
+  window.addEventListener('popstate', function(){ report('pop'); });
+  window.addEventListener('hashchange', function(){ report('pop'); });
+  window.addEventListener('message', function(e){
+    var d = e.data;
+    if (!d || d.type !== 'vibuild-nav-cmd') return;
+    if (d.action === 'back') history.back();
+    else if (d.action === 'forward') history.forward();
+    else if (d.action === 'reload') location.reload();
+  });
+  // 首次上报当前地址（DOM 就绪后，确保是业务代码可能重定向前的初始态）
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function(){ report('init'); });
+  } else {
+    report('init');
+  }
+})();</script>`
+
+/** 把一段脚本注入 index.html 的 <head> 末尾（没有 </head> 就放 <body> 前）。
+ *  flag 用于幂等判断：html 里已含该标记就跳过，避免重复注入。 */
+function injectScript(files: FileMap, script: string, flag: string): FileMap {
   const html = files['index.html']
   if (!html) return files
-  if (html.includes('__vibuildConsoleBridged')) return files  // 已注入过
-  // 优先放在 <head> 结束前；没有 </head> 就放在 <body> 前
+  if (html.includes(flag)) return files  // 已注入过
   const next = html.includes('</head>')
-    ? html.replace('</head>', `  ${CONSOLE_BRIDGE_SCRIPT}\n  </head>`)
-    : html.replace('<body>', `${CONSOLE_BRIDGE_SCRIPT}\n<body>`)
+    ? html.replace('</head>', `  ${script}\n  </head>`)
+    : html.replace('<body>', `${script}\n<body>`)
   return { ...files, 'index.html': next }
+}
+
+/** 把 console 桥 + 路由导航桥都注入到 index.html（幂等）。
+ *  两处脚本互相独立，分别用各自的旗标判断是否已注入。 */
+function injectConsoleBridge(files: FileMap): FileMap {
+  let next = injectScript(files, CONSOLE_BRIDGE_SCRIPT, '__vibuildConsoleBridged')
+  next = injectScript(next, NAV_BRIDGE_SCRIPT, '__vibuildNavBridged')
+  return next
 }
 
 // ── .bin 软链接重建脚本 ────────────────────────────────────────

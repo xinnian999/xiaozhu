@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI):
 
     # 表结构不再用 create_all 自动建，改由 Alembic 迁移统一管理（见 alembic/）。
     #   - Docker：容器启动命令里先跑 `alembic upgrade head` 再起 uvicorn。
-    #   - 本地：拉到新迁移后手动 `uv run alembic upgrade head`。
+    #   - 本地 dev：`bun run dev` 会在起后端前自动跑 `db:migrate`（alembic upgrade head）。
     # 这样「改模型 → 生成迁移 → upgrade」是唯一的建表/改表入口，
     # 彻底告别 create_all「只建新表、不改老表」导致的线上 schema 漂移。
     yield

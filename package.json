@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "concurrently -n web,server -c cyan,magenta \"bun run dev:server\" \"bun run dev:web\"",
     "dev:web": "bun run --cwd web dev",
-    "dev:server": "uv run --directory server fastapi dev app/main.py --port 8000",
+    "db:migrate": "uv run --directory server alembic upgrade head",
+    "dev:server": "bun run db:migrate && uv run --directory server fastapi dev app/main.py --port 8000",
     "build": "bun run --cwd web build",
     "build:prod": "bun run build && rm -rf server/static && cp -r web/dist server/static",
     "start:prod": "uv run --directory server uvicorn app.main:app --port 8099",

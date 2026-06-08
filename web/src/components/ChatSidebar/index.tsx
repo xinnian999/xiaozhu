@@ -1,9 +1,10 @@
-import { useRef, useState } from 'react'
-import { ArrowUp, Square, Mic, Paperclip, Image as ImageIcon, X } from 'lucide-react'
+import { useCallback, useRef, useState } from 'react'
+import { ArrowUp, Square, Mic, Image as ImageIcon, X, Plus } from 'lucide-react'
 import { useSessionStore, makeMessage, makeVersionCard } from '@/store/session'
 import { useUIStore } from '@/store/ui'
 import { streamChat } from '@/lib/api'
 import { toast } from '@/lib/toast'
+import { useClickOutside } from '@/hooks/useClickOutside'
 import MessageList from './MessageList'
 import ModelSelector from './ModelSelector'
 import styles from './index.module.scss'
@@ -37,6 +38,13 @@ export default function ChatSidebar() {
   const [creating, setCreating] = useState(false)
   // 本轮流式的中断控制器：点"停止"时 abort()，streamChat 内部据此静默收尾
   const abortRef = useRef<AbortController | null>(null)
+
+  // 输入框工具栏的「加号」展开态：图片 / 语音等次要输入方式收进这个菜单里。
+  // 点菜单外的任意处自动收起（复用和 ModelSelector 同一套 useClickOutside）。
+  const [toolsOpen, setToolsOpen] = useState(false)
+  const toolsRef = useRef<HTMLDivElement>(null)
+  const closeTools = useCallback(() => setToolsOpen(false), [])
+  useClickOutside(toolsRef, closeTools)
 
   const isStreaming = session?.isStreaming ?? false
   // 无激活会话时，侧栏切换到"全屏空态"布局
@@ -197,16 +205,53 @@ export default function ChatSidebar() {
 
             <div className={styles.composerActions}>
               <div className={styles.composerTools}>
+
+                {/* 把「图片 / 语音」这些次要输入方式收进一个加号里，点击向上展开。
+                    移动端工具栏窄，多个图标平铺既挤又难点中；收成一个加号，
+                    点击区更大、视觉更干净，手机上交互顺手很多。 */}
+                <div className={styles.moreTools} ref={toolsRef}>
+                  <button
+                    type="button"
+                    className={`${styles.toolBtn} ${toolsOpen ? styles.toolBtnOpen : ''}`}
+                    onClick={() => setToolsOpen((v) => !v)}
+                    aria-haspopup="menu"
+                    aria-expanded={toolsOpen}
+                    aria-label="更多输入方式"
+                  >
+                    <Plus size={16} className={styles.plusIcon} />
+                  </button>
+
+                  {toolsOpen && (
+                    <div className={styles.morePanel} role="menu" aria-label="更多输入方式">
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className={styles.moreItem}
+                        onClick={() => {
+                          setToolsOpen(false)
+                          toast('图片输入开发中，敬请期待')
+                        }}
+                      >
+                        <ImageIcon size={16} className={styles.moreItemIcon} />
+                        <span className={styles.moreItemLabel}>添加图片</span>
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className={styles.moreItem}
+                        onClick={() => {
+                          setToolsOpen(false)
+                          toast('语音输入开发中，敬请期待')
+                        }}
+                      >
+                        <Mic size={16} className={styles.moreItemIcon} />
+                        <span className={styles.moreItemLabel}>语音输入</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+
                 <ModelSelector />
-                <button className={styles.toolBtn} aria-label="附件">
-                  <Paperclip size={14} />
-                </button>
-                <button className={styles.toolBtn} aria-label="图片">
-                  <ImageIcon size={14} />
-                </button>
-                <button className={styles.toolBtn} aria-label="语音">
-                  <Mic size={14} />
-                </button>
               </div>
 
               {isStreaming ? (

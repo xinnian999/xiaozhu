@@ -158,9 +158,74 @@
             color: var(--color-text-mute);
             transition: color $dur-base $ease-out, background $dur-base $ease-out;
 
-            &:hover {
+            &:hover,
+            &.toolBtnOpen {
               background: var(--color-bg-hover);
               color: var(--color-text-dim);
+            }
+
+            // 加号图标：展开时旋转 45° 变成「×」，给开/合一个明确的反馈
+            .plusIcon {
+              transition: transform $dur-base $ease-out;
+            }
+
+            &.toolBtnOpen .plusIcon {
+              transform: rotate(45deg);
+            }
+          }
+
+          // 「加号」展开菜单：相对定位容器，菜单绝对定位向上弹
+          .moreTools {
+            position: relative;
+            display: inline-flex;
+
+            // 菜单向「上」弹：工具栏在输入框底部，往下没空间（与 ModelSelector 同向）
+            .morePanel {
+              position: absolute;
+              bottom: calc(100% + #{$space-2});
+              left: 0;
+              z-index: 50;
+              min-width: 160px;
+              padding: $space-1;
+              display: flex;
+              flex-direction: column;
+              gap: 2px;
+              background: var(--color-bg-elev);
+              border: 1px solid var(--color-border);
+              border-radius: $radius-lg;
+              box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+              animation: fade-up 0.15s $ease-out;
+
+              .moreItem {
+                @include button-reset;
+                display: flex;
+                align-items: center;
+                gap: $space-2;
+                width: 100%;
+                padding: $space-2;
+                border-radius: $radius-md;
+                text-align: left;
+                color: var(--color-text-dim);
+                transition: color $dur-base $ease-out, background $dur-base $ease-out;
+
+                &:hover {
+                  background: var(--color-bg-hover);
+                  color: var(--color-text);
+                }
+
+                .moreItemIcon {
+                  display: inline-flex;
+                  align-items: center;
+                  flex-shrink: 0;
+                }
+
+                .moreItemLabel {
+                  flex: 1;
+                  min-width: 0;
+                  font-size: $fs-13;
+                  font-weight: $fw-medium;
+                }
+              }
             }
           }
         }
@@ -228,6 +293,11 @@
     .composer .composerInner {
       box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02);
     }
+
+    // 加号菜单的阴影在浅色主题下调淡（与 ModelSelector 面板保持一致）
+    .composer .morePanel {
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.12);
+    }
   }
 }
 
@@ -255,6 +325,30 @@
 
     .mobileClose {
       display: inline-flex;
+    }
+
+    // —— 移动端：工具栏按钮 / 菜单项加大点击区，手指更好点 ——
+    .composer {
+      .composerInner {
+        .composerActions {
+          .composerTools {
+            .toolBtn {
+              width: 32px;
+              height: 32px;
+            }
+
+            .moreTools {
+              .morePanel {
+                min-width: 200px;
+
+                .moreItem {
+                  padding: $space-3;
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 

@@ -213,6 +213,18 @@
                   color: var(--color-text);
                 }
 
+                // 当前模型不支持识图时的置灰态：变暗、禁用指针、并屏蔽 hover 高亮，
+                // 让它一眼看上去就是「不可点」。
+                &.moreItemDisabled {
+                  opacity: 0.4;
+                  cursor: not-allowed;
+
+                  &:hover {
+                    background: transparent;
+                    color: var(--color-text-dim);
+                  }
+                }
+
                 .moreItemIcon {
                   display: inline-flex;
                   align-items: center;

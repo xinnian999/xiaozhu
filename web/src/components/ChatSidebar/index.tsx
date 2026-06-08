@@ -24,6 +24,7 @@ export default function ChatSidebar() {
   const applyFileWrite = useSessionStore((s) => s.applyFileWrite)
   const applyFileDelete = useSessionStore((s) => s.applyFileDelete)
   const selectedModel = useSessionStore((s) => s.selectedModel)
+  const models = useSessionStore((s) => s.models)
   const mobileChatOpen = useUIStore((s) => s.mobileChatOpen)
   const setMobileChatOpen = useUIStore((s) => s.setMobileChatOpen)
   const chatCollapsed = useUIStore((s) => s.chatCollapsed)
@@ -49,6 +50,11 @@ export default function ChatSidebar() {
   const isStreaming = session?.isStreaming ?? false
   // 无激活会话时，侧栏切换到"全屏空态"布局
   const noSession = activeId === null
+
+  // 当前选中模型是否支持识图（多模态）。由后端实测标定的 vision 字段决定。
+  // 不支持时把「添加图片」置灰：清单还没加载好（找不到当前模型）也按不支持处理，
+  // 避免在不确定时放开传图。
+  const visionSupported = models.find((m) => m.id === selectedModel)?.vision ?? false
 
   const handleSend = async () => {
     if (!draft.trim() || isStreaming || creating) return
@@ -223,10 +229,14 @@ export default function ChatSidebar() {
 
                   {toolsOpen && (
                     <div className={styles.morePanel} role="menu" aria-label="更多输入方式">
+                      {/* 添加图片：仅当前模型支持识图时可用，否则置灰并提示换模型。
+                          disabled 同时挡住点击，className 加 disabled 态走灰色样式。 */}
                       <button
                         type="button"
                         role="menuitem"
-                        className={styles.moreItem}
+                        className={`${styles.moreItem} ${visionSupported ? '' : styles.moreItemDisabled}`}
+                        disabled={!visionSupported}
+                        title={visionSupported ? undefined : '当前模型不支持识图，请切换到支持识图的模型'}
                         onClick={() => {
                           setToolsOpen(false)
                           toast('图片输入开发中，敬请期待')

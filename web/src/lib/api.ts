@@ -99,10 +99,13 @@ export type ApiFile = {
 // 后端 GET /api/models 返回的单个模型。icon 是 @lobehub/icons 的「组件标识符」
 // （如 "Qwen.Color" / "Claude.Color"），不是 URL；前端用它解析成图标组件。
 // 注意：后端不会返回 group / api_key 这些内部字段，前端拿不到也不需要。
+// vision：该模型是否支持识图（多模态图片输入），由后端实测标定，
+// 前端据此把「添加图片」置灰 —— 不支持的模型不让传图。
 export type ApiModel = {
   id: string
   label: string
   icon: string
+  vision: boolean
 }
 
 // ── 鉴权（注册 / 登录 / 获取自身信息）────────────────────────────

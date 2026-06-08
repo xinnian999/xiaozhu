@@ -26,10 +26,13 @@ from app.config import settings
 #            所以这里只存分组名（不存 key！），真正的 key 在 build_llm 里按分组从 .env 取。
 #            同一分组下的多个模型共用一个 key —— 这正是「分组」存在的意义。
 #            另：分组在本项目里就等于「厂商」，所以 logo 也按分组派生（见 GROUP_ICONS）。
+#   vision —— 是否支持识图（多模态图片输入）。前端据此把「添加图片」置灰，不支持的不让传图。
+#            这个值不是查文档拍脑袋填的，而是用 scripts/check_vision.py 实测出来的
+#            （给模型发已知颜色的图、看能否答对）。换中转站后能力可能变，记得重跑脚本核对。
 AVAILABLE_MODELS = [
-    {"id": "qwen3-coder-next", "label": "Qwen3 Coder Next", "group": "qwen"},
-    {"id": "qwen3.6-plus", "label": "Qwen3.6 Plus", "group": "qwen"},
-    {"id": "gpt-5.5", "label": "GPT-5.5", "group": "gpt"},
+    {"id": "qwen3-coder-next", "label": "Qwen3 Coder Next", "group": "qwen", "vision": True},
+    {"id": "qwen3.6-plus", "label": "Qwen3.6 Plus", "group": "qwen", "vision": True},
+    {"id": "gpt-5.5", "label": "GPT-5.5", "group": "gpt", "vision": False},
 ]
 
 # 分组 → 品牌 logo（@lobehub/icons 的「组件标识符」，不是 URL！）。
@@ -53,15 +56,21 @@ DEFAULT_MODEL_ID = AVAILABLE_MODELS[0]["id"]
 
 
 def public_models() -> list[dict]:
-    """给前端的模型清单。只吐 id / label / icon —— 故意不含 group，更不含 api_key：
+    """给前端的模型清单。只吐 id / label / icon / vision —— 故意不含 group，更不含 api_key：
     group 是后端内部「选哪个 key」的路由信息，前端不需要知道；
     api_key 是密钥，绝不能出现在任何响应里。
 
     icon 不存在模型里，而是这里按 group 现派生出来：分组找不到对应 logo 就给空串，
     前端解析不出会自动退回兜底图标，不会报错。
+    vision 直透出去，前端据此把不支持识图的模型对应的「添加图片」按钮置灰。
     """
     return [
-        {"id": m["id"], "label": m["label"], "icon": GROUP_ICONS.get(m["group"], "")}
+        {
+            "id": m["id"],
+            "label": m["label"],
+            "icon": GROUP_ICONS.get(m["group"], ""),
+            "vision": m["vision"],
+        }
         for m in AVAILABLE_MODELS
     ]
 

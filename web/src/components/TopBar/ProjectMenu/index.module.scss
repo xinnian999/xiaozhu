@@ -128,11 +128,6 @@
         color: var(--color-text-mute);
       }
 
-      .itemCheck {
-        flex-shrink: 0;
-        color: var(--color-accent);
-      }
-
       // 重命名 / 删除小图标按钮
       .actionBtn {
         @include button-reset;

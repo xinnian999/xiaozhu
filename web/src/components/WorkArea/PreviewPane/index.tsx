@@ -380,9 +380,34 @@ const STATUS_LABEL: Record<string, string> = {
   ready:      '即将完成…',
 }
 
+// 某阶段卡过这个时长（ms）还没推进，就显示「慢加载提示」安抚用户 + 给排查方向。
+// 只给真正可能久等的两个阶段配：
+//   booting   —— WebContainer 运行时要从境外 CDN（StackBlitz）下载，国内首次最慢。
+//   installing —— 首次要下依赖快照（几 MB），也可能要等一会儿。
+const SLOW_HINT_AFTER: Record<string, number> = {
+  booting: 15000,
+  installing: 30000,
+}
+const SLOW_HINT: Record<string, string> = {
+  booting:
+    '运行环境需从境外 CDN（StackBlitz）下载，国内网络首次可能要等一两分钟。' +
+    '若长时间卡住：检查网络、关闭浏览器开发者工具里的「停用缓存」让它能缓存住、或走代理后重试。',
+  installing: '首次准备依赖较慢（要下载依赖快照），请再稍候…',
+}
+
 function BootingBlock({ status, log }: { status: WCStatus; log: string }) {
   const target = STATUS_PROGRESS[status] ?? 0
   const label = STATUS_LABEL[status] ?? '正在加载…'
+
+  // 卡太久才显示的慢加载提示：每次进入新阶段先清掉，超过该阶段阈值再亮出来
+  const [slow, setSlow] = useState(false)
+  useEffect(() => {
+    setSlow(false)
+    const after = SLOW_HINT_AFTER[status]
+    if (!after) return
+    const timer = setTimeout(() => setSlow(true), after)
+    return () => clearTimeout(timer)
+  }, [status])
 
   // 动画当前显示值，用 ref 驱动 raf 避免闭包过期
   const [display, setDisplay] = useState(0)
@@ -441,6 +466,7 @@ function BootingBlock({ status, log }: { status: WCStatus; log: string }) {
         <div className={styles.progressBar} style={{ width: `${display}%` }} />
       </div>
       <p className={styles.statusLabel}>{label}</p>
+      {slow && SLOW_HINT[status] && <p className={styles.slowHint}>{SLOW_HINT[status]}</p>}
       {log && <pre className={styles.bootLog}>{log}</pre>}
     </div>
   )

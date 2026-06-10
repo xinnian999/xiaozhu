@@ -121,6 +121,17 @@
               margin: 0;
             }
 
+            // 卡太久时的慢加载提示：比 statusLabel 略亮、放宽行距，淡入出现
+            .slowHint {
+              font-family: var(--font-sans);
+              font-size: $fs-12;
+              line-height: $lh-relaxed;
+              color: #9a96a0;
+              margin: $space-1 0 0;
+              max-width: 300px;
+              animation: fade-in $dur-base $ease-out;
+            }
+
             .bootLog {
               font-family: var(--font-mono);
               font-size: 9px;

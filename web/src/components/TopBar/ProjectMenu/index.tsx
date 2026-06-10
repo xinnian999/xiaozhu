@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react'
-import { ChevronDown, Check, Plus, FolderKanban, Pencil, Trash2 } from 'lucide-react'
+import { ChevronDown, Plus, FolderKanban, Pencil, Trash2 } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
 import { useClickOutside } from '@/hooks/useClickOutside'
 import styles from './index.module.scss'
@@ -154,7 +154,6 @@ export default function ProjectMenu() {
                         <span className={styles.itemName}>{s.title}</span>
                         <span className={styles.itemMeta}>{s.messages.length} 条消息</span>
                       </span>
-                      {s.id === activeId && <Check size={14} className={styles.itemCheck} />}
                     </button>
                     <button
                       type="button"

@@ -27,11 +27,9 @@ function App() {
     document.documentElement.dataset.theme = theme
   }, [theme])
 
-  // 应用启动：先恢复登录态（看本地 token 是否有效）。
-  // 同时后台预热依赖快照 —— 这一步不需要登录，越早开始越好。
+  // 应用启动：恢复登录态（看本地 token 是否有效）。
   useEffect(() => {
     initAuth()
-    warmupSnapshot()
   }, [])
 
   // 登录成功后才初始化会话和模型清单（这些接口需要鉴权）。
@@ -41,6 +39,11 @@ function App() {
     // 错误统一由 axios 拦截器 toast，这里只需阻止 unhandled rejection
     init().catch(() => {})
     loadModels()
+    // 依赖快照预热放到登录之后再启动 —— 它是个几 MB 的下载，登录前就开跑会和
+    // 登录/拉会话等首屏请求抢带宽，把首次登录拖慢。登录后才需要它（进项目 boot
+    // WebContainer 时用），这里启动既不耽误它就绪、又不挡登录。配合 fetch 的
+    // priority:'low'，它会一直给前台请求让路。
+    warmupSnapshot()
   }, [isAuthed])
 
   // 登录态还没恢复完：先显示加载占位，避免"已登录却闪一下登录页"

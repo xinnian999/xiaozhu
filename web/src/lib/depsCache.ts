@@ -148,7 +148,10 @@ export function warmupSnapshot(): void {
       const existing = await getSnapshot(depsKey)
       if (existing) return
 
-      const snapRes = await fetch(PREBUILT_SNAPSHOT_URL)
+      // priority: 'low' —— 这是个几 MB 的后台预热下载，必须给前台请求（登录 / 拉会话 /
+      // 字体等）让路，否则它会占满管道，把首屏那些小请求挤在后面，首次登录就被拖慢。
+      // 浏览器不支持该字段时会忽略，无副作用。
+      const snapRes = await fetch(PREBUILT_SNAPSHOT_URL, { priority: 'low' })
       if (!snapRes.ok) return
       const snapshot = new Uint8Array(await snapRes.arrayBuffer())
       await saveSnapshot(depsKey, snapshot)
@@ -178,7 +181,8 @@ export async function fetchPrebuiltSnapshot(depsKey: string): Promise<Uint8Array
       console.warn('预置快照与当前依赖不匹配，跳过', manifest.depsKey, depsKey)
       return null
     }
-    const snapRes = await fetch(PREBUILT_SNAPSHOT_URL)
+    // 同样降到最低优先级：即便用户已经进项目要用它，也别和别的前台请求抢带宽
+    const snapRes = await fetch(PREBUILT_SNAPSHOT_URL, { priority: 'low' })
     if (!snapRes.ok) return null
     const buf = await snapRes.arrayBuffer()
     return new Uint8Array(buf)

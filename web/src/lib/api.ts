@@ -189,6 +189,17 @@ export async function listSessions(): Promise<ApiSession[]> {
   return data
 }
 
+/** 重命名会话：PATCH 新标题，返回更新后的会话对象。 */
+export async function renameSession(sessionId: string, title: string): Promise<ApiSession> {
+  const { data } = await http.patch<ApiSession>(`/api/sessions/${sessionId}`, { title })
+  return data
+}
+
+/** 删除会话：后端会级联清掉它名下的文件 / 消息 / 版本 / 分享产物。无返回体（204）。 */
+export async function deleteSession(sessionId: string): Promise<void> {
+  await http.delete(`/api/sessions/${sessionId}`)
+}
+
 // ── Models ──────────────────────────────────────────────────────
 
 /** 拉取可选模型清单，给模型下拉框渲染。 */

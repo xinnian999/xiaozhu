@@ -75,15 +75,12 @@
       @include hide-scrollbar;
     }
 
+    // 普通行：左侧选择区(itemSelect) + 右侧操作按钮(actionBtn)，整行作 flex 容器
     .item {
-      @include button-reset;
       display: flex;
       align-items: center;
-      gap: $space-2;
       width: 100%;
-      padding: $space-2 $space-3;
       border-radius: $radius-md;
-      text-align: left;
       transition: background $dur-base $ease-out;
 
       &:hover {
@@ -92,6 +89,23 @@
 
       &.itemActive {
         background: var(--color-bg-soft);
+      }
+
+      // 鼠标移到整行时才显出操作按钮，平时隐藏保持清爽（触摸设备在底部响应式里常显）
+      &:hover .actionBtn {
+        opacity: 1;
+      }
+
+      // 选择区：占满剩余宽度，点它切换会话
+      .itemSelect {
+        @include button-reset;
+        display: flex;
+        align-items: center;
+        gap: $space-2;
+        flex: 1;
+        min-width: 0;
+        padding: $space-2 $space-3;
+        text-align: left;
       }
 
       .itemMain {
@@ -117,6 +131,91 @@
       .itemCheck {
         flex-shrink: 0;
         color: var(--color-accent);
+      }
+
+      // 重命名 / 删除小图标按钮
+      .actionBtn {
+        @include button-reset;
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 26px;
+        border-radius: $radius-sm;
+        color: var(--color-text-mute);
+        opacity: 0;
+        transition: opacity $dur-base $ease-out, color $dur-base $ease-out;
+
+        &:hover {
+          color: var(--color-text);
+        }
+
+        &.actionDelete:hover {
+          color: var(--color-danger);
+        }
+
+        &:last-child {
+          margin-right: $space-2;
+        }
+      }
+    }
+
+    // 内联重命名输入框
+    .editWrap {
+      display: flex;
+      width: 100%;
+      padding: $space-1 $space-2;
+    }
+
+    .editInput {
+      width: 100%;
+      padding: $space-1 $space-2;
+      border-radius: $radius-sm;
+      border: 1px solid var(--color-accent);
+      background: var(--color-bg);
+      color: var(--color-text);
+      font-size: $fs-13;
+      outline: none;
+    }
+
+    // 删除二次确认行
+    .confirm {
+      display: flex;
+      align-items: center;
+      gap: $space-2;
+      width: 100%;
+      padding: $space-2 $space-3;
+    }
+
+    .confirmText {
+      flex: 1;
+      min-width: 0;
+      font-size: $fs-12;
+      color: var(--color-text-dim);
+      @include truncate;
+    }
+
+    .confirmYes,
+    .confirmNo {
+      @include button-reset;
+      flex-shrink: 0;
+      padding: 2px $space-2;
+      border-radius: $radius-sm;
+      font-size: $fs-12;
+      font-weight: $fw-medium;
+    }
+
+    .confirmYes {
+      color: #fff;
+      background: var(--color-danger);
+    }
+
+    .confirmNo {
+      color: var(--color-text-dim);
+
+      &:hover {
+        background: var(--color-bg-hover);
       }
     }
 
@@ -154,5 +253,10 @@
 @include mobile {
   .menu .panel {
     left: -$space-2;
+
+    // 触摸设备没有 hover，操作按钮常显，否则用户根本看不到重命名/删除入口
+    .item .actionBtn {
+      opacity: 1;
+    }
   }
 }

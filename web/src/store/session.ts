@@ -9,6 +9,8 @@ import {
   saveVersion,
   restoreVersion,
   listVersions,
+  renameSession as apiRenameSession,
+  deleteSession as apiDeleteSession,
   type ApiSession,
   type ApiMessage,
   type ApiModel,
@@ -57,6 +59,10 @@ type SessionState = {
 
   init: () => Promise<void>
   createNew: (title?: string) => Promise<ChatSession>
+  /** 重命名会话：PATCH 后端，成功后更新本地列表里的 title */
+  renameSession: (id: string, title: string) => Promise<void>
+  /** 删除会话：DELETE 后端，成功后从列表移除；删的若是当前会话则回到空态首屏 */
+  deleteSession: (id: string) => Promise<void>
   switchTo: (id: string) => Promise<void>
   /** 回到"无激活会话"的空态首屏，不真正创建会话 */
   goToEmpty: () => void
@@ -263,6 +269,26 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // 新建会话后端已经预置了模板，立即拉过来给 WebContainer 用
     await get().switchTo(session.id)
     return session
+  },
+
+  renameSession: async (id, title) => {
+    // 后端做空标题校验并回写 updated_at；这里拿返回的 title 落到本地列表
+    const api = await apiRenameSession(id, title)
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === id ? { ...sess, title: api.title ?? sess.title } : sess,
+      ),
+    }))
+  },
+
+  deleteSession: async (id) => {
+    // 先请求后端删除（连带级联清理子表）；失败会被 axios 拦截器统一 toast，这里不动本地
+    await apiDeleteSession(id)
+    // 删的若是当前激活会话，先回到空态首屏（清激活态 + URL），再把它从列表移除
+    if (get().activeId === id) get().goToEmpty()
+    set((s) => ({ sessions: s.sessions.filter((sess) => sess.id !== id) }))
+    // 顺手清掉该会话的 currentVersion 缓存，避免内存里残留无主对象
+    versionCache.delete(id)
   },
 
   switchTo: async (id) => {

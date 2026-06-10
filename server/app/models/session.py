@@ -79,6 +79,15 @@ class SessionCreate(BaseModel):
     title: str | None = None
 
 
+class SessionUpdate(BaseModel):
+    """PATCH /api/sessions/{id} 的请求体：更新会话信息（重命名）。
+
+    目前只有 title 一个字段，留成可空是为了将来好扩展（再加别的可改字段时
+    不破坏接口）。具体「title 不能为空」的业务校验放在路由里做，schema 只管结构。
+    """
+    title: str | None = None
+
+
 class SessionRead(BaseModel):
     """API 响应里返回的会话对象。"""
     model_config = {"from_attributes": True}  # 允许从 ORM 对象直接构建

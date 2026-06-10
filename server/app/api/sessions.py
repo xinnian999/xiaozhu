@@ -6,15 +6,18 @@
   3. 所有数据库操作都要 await（因为我们用的是 async SQLAlchemy）。
 """
 
-from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.deps import get_current_user, get_owned_session
 from app.models.file import File
-from app.models.session import Session, SessionCreate, SessionRead
+from app.models.message import Message
+from app.models.session import Session, SessionCreate, SessionRead, SessionUpdate
+from app.models.shared_asset import SharedAsset
 from app.models.user import User
+from app.models.version import Version, VersionFile
 from app.templates import load_template
 
 # prefix="/api/sessions" → 这个 router 里所有路由都以 /api/sessions 开头
@@ -90,3 +93,67 @@ async def get_session(
     既消除了重复查询，又和子资源接口用的是同一套归属逻辑。
     """
     return SessionRead.model_validate(session)
+
+
+@router.patch("/{session_id}", response_model=SessionRead)
+async def rename_session(
+    body: SessionUpdate,
+    session: Session = Depends(get_owned_session),  # 守卫：会话必须属于当前用户
+    db: AsyncSession = Depends(get_db),
+) -> SessionRead:
+    """重命名会话：更新 title，返回更新后的会话。
+
+    归属校验由 get_owned_session 完成（不存在或不属于你 → 404）。
+    这里只做业务校验：标题去掉首尾空白后不能为空 —— 否则列表里会出现一个
+    空白名字的项目，体验很差，直接 400 拒绝。
+
+    改完只需 commit；updated_at 列声明了 onupdate=func.now()，数据库会自动刷新，
+    所以再 refresh 一次把新的 updated_at 读回来返回给前端。
+    """
+    title = (body.title or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="标题不能为空")
+
+    session.title = title
+    await db.commit()
+    await db.refresh(session)
+    return SessionRead.model_validate(session)
+
+
+@router.delete("/{session_id}", status_code=204)
+async def delete_session(
+    session: Session = Depends(get_owned_session),  # 守卫：会话必须属于当前用户
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """删除会话，并级联清理它名下的所有数据。
+
+    为什么要手动删子表，不能只 `db.delete(session)` 一句搞定？
+      - 外键没有声明 `ON DELETE CASCADE`，SQLite 默认也不强制外键，
+        所以删掉 session 行不会自动带走子表数据，会留下一堆「孤儿」。
+      - ORM 这边也没配 relationship 的 cascade。
+    所以这里按「先子后父」的顺序，把每张挂在会话下的子表显式删干净，最后删会话本身。
+
+    版本快照是两层：versions（版本元信息）→ version_files（版本里的文件）。
+    version_files 的外键指向 versions.id 而不是 session.id，所以要先用子查询
+    「找出本会话的所有 version id」，把这些版本下的文件删掉，再删 versions。
+
+    全部在一个事务里（最后一次性 commit）：要么全删成功，要么出错整体回滚，
+    不会出现「文件删了但会话还在」这种删一半的脏状态。
+    """
+    sid = session.id
+
+    # 1. 版本快照文件：按「属于本会话的版本」收窄删除（子查询）
+    version_ids = select(Version.id).where(Version.session_id == sid)
+    await db.execute(delete(VersionFile).where(VersionFile.version_id.in_(version_ids)))
+    # 2. 版本元信息
+    await db.execute(delete(Version).where(Version.session_id == sid))
+    # 3. 当前工作副本文件
+    await db.execute(delete(File).where(File.session_id == sid))
+    # 4. 对话消息
+    await db.execute(delete(Message).where(Message.session_id == sid))
+    # 5. 分享出去的构建产物
+    await db.execute(delete(SharedAsset).where(SharedAsset.session_id == sid))
+    # 6. 最后删会话本身
+    await db.delete(session)
+
+    await db.commit()

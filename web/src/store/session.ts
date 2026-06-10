@@ -67,6 +67,8 @@ type SessionState = {
   /** 回到"无激活会话"的空态首屏，不真正创建会话 */
   goToEmpty: () => void
   appendMessage: (msg: Message) => void
+  /** 工具执行完，把结果填到对应工具卡（按 toolCallId 匹配当前会话里那条 tool 消息） */
+  setToolResult: (toolCallId: string, result: string) => void
   setStreamingText: (text: string) => void
   /** 开始一轮流式：立刻把 isStreaming 置 true（不等首个 token），让发送按钮即时变成"停止" */
   beginStreaming: () => void
@@ -128,6 +130,8 @@ function fromApiMessage(m: ApiMessage): Message {
     text: m.text,
     createdAt: new Date(m.created_at).getTime(),
     branchId: 'main',
+    // 带图的用户消息：把图片 data URL 还原出来，刷新后气泡里仍能看到缩略图
+    ...(m.images && m.images.length ? { images: m.images } : {}),
   } as const
 
   if (m.kind === 'tool') {
@@ -136,6 +140,8 @@ function fromApiMessage(m: ApiMessage): Message {
       kind: 'tool',
       toolName: m.tool_name ?? undefined,
       toolArgs: m.tool_args ?? undefined,
+      // 工具消息的 text 存的是「工具执行结果」，刷新后还原到 toolResult 供卡片展示
+      toolResult: m.text || undefined,
     }
   }
   if (m.kind === 'version') {
@@ -339,6 +345,23 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       sessions: s.sessions.map((sess) =>
         sess.id === id ? { ...sess, messages: [...sess.messages, msg] } : sess,
       ),
+    }))
+  },
+
+  setToolResult: (toolCallId, result) => {
+    const id = get().activeId
+    if (!id) return
+    // 找到当前会话里 toolCallId 匹配的那条工具卡，把结果填上
+    set((s) => ({
+      sessions: s.sessions.map((sess) => {
+        if (sess.id !== id) return sess
+        return {
+          ...sess,
+          messages: sess.messages.map((m) =>
+            m.kind === 'tool' && m.toolCallId === toolCallId ? { ...m, toolResult: result } : m,
+          ),
+        }
+      }),
     }))
   },
 

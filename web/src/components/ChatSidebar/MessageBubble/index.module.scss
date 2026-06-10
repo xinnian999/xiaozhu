@@ -35,6 +35,23 @@
     max-width: calc(100% - 32px);
     padding: $space-3 $space-3;
     min-width: 0;
+
+    // 用户发的图片缩略图网格
+    .images {
+      display: flex;
+      flex-wrap: wrap;
+      gap: $space-2;
+
+      .image {
+        width: 96px;
+        height: 96px;
+        object-fit: cover;
+        border-radius: $radius-md;
+        border: 1px solid var(--color-border);
+        display: block;
+        cursor: pointer; // 点击放大预览
+      }
+    }
   }
 
   .text {
@@ -266,10 +283,31 @@
   }
 
   // 参数面板：可滚动，文件内容再长也不会撑爆布局
+  // 展开区：放「参数」「结果」两段，顶部用虚线和头部分隔
+  .toolChipDetail {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: $space-2;
+    border-top: 1px dashed var(--color-border);
+  }
+
+  // 「参数」/「结果」小标题
+  .toolChipDetailLabel {
+    font-size: $fs-10;
+    font-weight: $fw-medium;
+    color: var(--color-text-mute);
+
+    // 同一展开区里第二个小标题（结果）和上一段拉开点距离
+    & + .toolChipArgs + & {
+      margin-top: $space-1;
+    }
+  }
+
   .toolChipArgs {
     margin: 0;
     padding: $space-2;
-    border-top: 1px dashed var(--color-border);
+    border-radius: $radius-sm;
     background: var(--color-bg);
     color: var(--color-text-dim);
     font-size: $fs-10;

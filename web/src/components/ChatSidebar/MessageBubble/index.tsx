@@ -4,6 +4,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { formatClock } from '@/lib/format'
 import { useSessionStore } from '@/store/session'
+import { useUIStore } from '@/store/ui'
 import { toast } from '@/lib/toast'
 import type { Message } from '@/types/project'
 import styles from './index.module.scss'
@@ -23,6 +24,9 @@ type Props = {
 // - kind === 'version'：渲染成"版本卡"，附带回滚按钮
 // - 其余情况：渲染成普通文本气泡
 export default function MessageBubble({ message, isStreaming = false, isLast = false }: Props) {
+  // 必须在任何条件 return 之前调用 hook（Hooks 规则）
+  const openImagePreview = useUIStore((s) => s.openImagePreview)
+
   if (message.kind === 'tool') {
     return <ToolCallChip message={message} />
   }
@@ -67,7 +71,23 @@ export default function MessageBubble({ message, isStreaming = false, isLast = f
   return (
     <article className={`${styles.bubble} ${styles.user}`}>
       <div className={styles.content}>
-        <p className={styles.text}>{message.text}</p>
+        {/* 用户发的图片：缩略图网格，排在文字上方 */}
+        {message.images && message.images.length > 0 && (
+          <div className={styles.images}>
+            {message.images.map((src, i) => (
+              <img
+                key={i}
+                src={src}
+                className={styles.image}
+                alt={`图片 ${i + 1}`}
+                onClick={() => openImagePreview(src)}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* 只发图片没文字时不渲染空段落 */}
+        {message.text && <p className={styles.text}>{message.text}</p>}
 
         {isLast && (
           <time className={styles.time} dateTime={new Date(message.createdAt).toISOString()}>
@@ -82,13 +102,16 @@ export default function MessageBubble({ message, isStreaming = false, isLast = f
 // ============================================
 // 工具调用进度卡：让用户看到 AI "正在做什么"
 // ============================================
-// 一行细窄卡片，避免抢眼。带参数的工具可点击展开，查看完整参数（如 write_file
-// 的文件内容）；无参数的工具（list_files / get_browser_logs）纯展示、不可展开。
+// 一行细窄卡片，避免抢眼。有参数或有执行结果就可点击展开，查看参数（如 write_file
+// 的文件内容）和工具结果（如 get_browser_logs 的报错、read_file 的内容）。
 function ToolCallChip({ message }: { message: Message }) {
   const { icon, label } = describeToolCall(message.toolName, message.toolArgs)
   const args = message.toolArgs
-  // 有参数才可展开 —— 否则展开只会看到空对象，没意义
+  const result = message.toolResult
   const hasArgs = !!args && Object.keys(args).length > 0
+  const hasResult = !!result && result.length > 0
+  // 有参数或有结果都可展开；都没有（如刚发起、结果还没回来）则纯展示
+  const expandable = hasArgs || hasResult
   const [expanded, setExpanded] = useState(false)
 
   // 头部内容（图标 + 文案 + 可展开时的箭头）两种渲染路径共用
@@ -98,7 +121,7 @@ function ToolCallChip({ message }: { message: Message }) {
         {icon}
       </span>
       <span className={styles.toolChipLabel}>{label}</span>
-      {hasArgs && (
+      {expandable && (
         <ChevronRight
           size={12}
           className={`${styles.toolChipChevron} ${expanded ? styles.toolChipChevronOpen : ''}`}
@@ -109,8 +132,8 @@ function ToolCallChip({ message }: { message: Message }) {
   )
 
   return (
-    <div className={`${styles.toolChip} ${hasArgs ? styles.toolChipExpandable : ''}`}>
-      {hasArgs ? (
+    <div className={`${styles.toolChip} ${expandable ? styles.toolChipExpandable : ''}`}>
+      {expandable ? (
         <button
           type="button"
           className={styles.toolChipHeader}
@@ -125,7 +148,22 @@ function ToolCallChip({ message }: { message: Message }) {
         </div>
       )}
 
-      {hasArgs && expanded && <pre className={styles.toolChipArgs}>{formatArgs(args)}</pre>}
+      {expanded && (
+        <div className={styles.toolChipDetail}>
+          {hasArgs && (
+            <>
+              <span className={styles.toolChipDetailLabel}>参数</span>
+              <pre className={styles.toolChipArgs}>{formatArgs(args)}</pre>
+            </>
+          )}
+          {hasResult && (
+            <>
+              <span className={styles.toolChipDetailLabel}>结果</span>
+              <pre className={styles.toolChipArgs}>{result}</pre>
+            </>
+          )}
+        </div>
+      )}
     </div>
   )
 }

@@ -14,9 +14,13 @@ from app.agents.loop import ChatRequest, agent_loop
 from app.db import get_db
 from app.deps import get_current_user
 # 模型注册表 + LLM 构造都集中在 app.llm，这里只是引用方
-from app.llm import ALLOWED_MODEL_IDS, DEFAULT_MODEL_ID, public_models
+from app.llm import ALLOWED_MODEL_IDS, DEFAULT_MODEL_ID, MODELS_BY_ID, public_models
 from app.models.session import Session
 from app.models.user import User
+
+# 一条消息最多带几张图。识图很烧 token,也防止前端误传一大堆把上下文撑爆,
+# 在入口处先卡一道。
+MAX_IMAGES_PER_MESSAGE = 6
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
@@ -46,6 +50,22 @@ async def chat(
         req.model = DEFAULT_MODEL_ID
     elif req.model not in ALLOWED_MODEL_IDS:
         raise HTTPException(status_code=400, detail=f"不支持的模型：{req.model}")
+
+    # 图片校验：只在带了图时才做。
+    #   1. 当前模型必须支持识图（vision）—— 否则把图发给不认图的模型只会神秘出错 / 被忽略。
+    #      前端虽已把按钮置灰,但后端是安全边界,不能信任前端,这里再挡一次。
+    #   2. 张数不超上限。
+    #   3. 每张必须是 data:image/ 开头的 data URL —— 我们直接把它当 image_url 透传给中转,
+    #      挡掉非法 / 非图片内容,避免把任意字符串塞进多模态消息。
+    if req.images:
+        if not MODELS_BY_ID[req.model]["vision"]:
+            raise HTTPException(status_code=400, detail="当前模型不支持识图，请切换到支持识图的模型")
+        if len(req.images) > MAX_IMAGES_PER_MESSAGE:
+            raise HTTPException(
+                status_code=400, detail=f"一次最多发送 {MAX_IMAGES_PER_MESSAGE} 张图片"
+            )
+        if any(not url.startswith("data:image/") for url in req.images):
+            raise HTTPException(status_code=400, detail="图片格式不合法")
 
     # 先校验 session 存在「且属于当前用户」—— 否则后面工具一调用就报外键错，体验差，
     # 更重要的是防止拿别人的 session_id 往别人项目里写代码。

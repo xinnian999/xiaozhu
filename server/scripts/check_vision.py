@@ -57,58 +57,95 @@ def _png_chunk(tag: bytes, data: bytes) -> bytes:
     )
 
 
-def make_solid_png(rgb: tuple[int, int, int], size: int = 16) -> bytes:
-    """生成一张 size×size 的纯色 PNG，返回原始字节。"""
-    r, g, b = rgb
-    # 每行：1 个滤波器字节(0=不滤波) + size 个像素(每像素 RGB 三字节)
-    row = bytes([0]) + bytes([r, g, b] * size)
-    raw = row * size
+def make_two_color_png(
+    left: tuple[int, int, int], right: tuple[int, int, int], w: int = 240, h: int = 120
+) -> bytes:
+    """生成一张「左半 left 色、右半 right 色」的 PNG，返回原始字节。
+
+    为什么用双色而不是纯色：纯色图答案空间只有 3 种，没视觉的模型瞎猜也可能蒙中
+    （假阳性，qwen3-coder-next 当初就这么被误标成支持）。双色图要求同时读对「左、右
+    两个区域」的颜色，答案空间是 3×3，且必须真看到「左右分块」结构才能答对，蒙不过去。
+    """
+    half = w // 2
+    raw = b""
+    for _ in range(h):
+        # 每行：1 个滤波器字节(0=不滤波) + 左半 left 像素 + 右半 right 像素
+        raw += bytes([0]) + bytes(list(left) * half) + bytes(list(right) * (w - half))
     return b"".join([
         b"\x89PNG\r\n\x1a\n",  # PNG 签名（固定魔数）
-        _png_chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)),  # 8 位深、颜色类型2=真彩
+        _png_chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)),  # 8 位深、颜色类型2=真彩
         _png_chunk(b"IDAT", zlib.compress(raw)),  # 像素数据，zlib 压缩
         _png_chunk(b"IEND", b""),  # 结束块
     ])
 
 
-def make_data_url(rgb: tuple[int, int, int]) -> str:
-    """把纯色 PNG 编成 data URL（base64 内联），就是发给模型的图片字段格式。"""
+def make_data_url(left: tuple[int, int, int], right: tuple[int, int, int]) -> str:
+    """把双色 PNG 编成 data URL（base64 内联），就是发给模型的图片字段格式。"""
     import base64
 
-    b64 = base64.b64encode(make_solid_png(rgb)).decode()
+    b64 = base64.b64encode(make_two_color_png(left, right)).decode()
     return f"data:image/png;base64,{b64}"
 
 
 # ── 探测单个模型 ────────────────────────────────────────────────────────────────
 
 PROMPT = (
-    "这张图片是纯色的。它的颜色是下面哪一个？"
-    "只用一个英文单词回答，从 red / green / blue 三者里选一个，不要加任何标点或解释。"
+    "这张图片由左右两个等宽的色块拼成。左半边和右半边分别是什么颜色？"
+    "每个颜色都从 red / green / blue 三者里选一个英文单词，"
+    "严格按「left=颜色 right=颜色」的格式回答，不要加别的解释。"
 )
 
 
-def probe(model_id: str, expect: str, data_url: str) -> tuple[str, str]:
-    """给一个模型发「图 + 提问」，返回 (判定状态, 说明)。
+# 测试用的颜色对：相邻配对，保证左右一定不同色，且三组合起来覆盖全部三种颜色。
+TEST_PAIRS = [("red", "green"), ("green", "blue"), ("blue", "red")]
+
+
+def _ask_once(llm, left: str, right: str) -> str:
+    """发一张「左 left / 右 right」的双色图问颜色，返回小写归一化后的回答文本。"""
+    data_url = make_data_url(COLORS[left], COLORS[right])
+    resp = llm.invoke([HumanMessage(content=[
+        {"type": "text", "text": PROMPT},
+        {"type": "image_url", "image_url": {"url": data_url}},
+    ])])
+    content = resp.content
+    text = content if isinstance(content, str) else "".join(
+        b.get("text", "") if isinstance(b, dict) else str(b) for b in content
+    )
+    return text.strip().lower()
+
+
+def probe(model_id: str) -> tuple[str, str]:
+    """对一个模型连测 TEST_PAIRS 三组不同的双色图，必须全部答对才算「支持」。
 
     判定状态取值：'ok' / 'maybe' / 'no'，对应汇总表里的 ✅ / ⚠️ / ❌。
+
+    为什么要多组、且要求全对：没视觉的模型往往不看图、对任何输入都吐一个「固定答案」
+    （实测 qwen3-coder-next 不管图是红绿还是蓝红，都答 left=red right=blue）。单组测试时
+    这种固定答案可能恰好撞上一次期望、给出假阳性 —— 当初 coder 就是这么被误标成支持的。
+    连测三组覆盖全部颜色，固定答案必然在某一组对不上，从而被识破：
+      三组全对 = ✅ 真看到了图；对一部分 = ⚠️ 收图但不稳/没看准；全错或报错 = ❌ 不支持。
     """
     try:
         # 不 bind_tools —— 纯测视觉，越简单越好。复用 build_llm 保证 base_url / key 跟主程序一致。
         llm = build_llm(model_id)
-        msg = HumanMessage(content=[
-            {"type": "text", "text": PROMPT},
-            {"type": "image_url", "image_url": {"url": data_url}},
-        ])
-        resp = llm.invoke([msg])
-        # 回复可能是字符串或内容块列表，统一取纯文本再小写归一化
-        content = resp.content
-        text = content if isinstance(content, str) else "".join(
-            b.get("text", "") if isinstance(b, dict) else str(b) for b in content
-        )
-        answer = text.strip().lower()
-        if expect in answer:
-            return "ok", f'答「{answer}」✓ 命中 {expect}'
-        return "maybe", f'答「{answer}」✗ 期望 {expect}（收图但没看懂 / 答非所问）'
+        hits = 0
+        answers: list[str] = []
+        for left, right in TEST_PAIRS:
+            answer = _ask_once(llm, left, right)
+            answers.append(answer)
+            # 在 "left=.. right=.." 里分别截出左右两段各自判色，避免把右边的词算到左边
+            left_seg, _, right_seg = answer.partition("right")
+            if left in left_seg and right in right_seg:
+                hits += 1
+        total = len(TEST_PAIRS)
+        if hits == total:
+            return "ok", f"{hits}/{total} 组全部答对（真看到了图）"
+        if hits == 0:
+            # 三组答案完全一样 → 强烈的「不看图、固定输出」信号
+            fixed = len(set(answers)) == 1
+            note = "三组答案完全相同，疑似不看图给固定答案" if fixed else "全部答错"
+            return "no", f"{hits}/{total} 组对；{note}：「{answers[0][:50]}」"
+        return "maybe", f"{hits}/{total} 组对（收图但不稳 / 没看准）"
     except Exception as e:
         # 多模态被拒最典型的就是这里抛错（400/不支持 image 等）。
         # 特判一个易误解的坑：'str' object has no attribute 'model_dump' ——
@@ -135,17 +172,11 @@ def main() -> None:
         print(f"⚠️  这些 id 不在白名单里，已跳过：{unknown}")
         targets = [m for m in targets if m in all_ids]
 
-    # 用同一轮颜色顺序：第 i 个模型测第 i 种颜色（轮询），让不同模型测到不同颜色，
-    # 顺手能发现「不管什么图都答同一个颜色」这种假阳性。
-    color_names = list(COLORS.keys())
-
-    print(f"\n开始探测 {len(targets)} 个模型的识图能力…\n")
+    print(f"\n开始探测 {len(targets)} 个模型的识图能力（每个连测 {len(TEST_PAIRS)} 组双色图）…\n")
     results: list[tuple[str, str, str]] = []
-    for i, model_id in enumerate(targets):
-        expect = color_names[i % len(color_names)]
-        data_url = make_data_url(COLORS[expect])
-        print(f"  → 测 {model_id}（图为 {expect}）…", flush=True)
-        status, detail = probe(model_id, expect, data_url)
+    for model_id in targets:
+        print(f"  → 测 {model_id}…", flush=True)
+        status, detail = probe(model_id)
         results.append((model_id, status, detail))
 
     # 汇总表

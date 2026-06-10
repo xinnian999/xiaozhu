@@ -51,6 +51,13 @@ class Message(Base):
     # 用 SQLAlchemy 的 JSON 类型 —— 写入时自动把 dict 序列化成 JSON 字符串存进 SQLite，读出时自动反序列化回 dict
     tool_args: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
+    # 用户随消息附带的图片（多模态识图输入）。存 data URL 列表
+    # （形如 "data:image/png;base64,xxxx"）。None / 空表示纯文本消息。
+    # 为什么和图片本体一起塞 messages 表？这是单用户练手项目、图片数量很少，
+    # 用一个 JSON 列最简单；将来真要做大可拆出独立的 message_images 表。
+    # 持久化的目的：刷新后历史里仍能看到自己发过的图，且能把图回放给 LLM。
+    images: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -71,6 +78,8 @@ class MessageRead(BaseModel):
     kind: Literal["text", "tool", "version"] = "text"
     tool_name: str | None = None
     tool_args: dict | None = None
+    # 随消息附带的图片 data URL 列表；纯文本消息为 None
+    images: list[str] | None = None
     created_at: datetime
 
     @field_serializer("created_at")

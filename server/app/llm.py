@@ -28,9 +28,19 @@ from app.config import settings
 #            另：分组在本项目里就等于「厂商」，所以 logo 也按分组派生（见 GROUP_ICONS）。
 #   vision —— 是否支持识图（多模态图片输入）。前端据此把「添加图片」置灰，不支持的不让传图。
 #            这个值不是查文档拍脑袋填的，而是用 scripts/check_vision.py 实测出来的
-#            （给模型发已知颜色的图、看能否答对）。换中转站后能力可能变，记得重跑脚本核对。
+#            （发一张「左右两半不同色」的结构图、要求同时答对两边的颜色）。
+#            ★为什么要结构图而不是纯色图：纯色图答案空间只有 3 种，没视觉的模型瞎猜也可能
+#            蒙中，给出假阳性 —— qwen3-coder-next 当初就是这么被误标成支持的。双色图要同时读
+#            对两个区域，蒙不过去，标定才可信。换中转站后能力可能变，记得重跑脚本核对。
 AVAILABLE_MODELS = [
-    {"id": "qwen3-coder-next", "label": "Qwen3 Coder Next", "group": "qwen", "vision": True},
+    # qwen3-coder-next 是「代码」专精模型，实测经本中转**不具备可用的识图能力**：
+    # 发三张不同的双色图（红绿/绿蓝/蓝红）它都回同一个固定答案「left=red right=blue」——
+    # 根本不看图；发用户的真实图更是直接否认「我无法看见」。之前误标成 True，是因为旧版
+    # check_vision.py 用单张纯色图探测，被它的固定答案恰好撞中一次就当成支持（假阳性）。
+    # 已把探测脚本改成「连测三组双色图、必须全对」（固定答案必被识破）—— 详见 scripts/check_vision.py。
+    {"id": "qwen3-coder-next", "label": "Qwen3 Coder Next", "group": "qwen", "vision": False},
+    # qwen3.6-plus 是通用大模型，实测能准确识图（连 WebP 都支持），带上完整 system prompt
+    # 也不受影响。要发图给 AI 看就用这个模型。
     {"id": "qwen3.6-plus", "label": "Qwen3.6 Plus", "group": "qwen", "vision": True},
     {"id": "gpt-5.5", "label": "GPT-5.5", "group": "gpt", "vision": False},
 ]

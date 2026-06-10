@@ -76,7 +76,10 @@ export type SSEEvent =
   // AI 调 update_preview 时推这个：把暂存的文件揭晓到运行中的预览（无 payload，纯信号）
   | { type: 'preview_refresh' }
   | { type: 'plan_update'; todos: unknown[] }
-  | { type: 'tool_call'; name: string; args: object }
+  // tool_call 带 id（后端的 tool_call_id），用于把随后到达的 tool_result 关联回这张卡
+  | { type: 'tool_call'; name: string; args: object; id: string }
+  // tool_result：某次工具调用执行完的结果（按 id 关联到对应工具卡，已截断）
+  | { type: 'tool_result'; id: string; result: string }
   | { type: 'version'; version_id: number; seq: number }
   | { type: 'error'; message: string }
   | { type: 'done' }
@@ -276,6 +279,8 @@ export type ApiMessage = {
   // kind==='tool' 存工具参数；kind==='version' 存版本负载 {version_id, seq}
   tool_name?: string | null
   tool_args?: Record<string, unknown> | null
+  // 用户随消息发的图片（data URL 列表）；纯文本消息为空 / null
+  images?: string[] | null
   created_at: string
 }
 
@@ -314,6 +319,7 @@ export async function* streamChat(
   sessionId: string,
   model: string | null,
   signal?: AbortSignal,
+  images: string[] = [],
 ): AsyncGenerator<SSEEvent> {
   // 用户主动中断时 fetch / reader 会抛 AbortError，这里统一识别后静默收尾，不弹错误
   const isAbort = (e: unknown) =>
@@ -324,8 +330,14 @@ export async function* streamChat(
     res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      // model 为空（清单还没加载完）时不传，让后端用默认模型；有值才带上
-      body: JSON.stringify({ message, session_id: sessionId, ...(model ? { model } : {}) }),
+      // model 为空（清单还没加载完）时不传，让后端用默认模型；有值才带上。
+      // images 为空也不传，保持纯文本请求体干净（后端默认空列表）。
+      body: JSON.stringify({
+        message,
+        session_id: sessionId,
+        ...(model ? { model } : {}),
+        ...(images.length ? { images } : {}),
+      }),
       signal,
     })
   } catch (e: unknown) {

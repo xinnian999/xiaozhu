@@ -1,0 +1,58 @@
+@use '@/styles/variables' as *;
+@use '@/styles/common' as *;
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  // 在侧栏 / 遮罩(40~50) 之上，但在 toast(100) 之下 —— 预览时报错提示仍能盖在最上面
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: $space-6;
+  background: rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(4px);
+  animation: fade-in $dur-base $ease-out;
+}
+
+.image {
+  max-width: 92vw;
+  max-height: 88vh;
+  object-fit: contain;
+  border-radius: $radius-md;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  // 图片本身不是关闭热区，鼠标用默认指针（背景才是点击关闭区）
+  cursor: default;
+}
+
+.close {
+  @include button-reset;
+  position: fixed;
+  top: $space-4;
+  right: $space-4;
+  width: 40px;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: $radius-full;
+  color: white;
+  background: rgba(255, 255, 255, 0.12);
+  transition: background $dur-base $ease-out;
+
+  &:hover {
+    background: rgba(255, 255, 255, 0.25);
+  }
+}
+
+// 移动端：关闭按钮离屏幕边缘近一点，padding 收窄给图片更多空间
+@include mobile {
+  .overlay {
+    padding: $space-3;
+  }
+
+  .close {
+    top: $space-3;
+    right: $space-3;
+  }
+}

@@ -32,12 +32,18 @@ export type Message = {
   toolName?: string
   /** kind === 'tool' 时使用：工具参数的摘要（如 { path: 'src/App.tsx' }） */
   toolArgs?: Record<string, unknown>
+  /** kind === 'tool' 时使用：后端的 tool_call_id，用于把流式到达的 toolResult 关联回本卡 */
+  toolCallId?: string
+  /** kind === 'tool' 时使用：工具执行结果文本（写入回执 / 文件内容 / 报错等，已截断） */
+  toolResult?: string
   /** kind === 'version' 时使用：版本主键 id（回滚按钮调 restore 用） */
   versionId?: number
   /** kind === 'version' 时使用：版本序号（卡片显示 vN） */
   versionSeq?: number
   /** 该消息产出的版本（仅 assistant 消息有） */
   producedVersionId?: string
+  /** 用户随消息发送的图片（data URL 列表），用于在气泡里展示缩略图。仅 user 消息有 */
+  images?: string[]
   /** 此条消息发送时刻 */
   createdAt: number
   /** 所属对话分支，与 Version.branchId 对齐（主线为 'main'） */

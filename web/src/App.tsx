@@ -3,6 +3,7 @@ import TopBar from '@/components/TopBar'
 import ChatSidebar from '@/components/ChatSidebar'
 import WorkArea from '@/components/WorkArea'
 import Toast from '@/components/Toast'
+import ImageLightbox from '@/components/ImageLightbox'
 import AuthGate from '@/components/AuthGate'
 import { useThemeStore } from '@/store/theme'
 import { useSessionStore } from '@/store/session'
@@ -65,6 +66,7 @@ function App() {
         {hasActive && <WorkArea />}
       </main>
       <Toast />
+      <ImageLightbox />
     </div>
   )
 }

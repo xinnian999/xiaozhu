@@ -47,6 +47,12 @@ type UIState = {
   toast: { id: number; text: string } | null
   pushToast: (text: string) => void
 
+  /** 图片放大预览：null 表示关闭，非空为要预览的图片 src（data URL 或 http 链接）。
+   *  任意缩略图点击即打开，全局只有一个预览层（挂在 App 根，见 ImageLightbox）。 */
+  previewImage: string | null
+  openImagePreview: (src: string) => void
+  closeImagePreview: () => void
+
   // —— WebContainer 状态 ——
   wcStatus: WCStatus
   wcUrl: string | null
@@ -120,6 +126,10 @@ export const useUIStore = create<UIState>((set) => ({
       set((s) => (s.toast?.id === id ? { toast: null } : s))
     }, 2200)
   },
+
+  previewImage: null,
+  openImagePreview: (src) => set({ previewImage: src }),
+  closeImagePreview: () => set({ previewImage: null }),
 
   // —— WebContainer ——
   wcStatus: 'idle',

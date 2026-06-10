@@ -41,6 +41,9 @@ class ChatRequest(BaseModel):
     # 注意:这里只接收字符串,「是否在白名单内」的校验放在路由层做（见 chat 函数）,
     # 因为校验不通过要返回 HTTP 400,而 Pydantic 字段校验器不方便返回自定义 HTTP 状态码。
     model: str | None = None
+    # 随本条消息附带的图片（多模态识图）。data URL 列表,缺省空列表 = 纯文本。
+    # 「模型是否支持识图、张数 / 格式是否合法」的校验同样放路由层（见 chat 函数）。
+    images: list[str] = []
 
 
 # ── SSE 工具函数 ────────────────────────────────────────────────────────────────
@@ -65,11 +68,34 @@ def extract_text(response) -> str:
     )
 
 
+def build_human_content(text: str, images: list[str] | None) -> str | list[dict]:
+    """把「文本 + 图片」拼成 LLM 的 HumanMessage content。
+
+    没图片就直接返回纯字符串 —— 最省事、最省 token,行为和以前完全一样。
+    有图片才用 OpenAI 风格的多模态 block 列表（中转站走 OpenAI 兼容协议,
+    识图模型认这个格式）:
+        [{"type": "text", "text": "..."},
+         {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}]
+    data URL 可直接当 image_url.url 传,不用先上传换成 http 链接。
+    """
+    if not images:
+        return text
+    blocks: list[dict] = []
+    if text:
+        blocks.append({"type": "text", "text": text})
+    blocks += [{"type": "image_url", "image_url": {"url": url}} for url in images]
+    return blocks
+
+
 # ── Agentic Loop（消费图的事件流）─────────────────────────────────────────────────
 
 # 轮次上限:图用 recursion_limit(super-step 数)兜底死循环。call_model 与 tools
 # 交替推进,一轮约 2 步,50 ≈ 原先手写的「25 轮 LLM 调用」。超限抛 GraphRecursionError。
 RECURSION_LIMIT = 50
+
+# 工具结果落库 / 下发前的截断上限。多数工具结果很短（"已写入 X"、报错列表），
+# 但 read_file 会返回整文件，可能上万字 —— 截断防止把消息行和 SSE 帧撑爆。
+TOOL_RESULT_CAP = 4000
 
 
 async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, None]:
@@ -91,20 +117,26 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
         kind: str = "text",
         tool_name: str | None = None,
         tool_args: dict | None = None,
-    ) -> None:
-        db.add(DBMessage(
+        images: list[str] | None = None,
+    ) -> DBMessage:
+        # 返回刚存的 ORM 对象,方便调用方拿着它事后回填字段
+        #（如工具结果要等执行完才有,见下面 get_browser_logs 落库）。
+        msg = DBMessage(
             session_id=req.session_id,
             role=role,
             text=text,
             kind=kind,
             tool_name=tool_name,
             tool_args=tool_args,
-        ))
+            images=images,
+        )
+        db.add(msg)
         await db.commit()
+        return msg
 
-    # 1. 先把用户消息入库 —— 即便 LLM 调用失败,用户消息也已经持久化,
-    #    刷新后能看到自己发了什么
-    await save_message("user", req.message)
+    # 1. 先把用户消息（连同附带的图片）入库 —— 即便 LLM 调用失败,用户消息也已经
+    #    持久化,刷新后能看到自己发了什么、发了哪几张图。空列表存成 None,保持纯文本干净。
+    await save_message("user", req.message, images=req.images or None)
 
     # 2. 加载历史对话作为图的初始 State。只取 kind='text'(user 输入 + assistant 说过
     #    的话),把 kind='tool' 的工具行过滤掉 —— 工具效果已体现在 files 表的现状里,
@@ -117,10 +149,13 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
     history = result.scalars().all()
 
     # system prompt 已由 create_agent 注入(见上面构造处),这里只装对话历史。
+    # 用户消息若带图片,用 build_human_content 拼成多模态 content 回放给 LLM ——
+    # 这样不止当前这轮,过去几轮发过的图也会重新带上,模型能持续「看到」它们。
+    # 代价是历史里的图每轮都重发,token 偏贵;练手项目图少,可接受(要省可改成只带最后一条)。
     messages = []
     for m in history:
         if m.role == "user":
-            messages.append(HumanMessage(content=m.text))
+            messages.append(HumanMessage(content=build_human_content(m.text, m.images)))
         else:
             messages.append(AIMessage(content=m.text))
 
@@ -131,12 +166,13 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
     wrote_files = False
     # 是否因截断提前收尾(截断时不再入库最终文本,但已写的文件仍要快照)。
     truncated = False
-    # tool_call_id → (工具名, 参数)。图把工具信息拆散到了两类事件里:
+    # tool_call_id → (工具名, 参数, 入库的工具消息对象)。图把工具信息拆散到了两类事件里:
     #   - call_model 产出的 AIMessage 带 tool_calls(有名字 / 参数,没结果)
     #   - tools 节点产出的 ToolMessage 带结果 / tool_call_id(没名字 / 参数)
-    # 所以这里在 call_model 阶段先把 (名字, 参数) 按 id 记下,等 tools 阶段拿
-    # tool_call_id 回查,才能还原出「这是哪个工具、参数是什么、结果如何」。
-    pending: dict[str, tuple[str, dict]] = {}
+    # 所以这里在 call_model 阶段先把 (名字, 参数, 消息对象) 按 id 记下,等 tools 阶段拿
+    # tool_call_id 回查,才能还原出「这是哪个工具、参数是什么、结果如何」,
+    # 并把结果回填到那条工具消息上(见 get_browser_logs 落库)。
+    pending: dict[str, tuple[str, dict, DBMessage]] = {}
 
     try:
         # 同时开 updates(节点边界,做副作用)+ messages(token 流,做打字效果)。
@@ -189,12 +225,12 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
                             # 推进度提示 + 工具行入库 + 记下 (名字, 参数) 待回查
                             for tc in m.tool_calls:
                                 print(f"[tool_call] name={tc['name']} args={list(tc['args'].keys())}")
-                                yield sse({"type": "tool_call", "name": tc["name"], "args": tc["args"]})
-                                await save_message(
+                                yield sse({"type": "tool_call", "name": tc["name"], "args": tc["args"], "id": tc["id"]})
+                                tool_msg = await save_message(
                                     "assistant", "", kind="tool",
                                     tool_name=tc["name"], tool_args=tc["args"],
                                 )
-                                pending[tc["id"]] = (tc["name"], tc["args"])
+                                pending[tc["id"]] = (tc["name"], tc["args"], tool_msg)
                         else:
                             # 没有 tool_calls = 最终回复。文本已逐字推过,这里只记下来,
                             # 循环结束后入库(空字符串就不存)。
@@ -207,12 +243,27 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
                 elif node_name == "tools":
                     # 工具已执行完,按 tool_call_id 回查是哪个工具,映射对应副作用
                     for tm in node_messages:
-                        name, args = pending.get(tm.tool_call_id, (None, None))
+                        name, args, tool_msg = pending.get(tm.tool_call_id, (None, None, None))
                         if name is None:
                             continue
-                        tool_result = tm.content
+                        tool_result = str(tm.content or "")
 
-                        # get_browser_logs 结果只打后端日志,前端不展示(不推、不入库)
+                        # 所有工具的结果统一「落库 + 下发」:
+                        #   落库:写进这条工具消息的 text(截断防超长),刷新后还能在工具卡里看到;
+                        #   下发:推 tool_result 事件,前端按 tool_call_id 找到对应工具卡、实时填上结果。
+                        # 历史回放只取 kind='text' 的消息,工具消息(kind='tool')被过滤,所以这些结果
+                        # 不会被重放给 LLM;前端工具卡原本不渲染 text,改用 tool_result 字段单独展示。
+                        capped = (
+                            tool_result
+                            if len(tool_result) <= TOOL_RESULT_CAP
+                            else tool_result[:TOOL_RESULT_CAP] + "\n…（结果过长已截断）"
+                        )
+                        tool_msg.text = capped
+                        await db.commit()
+                        yield sse({"type": "tool_result", "id": tm.tool_call_id, "result": capped})
+
+                        # ── 各工具特有的副作用 ──
+                        # get_browser_logs:结果已落库 / 下发,这里只补一行后端日志便于实时观察
                         if name == "get_browser_logs":
                             print(f"[browser_logs] {tool_result}")
 

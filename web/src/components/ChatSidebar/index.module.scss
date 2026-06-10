@@ -118,6 +118,52 @@
         box-shadow: 0 0 0 4px var(--color-accent-fade);
       }
 
+      // 待发送图片缩略图行（在输入框上方）
+      .attachments {
+        display: flex;
+        flex-wrap: wrap;
+        gap: $space-2;
+        margin-bottom: $space-2;
+
+        .thumb {
+          position: relative;
+          width: 56px;
+          height: 56px;
+          border-radius: $radius-md;
+          overflow: hidden;
+          border: 1px solid var(--color-border);
+
+          .thumbImg {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+            cursor: pointer; // 点击放大预览
+          }
+
+          // 右上角移除按钮
+          .thumbRemove {
+            @include button-reset;
+            position: absolute;
+            top: 2px;
+            right: 2px;
+            width: 18px;
+            height: 18px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: $radius-full;
+            color: white;
+            background: rgba(0, 0, 0, 0.55);
+            transition: background $dur-base $ease-out;
+
+            &:hover {
+              background: rgba(0, 0, 0, 0.78);
+            }
+          }
+        }
+      }
+
       .input {
         width: 100%;
         background: transparent;

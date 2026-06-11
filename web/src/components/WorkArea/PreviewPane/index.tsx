@@ -1,10 +1,17 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { AlertTriangle } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
 import { useUIStore, type WCStatus, type LogLevel } from '@/store/ui'
 import { bootAndRun, syncFiles, resetContainer, isBooted, isPreviewRunning } from '@/lib/webcontainer'
-import { pushLogs, postBuildResult, type PushLog } from '@/lib/api'
+import { postBuildResult } from '@/lib/api'
 import styles from './index.module.scss'
+
+// 编译通过后，iframe 重载渲染期间收集运行时错误的窗口（从 iframe load 事件起算）。
+// 渲染崩溃几乎在 load 后立刻抛，这点时间足够接住；窗口一结束就带着错误回报 build-result。
+const REVEAL_COLLECT_MS = 1500
+// 兜底：万一 iframe 的 load 事件始终不来（白屏/加载失败），到点也强制回报，
+// 别让后端 check_build 一直等到 90s 超时。
+const REVEAL_FALLBACK_MS = 6000
 
 // ============================================
 // 预览面板：WebContainer 真实预览
@@ -49,9 +56,11 @@ export default function PreviewPane() {
   // 标记上次「应用」用到的 applyTick —— 区分「是新的 check_build 请求」还是
   // 「流式途中 version 变了但还没到揭晓时机」
   const appliedTickRef = useRef(0)
-  // 记住上次构建结果 —— 用于「版本没变但 AI 又调了一次 check_build」时，
-  // 无需重新构建即可把上次结果回报给后端，免得后端 check_build 干等到超时。
-  const lastBuildResultRef = useRef<{ ok: boolean; error: string | null }>({ ok: true, error: null })
+  // 记住上次【回报过】的完整结果（含运行时）—— 用于「版本没变但 AI 又调了一次 check_build」时，
+  // 无需重新构建即可把上次结果原样回报，免得后端 check_build 干等到超时。
+  const lastBuildResultRef = useRef<{ ok: boolean; errors: string; runtime: boolean }>({
+    ok: true, errors: '', runtime: false,
+  })
   // 容器当前归属哪个会话 —— 用来判断 activeId 变了要不要 teardown 重挂
   const containerSessionRef = useRef<string | null>(null)
   // 当前 iframe 的引用，用于校验 postMessage 来源
@@ -64,15 +73,44 @@ export default function PreviewPane() {
   const histStackRef = useRef<string[]>([])
   const histIdxRef = useRef(-1)
 
-  // —— 日志回传给后端 ——
   // activeId 放进 ref：下面的回调/定时器是在 effect 里建的闭包，
   // 直接读 activeId 会捕获到旧值，用 ref 保证拿到最新会话 id。
   const activeIdRef = useRef(activeId)
   activeIdRef.current = activeId
-  // 待回传的日志缓冲 + debounce 定时器：日志是高频的（一次报错常连着刷好几条），
-  // 攒一小批一起发，别一条一个请求。
-  const pendingLogsRef = useRef<PushLog[]>([])
-  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // —— 揭晓收集：编译通过后，等 iframe 重载渲染、收集运行时错误，再回报 build-result ——
+  // revealRef 非空 = 正有一次 check_build 揭晓在等结果。iframe load 后开收集窗，
+  // 窗内 console 桥抓到的运行时报错攒进 errors，窗结束就带着它们一起回报。
+  const revealRef = useRef<{ errors: string[]; started: boolean; done: boolean } | null>(null)
+  const revealCollectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const revealFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // 收尾一次揭晓：把收集到的运行时错误打进 build-result 回报，唤醒后端 check_build。
+  // 只用 ref，所以 useCallback([]) 稳定，可安全进各 effect 依赖。
+  const finishReveal = useCallback(() => {
+    const r = revealRef.current
+    if (!r || r.done) return
+    r.done = true
+    if (revealCollectTimerRef.current) clearTimeout(revealCollectTimerRef.current)
+    if (revealFallbackTimerRef.current) clearTimeout(revealFallbackTimerRef.current)
+    revealCollectTimerRef.current = null
+    revealFallbackTimerRef.current = null
+    revealRef.current = null
+    // 编译已通过；有运行时错误 → ok=false + runtime=true，否则一切正常。
+    const errs = r.errors
+    const result = { ok: errs.length === 0, errors: errs.join('\n'), runtime: errs.length > 0 }
+    lastBuildResultRef.current = result  // 记下真实结果（含运行时），供「重复 check_build」原样复用
+    const sid = activeIdRef.current
+    if (sid) postBuildResult(sid, result)
+  }, [])
+
+  // iframe 加载完(渲染开始)：若正有揭晓在等，开一个短收集窗，窗结束回报。
+  const handleIframeLoad = useCallback(() => {
+    const r = revealRef.current
+    if (!r || r.started || r.done) return
+    r.started = true
+    revealCollectTimerRef.current = setTimeout(finishReveal, REVEAL_COLLECT_MS)
+  }, [finishReveal])
 
   // —— 容器生命周期：让运行中的容器始终对应当前会话 ——
   // 首次启动、以及「切会话 / 开新会话」都走这里。切到不同会话时先 teardown
@@ -94,6 +132,10 @@ export default function PreviewPane() {
     histStackRef.current = []
     histIdxRef.current = -1
     resetPreviewNav()
+    // 清掉进行中的揭晓收集，避免把上个会话的运行时错误回报到新会话
+    if (revealCollectTimerRef.current) clearTimeout(revealCollectTimerRef.current)
+    if (revealFallbackTimerRef.current) clearTimeout(revealFallbackTimerRef.current)
+    revealRef.current = null
 
     let cancelled = false
     ;(async () => {
@@ -149,8 +191,8 @@ export default function PreviewPane() {
     if (syncedVersionRef.current === currentVersion.id) {
       if (isReveal) {
         appliedTickRef.current = applyTick
-        const last = lastBuildResultRef.current
-        if (activeId) postBuildResult(activeId, { ok: last.ok, errors: last.error ?? '' })
+        // 没重新构建 → 把上次回报过的完整结果原样再报一次（含运行时态）
+        if (activeId) postBuildResult(activeId, lastBuildResultRef.current)
       }
       return
     }
@@ -160,18 +202,27 @@ export default function PreviewPane() {
     syncFiles(currentVersion.files, { onLog: setWCLog })
       .then((res) => {
         syncedVersionRef.current = currentVersion.id
-        lastBuildResultRef.current = { ok: res.buildOk, error: res.buildError }
         setWCStatus('ready')
-        // 无 HMR：构建成功就整页刷新 iframe 加载新 dist；失败【不】刷新，保留上一个
-        // 能跑的产物，并把错误显示到控制台「浏览器」面板（给人看）。
         if (res.buildOk) {
+          // 编译通过先记个基线（运行时这轮的话由 finishReveal 稍后覆盖成真实结果）
+          lastBuildResultRef.current = { ok: true, errors: '', runtime: false }
+          // 先架好「运行时错误收集」，再整页刷新 iframe 加载新 dist。build-result 不在这里
+          // 立刻发 —— 要等 iframe 重载渲染、收集完运行时错误，由 finishReveal 带着「编译 +
+          // 运行」结果一并回报（见 handleIframeLoad / 收集窗）。
+          if (isReveal && activeId) {
+            if (revealCollectTimerRef.current) clearTimeout(revealCollectTimerRef.current)
+            if (revealFallbackTimerRef.current) clearTimeout(revealFallbackTimerRef.current)
+            revealRef.current = { errors: [], started: false, done: false }
+            // load 事件兜底：万一 iframe 始终不 load，到点也回报，别让 check_build 干等。
+            revealFallbackTimerRef.current = setTimeout(finishReveal, REVEAL_FALLBACK_MS)
+          }
           reloadPreview()
-        } else if (res.buildError) {
-          pushWcLog({ level: 'error', text: res.buildError })
-        }
-        // check_build 揭晓请求 → 回报构建结果，唤醒后端等待的 check_build（成功也要报）。
-        if (isReveal && activeId) {
-          postBuildResult(activeId, { ok: res.buildOk, errors: res.buildError ?? '' })
+        } else {
+          // 编译失败：【不】刷新，保留上一个能跑的产物；错误显示到控制台「浏览器」面板，
+          // 并立刻回报（编译错确定，无需等渲染）。
+          lastBuildResultRef.current = { ok: false, errors: res.buildError ?? '', runtime: false }
+          if (res.buildError) pushWcLog({ level: 'error', text: res.buildError })
+          if (isReveal && activeId) postBuildResult(activeId, lastBuildResultRef.current)
         }
       })
       .catch((e) => {
@@ -179,24 +230,15 @@ export default function PreviewPane() {
         setWCError(msg)
         setWCStatus('error')
         // 同步/构建本身抛异常（容器挂了等）也要回报，否则 check_build 同样会干等。
-        if (isReveal && activeId) postBuildResult(activeId, { ok: false, errors: msg })
+        if (isReveal && activeId) postBuildResult(activeId, { ok: false, errors: msg, runtime: false })
       })
-  }, [activeId, currentVersion.id, currentVersion.files, applyTick, isStreaming, setWCStatus, setWCLog, setWCError, reloadPreview, pushWcLog])
+  }, [activeId, currentVersion.id, currentVersion.files, applyTick, isStreaming, setWCStatus, setWCLog, setWCError, reloadPreview, pushWcLog, finishReveal])
 
   // —— 浏览器 console 桥接：iframe → 父页面 ——
   // iframe 里注入的脚本会 postMessage({ type: 'vibuild-console', level, text })，
-  // 这里挂全局监听：一边推到控制台面板（给人看），一边攒批回传后端（给 agent 看）。
+  // 这里挂全局监听：推到控制台面板（给人看）；揭晓收集中时，error 还攒进 revealRef
+  // 供 build-result 回报（给 agent 看）。不再单独往后端推日志（log_store 已废）。
   useEffect(() => {
-    // 把缓冲里的日志一次性发给后端，然后清空
-    const flush = () => {
-      flushTimerRef.current = null
-      const sid = activeIdRef.current
-      const batch = pendingLogsRef.current
-      if (!sid || batch.length === 0) return
-      pendingLogsRef.current = []
-      pushLogs(sid, batch)
-    }
-
     const handle = (e: MessageEvent) => {
       const data = e.data
       if (!data) return
@@ -240,13 +282,12 @@ export default function PreviewPane() {
       const text = String(data.text ?? '')
       pushWcLog({ level, text })
 
-      // 只回传 error / warn：agent 关心的是「报错了没」，普通 log（vite 连接提示等）
-      // 是噪声，混进去会把后端那个 50 条上限的缓冲挤爆，真正的报错反而被挤掉。
-      if (level === 'error' || level === 'warn') {
-        pendingLogsRef.current.push({ level, text, ts: Date.now() })
-        // debounce 400ms：同一波报错往往连着来，攒一下合并成一个请求
-        if (flushTimerRef.current === null) {
-          flushTimerRef.current = setTimeout(flush, 400)
+      // 揭晓收集中：把渲染期间抛的 error 攒进 revealRef，供 finishReveal 回报给 agent。
+      // 去重 + 限量：一次渲染崩溃常连刷好几条（React 会打错误 + 组件栈），别撑爆 payload。
+      if (level === 'error') {
+        const r = revealRef.current
+        if (r && !r.done && r.errors.length < 8 && !r.errors.includes(text)) {
+          r.errors.push(text)
         }
       }
     }
@@ -254,12 +295,9 @@ export default function PreviewPane() {
     window.addEventListener('message', handle)
     return () => {
       window.removeEventListener('message', handle)
-      // 组件卸载前把没发完的日志补发一次，并清掉定时器
-      if (flushTimerRef.current !== null) {
-        clearTimeout(flushTimerRef.current)
-        flushTimerRef.current = null
-      }
-      flush()
+      // 卸载时清掉可能在跑的揭晓收集定时器
+      if (revealCollectTimerRef.current) clearTimeout(revealCollectTimerRef.current)
+      if (revealFallbackTimerRef.current) clearTimeout(revealFallbackTimerRef.current)
     }
   }, [pushWcLog])
 
@@ -306,6 +344,7 @@ export default function PreviewPane() {
                 key={`${wcUrl}-${reloadTick}`}
                 ref={iframeRef}
                 src={wcUrl!}
+                onLoad={handleIframeLoad}
                 className={styles.iframe}
                 title="预览"
                 allow="cross-origin-isolated"

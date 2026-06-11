@@ -17,7 +17,6 @@ from app.api import (
     build_result,
     chat,
     files,
-    logs,
     messages,
     sessions,
     share,
@@ -105,7 +104,6 @@ app.include_router(share.router)
 app.include_router(files.router)
 app.include_router(versions.router)
 app.include_router(messages.router)
-app.include_router(logs.router)
 app.include_router(build_result.router)
 app.include_router(chat.router)
 

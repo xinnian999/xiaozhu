@@ -22,10 +22,17 @@ router = APIRouter(
 
 
 class BuildResult(BaseModel):
-    """前端报回的构建结果。"""
+    """前端报回的构建结果。
 
-    ok: bool  # 构建是否通过（vite build 退出码为 0）
-    errors: str = ""  # 失败时的错误摘要；成功时空串
+    覆盖编译 + 运行时两类报错（前端在 vite build 后、iframe 重载渲染收集完一并回报）：
+    - 编译没过：ok=false, runtime=false
+    - 编译过但渲染时崩：ok=false, runtime=true
+    - 都没问题：ok=true
+    """
+
+    ok: bool  # 构建 + 运行是否都没报错
+    errors: str = ""  # 报错摘要；ok=true 时空串
+    runtime: bool = False  # 报错是「运行时」还是「编译期」—— 供 check_build 区分文案
 
 
 @router.post("", status_code=204)
@@ -35,4 +42,7 @@ async def report_build_result(session_id: str, body: BuildResult) -> None:
     会话归属由路由级守卫 get_owned_session 把关。通过后，把结果交给 build_store，
     它会立旗唤醒挂在 wait 上的 check_build。返回 204：报到即可，没有 body 要回。
     """
-    build_store.report(session_id, {"ok": body.ok, "errors": body.errors})
+    build_store.report(
+        session_id,
+        {"ok": body.ok, "errors": body.errors, "runtime": body.runtime},
+    )

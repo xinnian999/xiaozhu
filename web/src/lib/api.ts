@@ -18,7 +18,7 @@ export function setToken(token: string | null): void {
   else localStorage.removeItem(TOKEN_KEY)
 }
 
-/** 带上 Authorization 头（给原生 fetch 用：streamChat / pushLogs 不走 axios）。 */
+/** 带上 Authorization 头（给原生 fetch 用：streamChat / postBuildResult 不走 axios）。 */
 function authHeaders(): Record<string, string> {
   const token = getToken()
   return token ? { Authorization: `Bearer ${token}` } : {}
@@ -290,31 +290,14 @@ export async function listSessionMessages(sessionId: string): Promise<ApiMessage
   return data
 }
 
-// ── Browser logs（回传给后端，供 agent 自检报错）──────────────
-// 预览的 console 日志只有浏览器看得到，后端 agent 想知道「我写的代码跑起来
-// 报错没」，就得靠前端把这些日志推过去。
-// 走原生 fetch 而非 axios：这是 best-effort 旁路数据，失败要静默，
-// 不能触发 axios 拦截器里的 toast 弹窗骚扰用户。
-
-export type PushLog = { level: string; text: string; ts: number }
-
-export async function pushLogs(sessionId: string, logs: PushLog[]): Promise<void> {
-  try {
-    await fetch(`/api/sessions/${sessionId}/logs`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ logs }),
-    })
-  } catch {
-    // 旁路数据，回传失败就算了，不打扰用户
-  }
-}
-
-// 回报一次 vite build 的结果给后端：唤醒正挂在 build_store 上等结果的 check_build 工具。
-// AI 每次调 check_build → 前端构建一次 → 必须回报一次（成功也要报），否则后端会干等到超时。
+// ── 回报构建结果（唤醒后端 check_build）──────────────────────
+// AI 每次调 check_build → 前端构建一次(vite build) + iframe 重载渲染收集运行时错误 →
+// 把「编译 + 运行」两类结果一并回报这里，唤醒正挂在 build_store 上等结果的 check_build。
+// 每次 check_build 都必须回报一次(成功也要报)，否则后端会干等到超时。
+// 走原生 fetch 而非 axios：best-effort 旁路数据，失败要静默，不弹 toast 骚扰用户。
 export async function postBuildResult(
   sessionId: string,
-  result: { ok: boolean; errors: string },
+  result: { ok: boolean; errors: string; runtime?: boolean },
 ): Promise<void> {
   try {
     await fetch(`/api/sessions/${sessionId}/build-result`, {

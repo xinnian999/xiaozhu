@@ -10,14 +10,13 @@
 根据工具名做（见 app.agents.loop）。
 """
 
-import asyncio
 import json
 
 from langchain_core.tools import tool
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import build_store, log_store
+from app import build_store
 from app.models.file import File
 
 
@@ -38,9 +37,6 @@ def build_tools(db: AsyncSession, session_id: str) -> list:
         else:
             db.add(File(session_id=session_id, path=path, content=content))
         await db.commit()
-        # 记下写入屏障：此刻之后浏览器产生的日志，才算这次写入引发的，
-        # 供 check_build 判断「这次改动有没有跑出错」。
-        log_store.mark_write(session_id)
         return f"已写入 {path}"
 
     @tool
@@ -75,8 +71,6 @@ def build_tools(db: AsyncSession, session_id: str) -> list:
         # 双保险（前面已确认 count==1）。
         f.content = f.content.replace(old_string, new_string, 1)
         await db.commit()
-        # 和 write_file 一样打写入屏障，供 check_build 判断这次改动有没有跑出错
-        log_store.mark_write(session_id)
         return f"已编辑 {path}"
 
     @tool
@@ -114,36 +108,21 @@ def build_tools(db: AsyncSession, session_id: str) -> list:
         """
         # 时序：本工具的 tool_call 一出现，agent_loop 就会先 build_store.arm() 架好会合点、
         # 再推 preview_refresh 信号给前端（工具闭包里没法 yield 事件，所以放在 loop 里做，
-        # 见 app.agents.loop）。前端收到后同步文件 → vite build → 把「成没成」POST 回
-        # /build-result，那个端点调 build_store.report 立旗唤醒下面这个 wait。
-
-        # ① 等前端报回构建结果。前端多快 build 完、这里就多快返回，不再猜窗口。
-        #    timeout=90 只是「前端彻底失联（构建卡死/断线）」的兜底，正常情况远用不到。
+        # 见 app.agents.loop）。前端收到后同步文件 → vite build → iframe 重载渲染、收集运行时
+        # 报错 → 把「编译 + 运行」两类结果一并 POST 回 /build-result，那个端点调
+        # build_store.report 立旗唤醒下面这个 wait。
+        #
+        # 所以这里只需纯等一个结果：前端多快回、这里多快返回，不靠固定窗口猜。
+        # timeout=90 只是「前端彻底失联（构建卡死/断线）」的兜底，正常情况远用不到。
         result = await build_store.wait(session_id, timeout=90.0)
         if result is None:
             return "构建超时：预览迟迟没有回报结果，可能构建卡住或预览断开，请提示用户检查预览。"
-        if not result.get("ok"):
-            errors = str(result.get("errors") or "").strip() or "（无详细错误信息）"
-            return f"预览构建失败（编译没通过），请定位并修复：\n{errors}"
-
-        # ② 编译通过 ≠ 运行时没问题（如渲染时 undefined is not a function）。这类错误要等
-        #    iframe 重载、应用真跑起来后才由浏览器 console 桥回传、落进 log_store。所以编译过
-        #    之后再短暂扫一眼运行时报错：构建确定性的部分已拿到，这里只是尽力补一下运行时。
-        for _ in range(12):  # 12 × 0.25s = 3s，只在编译通过时才花这点时间
-            logs = log_store.logs_since_write(session_id)
-            if logs:
-                # 同一条报错可能连着刷好几条，按 (level, text) 去重再列出。
-                seen: set[tuple[str, str]] = set()
-                uniq = []
-                for x in logs:
-                    key = (x.level, x.text)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    uniq.append(x)
-                lines = "\n".join(f"[{x.level}] {x.text}" for x in uniq)
-                return f"构建通过，但预览运行时报错，请定位并修复：\n{lines}"
-            await asyncio.sleep(0.25)
-        return "构建通过，预览正常，没有报错。"
+        if result.get("ok"):
+            return "构建通过，预览正常，没有报错。"
+        errors = str(result.get("errors") or "").strip() or "（无详细错误信息）"
+        if result.get("runtime"):
+            # 编译过了、但 iframe 渲染时崩（如 undefined is not a function）
+            return f"构建通过，但预览运行时报错，请定位并修复：\n{errors}"
+        return f"预览构建失败（编译没通过），请定位并修复：\n{errors}"
 
     return [write_file, edit_file, read_file, list_files, check_build]

@@ -82,18 +82,21 @@ bun run gen-snapshot               # 改了模板依赖后重跑,产物覆盖 we
 
 预览**不用 dev server / HMR**,改为每轮整体构建。AI 写完一组改动后调 `check_build` → 后端推 `preview_refresh` → 前端把暂存文件同步进 WebContainer、跑 `vite build` 出 dist、用 `vite preview` 起静态服务揭晓(**构建在用户浏览器里跑,和后端机器配置无关**)。这取代了旧的 `update_preview` + `get_browser_logs` 两个工具 + 日志轮询。
 
-「报错怎么确定地回到 AI 手里」分两条:
+「报错怎么确定地回到 AI 手里」——**编译错 + 运行时错走同一条路**,都经 `build-result` 回报,后端 `check_build` 只需纯 `await`:
 
-1. **编译错(确定)**:`vite build` 退出码 → 前端 `POST /api/sessions/{id}/build-result` → 后端 `check_build` 用 **asyncio.Event**([build_store.py](server/app/build_store.py))挂着 `await` 等结果,前端一报回即被唤醒返回 —— 前端构建多久就等多久,不靠固定窗口猜。
-2. **运行时错(best-effort)**:编译过了、iframe 重载渲染时才崩(如 `undefined.x`),由浏览器 console 桥回传 `log_store`;`check_build` 在编译通过后**再扫一眼 3s** 兜住,返回「构建通过,但预览运行时报错」。
+1. AI 调 `check_build` → `loop.py` 先 `build_store.arm()` 架好会合点、再推 `preview_refresh`。
+2. 前端 `syncFiles`:写文件 → `vite build`。**编译失败**立刻回报 `{ok:false, runtime:false, errors}`;**编译成功**则重载 iframe,从其 `load` 事件起开一个**收集窗**(`REVEAL_COLLECT_MS`,默认 1.5s),把这期间 console 桥抓到的运行时报错收齐,再带着 `{ok, runtime, errors}` 回报。
+3. 后端 `check_build` 用 **asyncio.Event**([build_store.py](server/app/build_store.py))挂着 `await` 等这个结果,前端一报回即被唤醒返回 —— **前端多快回就多快返回,不靠后端固定窗口猜**。据 `ok/runtime` 给三种文案:构建失败(编译没过)/ 构建通过但运行时报错 / 一切正常。
 
-> ⚠️ **排查:运行时报错漏报(check_build 报「构建通过、预览正常」,但预览其实崩了)**
-> 原因:慢机器 / 重应用上,3s 内没等到「iframe 重载 → 渲染 → 抛错 → console 桥 POST 回 log_store」整条链跑完。
-> - 临时:调大窗口 —— [tools.py](server/app/agents/tools.py) `check_build` 里的 `range(12)`(12 × 0.25s = 3s)。
-> - 彻底:前端重载渲染后收集运行时错误,一并打进 `build-result` 回报,把运行时也变成确定信号、不再扫窗口。
-> 另注:`vite build` **不跑 `tsc`**(AI 代码常有无害类型错,跑 tsc 会卡构建),所以**类型级**错误本就不在这条路覆盖内 —— 它和运行时检测互补、不是包含关系。
+> 这套**取代**了旧的 `update_preview` + `get_browser_logs` 两个工具,以及后端 `log_store`「前端推日志→临存→轮询读」整套(已删)。运行时错误的「等多久」窗口现在落在**前端**、且从 iframe 真实 `load` 起算,比后端盲扫准。
 
-关键文件:[build_store.py](server/app/build_store.py) · [api/build_result.py](server/app/api/build_result.py) · [agents/tools.py](server/app/agents/tools.py)(`check_build`) · [agents/loop.py](server/app/agents/loop.py)(`arm` + 推 `preview_refresh`) · [PreviewPane](web/src/components/WorkArea/PreviewPane/index.tsx)
+> ⚠️ **排查:运行时报错漏报(check_build 报「一切正常」,但预览其实崩了)**
+> 原因:慢机器 / 重应用上,收集窗内没等到「iframe 渲染 → 抛错 → console 桥回传父页面」。
+> - 调窗口:[PreviewPane](web/src/components/WorkArea/PreviewPane/index.tsx) 顶部 `REVEAL_COLLECT_MS`(1.5s,从 iframe `load` 起算)和 `REVEAL_FALLBACK_MS`(6s,load 始终不来的兜底)。
+> - 注意:运行时错误本质 best-effort(错误可能渲染后才异步抛、等不到永远);收集逻辑见 PreviewPane 的 `revealRef` / `finishReveal` / `handleIframeLoad`。
+> - 另注:`vite build` **不跑 `tsc`**(AI 代码常有无害类型错,跑 tsc 会卡构建),所以**类型级**错误不在这条路覆盖内 —— 它和运行时检测互补、不是包含关系。
+
+关键文件:[build_store.py](server/app/build_store.py) · [api/build_result.py](server/app/api/build_result.py) · [agents/tools.py](server/app/agents/tools.py)(`check_build`) · [agents/loop.py](server/app/agents/loop.py)(`arm` + 推 `preview_refresh`) · [PreviewPane](web/src/components/WorkArea/PreviewPane/index.tsx)(`revealRef` 收集 + 回报)
 
 ## 本地开发
 
@@ -130,7 +133,8 @@ web/                 前端
   scripts/           gen-snapshot 工具(Playwright + 无头 WebContainer)
 server/app/          后端
   api/chat.py        SSE 端点 + Agent loop(LLM 流式 + 工具闭包)
-  api/               sessions · files · versions · share · users · messages · logs
+  api/               sessions · files · versions · share · users · messages · build-result
+  build_store.py     check_build 的「构建结果」会合点(asyncio.Event)
   models/            ORM + Pydantic schema
   llm.py             模型白名单与 LLM 装配
   security.py deps.py  JWT / bcrypt / 依赖注入守卫

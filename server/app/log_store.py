@@ -7,15 +7,15 @@
   - 所以用一个模块级的字典当缓存：进程活着就在，重启就没——完全够用。
 
 谁写、谁读？
-  - 写：前端通过 POST /api/sessions/{id}/logs 把 wcLogs 推过来（api/logs.py）。
-  - 读：chat.py 里的 get_browser_logs 工具，agent 写完代码后调用它查报错。
+  - 写：前端通过 POST /api/sessions/{id}/logs 把 wcLogs / 构建报错推过来（api/logs.py）。
+  - 读：tools.py 里的 check_build 工具，agent 写完代码后调用它查报错。
 
 时序难点（核心）：
-  agent 写完文件会「立刻」调 get_browser_logs，但那一刻浏览器的 HMR 可能还没
+  agent 写完文件会「立刻」调 check_build，但那一刻前端的 vite build 可能还没
   跑完、错误还没产生。怎么知道「现在拿到的日志是不是这次写入引发的」？
   靠时间戳不行——前端是浏览器时钟、后端是服务器时钟，两者不同步。
   解法：给每条日志打一个「单调递增的序号 seq」，写文件时记下当时的 seq 当
-  「屏障」。序号 ≥ 屏障的日志，才是这次写入之后才产生的。get_browser_logs
+  「屏障」。序号 ≥ 屏障的日志，才是这次写入之后才产生的。check_build
   就等这种「屏障之后的新日志」出现（或超时）。
 
 注意：内存字典是「整个进程共享」的全局状态。单机、单进程的学习项目没问题；
@@ -27,8 +27,8 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel
 
-# 每个 session 最多保留多少条日志。预览报错往往是同一条错误反复刷（HMR 每次
-# 重连都打一遍），留太多没意义，够 agent 看清最近发生了什么就行。
+# 每个 session 最多保留多少条日志。运行时报错往往是同一条错误反复刷（一次渲染
+# 抛好几遍），留太多没意义，够 agent 看清最近发生了什么就行。
 _MAX_LOGS_PER_SESSION = 50
 
 

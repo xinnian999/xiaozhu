@@ -13,7 +13,9 @@ import {
 // WebContainer 单例封装
 // ============================================
 // - 整页只能 boot 一次，再次 boot 会抛错，所以用模块级单例
-// - 暴露 boot/install/dev/syncFiles 四个高层动作
+// - 预览方案：`vite build` 出 dist → `vite preview` 起静态服务预览。
+//   每次揭晓都全量构建（无 HMR），「编译过没过」就是构建退出码，确定、好抓，
+//   且和「分享」走同一条 build 路径，所见即所分享。
 // - 通过事件回调把状态变化报告给上层，避免循环依赖 store
 //
 // 关于 node 进程输出：我们不再自己解析 ANSI / 拆行，那条路坑太多
@@ -24,7 +26,7 @@ import {
 // 终端组件挂载时 attach(listener)：先重放 ringBuffer 把历史补齐，再实时收新数据。
 
 let containerPromise: Promise<WebContainer> | null = null
-let devServerStarted = false
+let previewStarted = false  // vite preview 静态服务是否已起来
 let lastFiles: FileMap | null = null  // 上次 mount 的文件快照，用于增量 diff
 
 // ── 输出广播总线 ───────────────────────────────────────────────
@@ -60,62 +62,13 @@ export function subscribeProcessOutput(listener: OutputListener): () => void {
   return () => listeners.delete(listener)
 }
 
-// ── Node 进程错误检测 ──────────────────────────────────────────
-// 背景：Vite 编译错误（语法错误、import 解析失败等）只打到 dev server 的
-// stdout/stderr，走上面的总线交给 xterm 渲染给人看；它【不】走浏览器 console
-// （Vite 是通过 HMR websocket 推成页面红色 overlay 的，不触发 window.onerror /
-// console.error），所以注入的 console bridge 抓不到，后端 agent 的
-// get_browser_logs 自然也看不见——这正是「Node 报错了但 AI 没捕获到」的根因。
-//
-// 这里在 dev 输出流上加一层轻量检测：按行扫描、识别 Vite/esbuild/babel 的报错
-// 特征行，转成结构化错误事件转发出去，由 PreviewPane 推给后端，补上这块盲区。
-// 注意只做「识别 + 转发」，不接管渲染——渲染仍归 xterm。
-type ServerErrorListener = (text: string) => void
-const serverErrorListeners = new Set<ServerErrorListener>()
-
-/** 订阅 Node 进程（Vite）编译错误。返回取消订阅函数。 */
-export function subscribeServerErrors(listener: ServerErrorListener): () => void {
-  serverErrorListeners.add(listener)
-  return () => serverErrorListeners.delete(listener)
-}
-
-// 去掉 ANSI 转义序列（颜色 / 光标控制 / OSC），只留可读文本，方便匹配与回传。
+// 去掉 ANSI 转义序列（颜色 / 光标控制 / OSC），只留可读文本，方便回传。
 function stripAnsi(s: string): string {
   return s
     // eslint-disable-next-line no-control-regex
     .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
     // eslint-disable-next-line no-control-regex
     .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '')
-}
-
-// 编译错误的特征行：命中其一即认为这一行是报错。覆盖 Vite 插件报错、
-// dev server 内部错误、esbuild/babel 语法错误、模块解析失败等常见形态。
-const SERVER_ERROR_RE =
-  /(\[vite\][^\n]*(error|failed))|\[plugin:[^\]]+\]|internal server error|pre-transform error|transform failed|failed to (load|resolve|parse|compile)|unexpected token/i
-
-// 行缓冲：raw chunk 可能在任意位置（甚至一行中间）截断，攒到换行再判断整行。
-let errLineBuf = ''
-
-/** 把一段 dev 原始输出喂进错误检测器，命中报错行就通知订阅者。 */
-function scanForServerErrors(rawChunk: string): void {
-  errLineBuf += stripAnsi(rawChunk)
-  const lines = errLineBuf.split('\n')
-  // 最后一段可能是被截断的半行，留到下一个 chunk 再拼。
-  errLineBuf = lines.pop() ?? ''
-  for (const raw of lines) {
-    const line = raw.trim()
-    if (!line || !SERVER_ERROR_RE.test(line)) continue
-    // WebContainer 里文件是绝对路径（/home/<随机>/src/...），但 agent 认的是
-    // 相对路径（src/...）。去掉这段前缀，报错里的路径才能和文件树对上。
-    const normalized = line.replace(/\/home\/[^/\s]+\//g, '')
-    for (const fn of serverErrorListeners) {
-      try {
-        fn(normalized)
-      } catch (e) {
-        console.error('server error listener error', e)
-      }
-    }
-  }
 }
 
 /** 启动（首次调用真正 boot，之后返回同一个实例） */
@@ -228,60 +181,6 @@ const NAV_BRIDGE_SCRIPT = `<script>(function(){
   }
 })();</script>`
 
-// ── Vite 编译错误 overlay 监测脚本 ─────────────────────────────
-// 为什么单独搞这个：Vite 把编译错误（语法错误、import 解析失败等）以
-// <vite-error-overlay> 自定义元素注入 iframe 的 document.body，渲染成那块红屏。
-// 它【不】走 console，所以 console 桥抓不到；它也【不】每轮都重新打印到 dev server
-// 的 stdout —— 一个本轮没被改动的坏文件，Vite 增量编译不会重新 transform 它，
-// 它的报错就永远停在"上一次"的日志里。于是会出现这种最常见的自检漏报：
-//   AI 修好了 A 文件 → update_preview → get_browser_logs 只看到"屏障之后没有新报错"
-//   → 误判"运行正常" → 可 B 文件其实一直红着，用户看到的预览仍是红屏。
-//
-// 这块红屏 overlay 才精确等于"用户此刻看到的报错状态"。所以这里直接盯它：
-// 出现/消失时上报，并支持父页面在"应用新代码到预览"后主动 recheck，把当前红屏态
-// 重新汇报一遍 —— 哪怕坏文件本轮没被碰过，自检也能知道"预览还红着"。
-const OVERLAY_BRIDGE_SCRIPT = `<script>(function(){
-  if (window.__vibuildOverlayBridged) return;
-  window.__vibuildOverlayBridged = true;
-  var lastKey = '';  // 上次上报的状态签名，仅在状态变化时 post，避免刷屏
-  function readOverlay(){
-    var el = document.querySelector('vite-error-overlay');
-    if (!el) return { present: false, text: '' };
-    var text = '';
-    try {
-      var root = el.shadowRoot || el;
-      var parts = ['.message-body', '.message', '.file', '.frame'];
-      for (var i=0;i<parts.length;i++){
-        var n = root.querySelector(parts[i]);
-        if (n && n.textContent) text += n.textContent + '\\n';
-      }
-      if (!text) text = el.textContent || 'Vite 编译错误';
-    } catch(e) { text = 'Vite 编译错误'; }
-    return { present: true, text: text.replace(/\\s+/g,' ').trim().slice(0, 2000) };
-  }
-  function report(force){
-    var s = readOverlay();
-    var key = s.present ? ('1|' + s.text) : '0';
-    if (!force && key === lastKey) return;
-    lastKey = key;
-    try { window.parent.postMessage({ type: 'vibuild-vite-overlay', present: s.present, text: s.text }, '*'); } catch(e) {}
-  }
-  // overlay 是 body 的直接子节点，监听 body 的 childList 即可捕获它的增删（性能也好）。
-  var mo = new MutationObserver(function(){ report(false); });
-  function startObserve(){
-    try { mo.observe(document.body, { childList: true }); } catch(e){}
-    report(true);
-  }
-  if (document.body) startObserve();
-  else document.addEventListener('DOMContentLoaded', startObserve);
-  // 父页面在"揭晓新代码到预览"后会发 recheck：强制重报当前红屏态（即便 overlay 没增删），
-  // 用来覆盖"本轮没改动、但仍红屏的文件"——它的错误不会重新进日志流，只能靠主动重报。
-  window.addEventListener('message', function(e){
-    var d = e.data;
-    if (d && d.type === 'vibuild-recheck') report(true);
-  });
-})();</script>`
-
 /** 把一段脚本注入 index.html 的 <head> 末尾（没有 </head> 就放 <body> 前）。
  *  flag 用于幂等判断：html 里已含该标记就跳过，避免重复注入。 */
 function injectScript(files: FileMap, script: string, flag: string): FileMap {
@@ -299,7 +198,6 @@ function injectScript(files: FileMap, script: string, flag: string): FileMap {
 function injectConsoleBridge(files: FileMap): FileMap {
   let next = injectScript(files, CONSOLE_BRIDGE_SCRIPT, '__vibuildConsoleBridged')
   next = injectScript(next, NAV_BRIDGE_SCRIPT, '__vibuildNavBridged')
-  next = injectScript(next, OVERLAY_BRIDGE_SCRIPT, '__vibuildOverlayBridged')
   return next
 }
 
@@ -371,25 +269,64 @@ console.log('relinked ' + linked + ' bin entries');
 `
 
 /** 把一个进程的输出转发到总线，并在 UI 上贴个分隔横幅。
- *  banner 让用户知道"现在是在 install 阶段还是 dev 阶段"。 */
-function pipeRawToBus(
-  output: ReadableStream<string>,
-  banner: string,
-  // scanErrors：是否额外把输出喂给错误检测器（只有常驻的 dev server 需要，
-  // install / relink / build 那些一次性进程靠 exit code 判断成败，不必扫）。
-  opts?: { scanErrors?: boolean },
-) {
+ *  banner 让用户知道"现在是在 install 阶段还是 build 阶段"。 */
+function pipeRawToBus(output: ReadableStream<string>, banner: string) {
   // \r\n 是 xterm 期望的换行；颜色码让 banner 醒目些
   broadcast(`\x1b[36m\r\n— ${banner} —\x1b[0m\r\n`)
   return output.pipeTo(
     new WritableStream({
       write(chunk) {
-        const s = chunk.toString()
-        broadcast(s)
-        if (opts?.scanErrors) scanForServerErrors(s)
+        broadcast(chunk.toString())
       },
     }),
   )
+}
+
+// ── build 预览：在容器里 vite build 出 dist ─────────────────────
+// 预览的核心。直接 `npx vite build`（不走 `npm run build`，那是 `tsc && vite build`，
+// AI 代码常有类型报错会被 tsc 卡住，而预览只要能跑的产物）。base 用默认 '/'，因为预览是
+// 挂在 vite preview 根路径下的 iframe（分享才需要 --base=./ 挂子路径，那条路径见 buildDist）。
+//
+// 编译过没过就是这里的【退出码】。失败时把构建输出的尾部喂给 server-error 通道
+// （PreviewPane 会转发到控制台面板 + 后端 log_store），agent 的 check_build 立刻能
+// 看到「构建都没过」——一次构建对应一条权威信号，确定、好抓。
+
+/** 从构建原始输出里抽出可回传的错误摘要：去掉 ANSI、归一化容器绝对路径、取尾部一段。 */
+function buildErrorTail(rawOutput: string): string {
+  const norm = stripAnsi(rawOutput).replace(/\/home\/[^/\s]+\//g, '')
+  // 错误通常打印在最后，取尾部 1800 字符够 agent 定位；首尾留白裁掉。
+  return norm.slice(-1800).trim()
+}
+
+/** 一次构建的结果：ok=退出码为 0；失败时 error 带错误摘要（供回传后端 + 显示控制台）。 */
+export type BuildOutcome = { ok: boolean; error: string | null }
+
+/**
+ * 跑一次 `vite build`。一次性进程，靠退出码判断成败（不像 dev server 要扫输出流找报错）。
+ * 成败 + 错误摘要都通过返回值交给调用方处理（不再走发布订阅），由它决定回传 / 显示。
+ */
+async function runBuild(wc: WebContainer, hooks?: { onLog?: (line: string) => void }): Promise<BuildOutcome> {
+  hooks?.onLog?.('vite build')
+  const build = await wc.spawn('npx', ['vite', 'build'])
+  // 输出一边照常进终端（给人看），一边攒进 buf —— 构建失败时要把它当错误回传。
+  broadcast('\x1b[36m\r\n— vite build —\x1b[0m\r\n')
+  let buf = ''
+  const piped = build.output.pipeTo(
+    new WritableStream({
+      write(chunk) {
+        const s = chunk.toString()
+        broadcast(s)
+        buf += s
+      },
+    }),
+  )
+  const code = await build.exit
+  // 等输出流 drain 完，确保失败时错误尾部完整落进 buf 再判断（别漏掉最后一截报错）。
+  await piped.catch(() => {})
+  if (code !== 0) {
+    return { ok: false, error: `[vite build] 构建失败 (exit ${code})：${buildErrorTail(buf)}` }
+  }
+  return { ok: true, error: null }
 }
 
 /**
@@ -431,7 +368,7 @@ async function mountSnapshotAndRelink(
 export async function bootAndRun(
   files: FileMap,
   hooks: {
-    onStatus: (s: 'booting' | 'mounting' | 'installing' | 'starting' | 'ready' | 'error') => void
+    onStatus: (s: 'booting' | 'mounting' | 'installing' | 'building' | 'starting' | 'ready' | 'error') => void
     onUrl: (url: string) => void
     onLog: (line: string) => void
     onError: (msg: string) => void
@@ -448,11 +385,11 @@ export async function bootAndRun(
     await wc.mount(toFileTree(filesWithBridge))
     lastFiles = { ...filesWithBridge }
 
-    // 监听后续 server-ready 事件（dev 启动后 vite 端口 ready 时触发）
+    // 监听 server-ready 事件（vite preview 端口 ready 时触发）：iframe 加载预览 URL
     wc.on('server-ready', (_port, url) => {
       hooks.onUrl(url)
       hooks.onStatus('ready')
-      hooks.onLog('dev server ready')
+      hooks.onLog('preview ready')
     })
 
     // 依赖安装：先尝试从 IndexedDB 缓存恢复 node_modules，命中则跳过 npm install
@@ -548,35 +485,22 @@ export async function bootAndRun(
       }
     }
 
-    // npm run dev
+    // ── 先 vite build 出 dist，再 vite preview 起静态服务 ──
+    // 首次构建（构建的是后端预置的完整模板）必须成功才有 dist 可供预览；失败直接抛错，
+    // 进 catch 显示错误态（错误详情已通过 server-error 通道回传后端/控制台）。
+    hooks.onStatus('building')
+    const first = await runBuild(wc, { onLog: hooks.onLog })
+    if (!first.ok) {
+      throw new Error(first.error ?? '首次构建失败，请查看控制台的构建报错后让 AI 修复')
+    }
+    // vite preview 是常驻静态服务，serve dist。它开端口后会触发上面注册的
+    // 统一 server-ready 处理器（onUrl + ready），iframe 照常加载，无需额外接线。
     hooks.onStatus('starting')
-    hooks.onLog('npm run dev')
-    const dev = await wc.spawn('npm', ['run', 'dev'])
-    devServerStarted = true
-    // dev server 的输出要扫错误：Vite 编译报错只在这条流里，扫出来回传后端
-    // 才能让 agent 的 get_browser_logs 看到。
-    pipeRawToBus(dev.output, 'npm run dev', { scanErrors: true })
-
-    // server-ready 时先预热 Vite，再通知 UI 显示 iframe
-    // 原因：server-ready 只代表端口开了，Vite 第一次处理请求时才做 esbuild
-    // pre-bundling（约 2-5s）。若直接显示 iframe，用户会看到白屏等 Vite 预打包。
-    // 改成在容器内自己 fetch 一次触发预打包，完成后 iframe 打开即是热的状态。
-    wc.on('server-ready', async (port, url) => {
-      broadcast('\x1b[36m\r\n— 预热 Vite（首次依赖预打包）—\x1b[0m\r\n')
-      try {
-        const warmup = await wc.spawn('node', [
-          '-e',
-          `require('http').get('http://localhost:${port}/',r=>{r.resume();r.on('end',()=>process.exit(0));}).on('error',()=>process.exit(0));`,
-        ])
-        await warmup.exit
-      } catch {
-        // 预热失败不阻塞，顶多白屏一下
-      }
-      hooks.onUrl(url)
-      hooks.onStatus('ready')
-      hooks.onLog('dev server ready')
-    })
-    // 不 await dev.exit —— 它是常驻进程
+    hooks.onLog('vite preview')
+    const preview = await wc.spawn('npx', ['vite', 'preview', '--port', '4173'])
+    previewStarted = true
+    pipeRawToBus(preview.output, 'vite preview')
+    // 不 await preview.exit —— 它是常驻进程
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     hooks.onError(msg)
@@ -584,11 +508,13 @@ export async function bootAndRun(
   }
 }
 
-/** 计算 diff，将变化文件增量写入容器；不重启 dev server，依赖 vite HMR */
+/** 计算 diff，将变化文件增量写入容器，再跑一次 vite build 重新出 dist。
+ *  返回 buildOk（构建是否成功，供 PreviewPane 决定是否刷新 iframe）
+ *  和 buildError（失败时的错误摘要，供回传后端 build-result + 显示控制台）。 */
 export async function syncFiles(
   files: FileMap,
   hooks: { onLog: (line: string) => void },
-): Promise<{ added: number; modified: number; removed: number }> {
+): Promise<{ added: number; modified: number; removed: number; buildOk: boolean; buildError: string | null }> {
   const wc = await getContainer()
   // 同步阶段也确保 index.html 始终带 bridge —— 否则 LLM 改 html 会把它覆盖掉
   const filesWithBridge = injectConsoleBridge(files)
@@ -634,7 +560,13 @@ export async function syncFiles(
   lastFiles = { ...filesWithBridge }
   hooks.onLog(`synced +${added} ~${modified} -${removed}`)
 
-  return { added, modified, removed }
+  // 文件有变化才重新构建（没变就别白跑一次几秒的 build）。没变时视作「构建通过」，
+  // PreviewPane 仍会据此回报 build-result，免得后端 check_build 干等到超时。
+  if (added + modified + removed === 0) {
+    return { added, modified, removed, buildOk: true, buildError: null }
+  }
+  const { ok, error } = await runBuild(wc, { onLog: hooks.onLog })
+  return { added, modified, removed, buildOk: ok, buildError: error }
 }
 
 // ── 构建产物（分享用）─────────────────────────────────────────
@@ -723,15 +655,15 @@ export function isBooted(): boolean {
   return containerPromise !== null
 }
 
-/** dev server 是否已起来（用于决定是否要走完整 install/dev 流程） */
-export function isDevRunning(): boolean {
-  return devServerStarted
+/** 预览静态服务（vite preview）是否已起来（用于决定能否增量 syncFiles / 分享构建） */
+export function isPreviewRunning(): boolean {
+  return previewStarted
 }
 
 /**
  * 销毁当前容器并清空所有单例状态，为下一个项目腾位。
  * 切 / 开会话时调用 —— WebContainer 明确「同一时刻只能有一个实例」，
- * 必须先 teardown 才能重新 boot，否则上个项目的 FS / dev server / 终端日志
+ * 必须先 teardown 才能重新 boot，否则上个项目的 FS / preview 服务 / 终端日志
  * 都会残留串台。teardown 后所有派生对象（进程、fs…）即失效。
  */
 export async function resetContainer(): Promise<void> {
@@ -745,12 +677,10 @@ export async function resetContainer(): Promise<void> {
     }
   }
   containerPromise = null
-  devServerStarted = false
+  previewStarted = false
   lastFiles = null
-  // 清掉错误检测器的半行缓冲，避免上个项目残留的半行和新项目拼成假报错。
-  errLineBuf = ''
   // 清空日志回放缓冲，并给已挂载的 xterm 发「清屏 + 清回滚」指令，
-  // 否则上个项目的 npm / dev 日志会一直留在终端里。
+  // 否则上个项目的 npm / build 日志会一直留在终端里。
   history = ''
   broadcast('\x1b[2J\x1b[3J\x1b[H')
 }

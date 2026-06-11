@@ -7,7 +7,7 @@
 ## 特性
 
 - **浏览器内运行**:用 [WebContainer](https://webcontainer.io) 在前端跑 Node/Vite,无需后端沙箱
-- **渐进式预览**:文件流式到达即增量挂载,走 Vite HMR 热更新,肉眼看着预览长出来
+- **构建式预览**:每轮改动整体 `vite build` 出 dist、用 `vite preview` 跑;编译/运行报错确定回传给 AI 自检自修(详见「预览与构建自检」)
 - **依赖秒开**:三级缓存跳过 `npm install`(见下文「提速方案」)
 - **流式对话**:SSE 单连接混合推送对话增量 / 文件写入 / 工具进度 / 版本卡
 - **版本管理**:整快照 + 回滚即新版(单线递增,不分支)
@@ -28,7 +28,7 @@
 │  后端 (FastAPI, Python 3.12+)                │
 │   /api/chat (SSE)  ── Agent loop:            │
 │       LLM 流式 → tool_calls 循环             │
-│       工具: write/edit/read/list/logs        │
+│       工具: write/edit/read/list/check_build │
 │   /api/sessions|files|versions|share|users   │
 │   持久化: SQLite + SQLAlchemy(async) + Alembic│
 └──────────────────────────────────────────────┘
@@ -73,10 +73,27 @@ bun run gen-snapshot               # 改了模板依赖后重跑,产物覆盖 we
 - **预置模板而非让 LLM 写配置**:配置是确定性样板,LLM 易写错版本号/漏依赖,WebContainer 跑不起来难排查
 - **工具用闭包工厂**:每请求构造,绑定 `db`/`session_id`,LLM 只看到业务参数(path/content),感知不到后端概念
 - **消息分 kind(text/tool/version)**:喂 LLM 上下文只取 `text`,工具行已体现在文件现状,重放会误导
-- **流式期间暂不同步预览**:避免闪半成品,等 AI 主动 `update_preview` 再整体揭晓 → HMR
+- **流式期间暂不构建预览**:避免闪半成品 / 浪费多次全量构建,等 AI 调 `check_build` 才整体揭晓 + 构建(详见「预览与构建自检」)
 - **跨域隔离头走纯 ASGI 中间件**:`BaseHTTPMiddleware` 会缓冲流式响应,纯 ASGI 只在响应头阶段插手,对 SSE 透明
 - **SSE 协议早定死**:前后端双份写(Pydantic + TS type),M2 前不动
 - **整快照 + 回滚即新版**:回滚直接覆盖当前态并产生新版本,seq 单向递增,历史不变
+
+## 预览与构建自检(check_build)
+
+预览**不用 dev server / HMR**,改为每轮整体构建。AI 写完一组改动后调 `check_build` → 后端推 `preview_refresh` → 前端把暂存文件同步进 WebContainer、跑 `vite build` 出 dist、用 `vite preview` 起静态服务揭晓(**构建在用户浏览器里跑,和后端机器配置无关**)。这取代了旧的 `update_preview` + `get_browser_logs` 两个工具 + 日志轮询。
+
+「报错怎么确定地回到 AI 手里」分两条:
+
+1. **编译错(确定)**:`vite build` 退出码 → 前端 `POST /api/sessions/{id}/build-result` → 后端 `check_build` 用 **asyncio.Event**([build_store.py](server/app/build_store.py))挂着 `await` 等结果,前端一报回即被唤醒返回 —— 前端构建多久就等多久,不靠固定窗口猜。
+2. **运行时错(best-effort)**:编译过了、iframe 重载渲染时才崩(如 `undefined.x`),由浏览器 console 桥回传 `log_store`;`check_build` 在编译通过后**再扫一眼 3s** 兜住,返回「构建通过,但预览运行时报错」。
+
+> ⚠️ **排查:运行时报错漏报(check_build 报「构建通过、预览正常」,但预览其实崩了)**
+> 原因:慢机器 / 重应用上,3s 内没等到「iframe 重载 → 渲染 → 抛错 → console 桥 POST 回 log_store」整条链跑完。
+> - 临时:调大窗口 —— [tools.py](server/app/agents/tools.py) `check_build` 里的 `range(12)`(12 × 0.25s = 3s)。
+> - 彻底:前端重载渲染后收集运行时错误,一并打进 `build-result` 回报,把运行时也变成确定信号、不再扫窗口。
+> 另注:`vite build` **不跑 `tsc`**(AI 代码常有无害类型错,跑 tsc 会卡构建),所以**类型级**错误本就不在这条路覆盖内 —— 它和运行时检测互补、不是包含关系。
+
+关键文件:[build_store.py](server/app/build_store.py) · [api/build_result.py](server/app/api/build_result.py) · [agents/tools.py](server/app/agents/tools.py)(`check_build`) · [agents/loop.py](server/app/agents/loop.py)(`arm` + 推 `preview_refresh`) · [PreviewPane](web/src/components/WorkArea/PreviewPane/index.tsx)
 
 ## 本地开发
 

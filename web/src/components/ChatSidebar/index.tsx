@@ -44,10 +44,7 @@ export default function ChatSidebar() {
   const mobileChatOpen = useUIStore((s) => s.mobileChatOpen)
   const setMobileChatOpen = useUIStore((s) => s.setMobileChatOpen)
   const chatCollapsed = useUIStore((s) => s.chatCollapsed)
-  // 本轮如果改了文件，结束时强制刷一下预览
-  // 原因：vite HMR 对 index.html 改动不响应，React Fast Refresh 也偶尔失败
-  const reloadPreview = useUIStore((s) => s.reloadPreview)
-  // 把暂存的文件应用到运行中的预览（AI 调 update_preview 时触发）
+  // 把暂存的文件揭晓到预览并触发重新构建（AI 调 check_build 时触发）
   const requestPreviewApply = useUIStore((s) => s.requestPreviewApply)
   // 点缩略图放大预览
   const openImagePreview = useUIStore((s) => s.openImagePreview)
@@ -177,9 +174,6 @@ export default function ChatSidebar() {
     const controller = new AbortController()
     abortRef.current = controller
 
-    // 本轮是否有文件改动 —— 用来决定结束时要不要刷新预览
-    let filesChanged = false
-
     // 3. 流式消费 SSE，逐 token 累积到 streamingText
     let accumulated = ''
     try {
@@ -209,15 +203,13 @@ export default function ChatSidebar() {
           setToolResult(event.id, event.result)
         } else if (event.type === 'file_write') {
           // LLM 写文件 —— 只更新本地 files 快照（代码视图/文件树实时跟着变）。
-          // 注意：流式途中 PreviewPane 不会自动 syncFiles，运行中的预览保持上一个稳定态，
-          // 等收到 preview_refresh 才揭晓，避免闪半成品。
+          // 注意：流式途中 PreviewPane 不会自动构建，运行中的预览保持上一个稳定态，
+          // 等收到 preview_refresh 才揭晓 + 重新构建，避免闪半成品、也省掉多次全量构建。
           applyFileWrite(event.path, event.content)
-          filesChanged = true
         } else if (event.type === 'file_delete') {
           applyFileDelete(event.path)
-          filesChanged = true
         } else if (event.type === 'preview_refresh') {
-          // AI 觉得这一组改动写完、可渲染了 —— 把暂存文件应用进预览（增量 HMR，软更新）
+          // AI 调 check_build：这一组改动写完、可渲染了 —— 把暂存文件应用进预览并重新构建
           requestPreviewApply()
         } else if (event.type === 'version') {
           // 产生了新版本：先把本轮已累积的叙述固化成消息（让最终回复气泡先落位），
@@ -235,15 +227,12 @@ export default function ChatSidebar() {
         }
       }
     } finally {
-      // 4. 无论正常结束 / 出错 / 用户中断，都冲刷累积内容并退出流式态
+      // 4. 无论正常结束 / 出错 / 用户中断，都冲刷累积内容并退出流式态。
+      //    退出流式态会让 PreviewPane 的构建 effect 重跑：若本轮有改动还没构建过
+      //    （AI 没在最后调 check_build），它会兜底构建最终态 + 刷新预览，所以这里
+      //    不必再手动刷——手动刷只会重载到旧 dist（没重新构建），没有意义。
       abortRef.current = null
       endStreaming()
-      // 5. 文件有变化 → 流结束后强制刷一次预览。
-      //    300ms 延迟是为了等最后一次 file_write 触发的 syncFiles 落盘，
-      //    否则刷新可能赶在 wc.fs.writeFile 之前，看到的还是旧版。
-      if (filesChanged) {
-        setTimeout(reloadPreview, 300)
-      }
     }
   }
 

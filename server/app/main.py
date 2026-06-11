@@ -13,7 +13,17 @@ from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from app.api import chat, files, logs, messages, sessions, share, users, versions
+from app.api import (
+    build_result,
+    chat,
+    files,
+    logs,
+    messages,
+    sessions,
+    share,
+    users,
+    versions,
+)
 from app.config import settings
 from app.db import engine
 
@@ -96,6 +106,7 @@ app.include_router(files.router)
 app.include_router(versions.router)
 app.include_router(messages.router)
 app.include_router(logs.router)
+app.include_router(build_result.router)
 app.include_router(chat.router)
 
 

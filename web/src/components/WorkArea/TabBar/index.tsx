@@ -3,7 +3,7 @@ import { Eye, Code2, ChevronLeft, RotateCw, ExternalLink, Terminal, Save, Undo2,
 import { useUIStore, type WorkTab } from '@/store/ui'
 import { useSessionStore } from '@/store/session'
 import { toast } from '@/lib/toast'
-import { isDevRunning } from '@/lib/webcontainer'
+import { isPreviewRunning } from '@/lib/webcontainer'
 import ShareDialog from './ShareDialog'
 import styles from './index.module.scss'
 
@@ -46,10 +46,10 @@ export default function TabBar() {
 
   const isCode = workTab === 'code'
 
-  // 打开分享：必须预览已经跑起来（dev server ready），否则容器里没法 vite build
+  // 打开分享：必须预览已经跑起来（vite preview ready），否则容器里没法 vite build
   const handleShare = () => {
     if (!activeId) return
-    if (!isDevRunning()) {
+    if (!isPreviewRunning()) {
       toast('请等预览加载完成后再分享')
       return
     }

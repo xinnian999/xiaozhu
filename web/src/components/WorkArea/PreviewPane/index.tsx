@@ -2,22 +2,22 @@ import { useEffect, useRef, useState } from 'react'
 import { AlertTriangle } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
 import { useUIStore, type WCStatus, type LogLevel } from '@/store/ui'
-import { bootAndRun, syncFiles, resetContainer, isBooted, isDevRunning, subscribeServerErrors } from '@/lib/webcontainer'
-import { pushLogs, type PushLog } from '@/lib/api'
+import { bootAndRun, syncFiles, resetContainer, isBooted, isPreviewRunning } from '@/lib/webcontainer'
+import { pushLogs, postBuildResult, type PushLog } from '@/lib/api'
 import styles from './index.module.scss'
 
 // ============================================
 // 预览面板：WebContainer 真实预览
 // - 首次进入 tab 才 boot（降低首屏开销）
-// - boot 成功后 iframe 加载 vite dev server URL
-// - 切版本时增量 syncFiles，依赖 vite HMR 自动刷新
+// - boot 成功后 iframe 加载 vite preview（静态 dist）URL
+// - 揭晓新代码时 syncFiles 重新 vite build，构建成功后整页刷新 iframe
 // - 失败时回落到拟态占位（保留原视觉作为背景）
 // ============================================
 export default function PreviewPane() {
   const currentVersion = useSessionStore((s) => s.currentVersion())
   // 当前会话 id —— 回传日志要带上它，后端按 session 分桶存
   const activeId = useSessionStore((s) => s.activeId)
-  // 当前会话是否在流式生成中 —— 生成途中不自动同步预览（等 AI 主动 update_preview）
+  // 当前会话是否在流式生成中 —— 生成途中不自动构建预览（等 AI 调 check_build 揭晓）
   const isStreaming = useSessionStore(
     (s) => s.sessions.find((x) => x.id === s.activeId)?.isStreaming ?? false,
   )
@@ -35,7 +35,9 @@ export default function PreviewPane() {
   const clearWcLogs = useUIStore((s) => s.clearWcLogs)
   // 刷新计数器：变化即触发 iframe 重新挂载
   const reloadTick = useUIStore((s) => s.previewReloadTick)
-  // 应用计数器：变化即把当前暂存文件增量同步进预览（AI 调 update_preview 时自增）
+  // 整页刷新预览（无 HMR，构建完新 dist 后靠它重载 iframe）
+  const reloadPreview = useUIStore((s) => s.reloadPreview)
+  // 应用计数器：变化即把当前暂存文件同步进容器并重新构建（AI 调 check_build 时自增）
   const applyTick = useUIStore((s) => s.previewApplyTick)
   // 导航指令（后退/前进/刷新）：seq 变化即把指令 postMessage 进 iframe
   const navCmd = useUIStore((s) => s.previewNavCmd)
@@ -44,16 +46,16 @@ export default function PreviewPane() {
 
   // 标记上次同步的版本号，避免同 version 反复 sync
   const syncedVersionRef = useRef<string | null>(null)
-  // 标记上次「应用」用到的 applyTick —— 区分「是新的 update_preview 请求」还是
+  // 标记上次「应用」用到的 applyTick —— 区分「是新的 check_build 请求」还是
   // 「流式途中 version 变了但还没到揭晓时机」
   const appliedTickRef = useRef(0)
+  // 记住上次构建结果 —— 用于「版本没变但 AI 又调了一次 check_build」时，
+  // 无需重新构建即可把上次结果回报给后端，免得后端 check_build 干等到超时。
+  const lastBuildResultRef = useRef<{ ok: boolean; error: string | null }>({ ok: true, error: null })
   // 容器当前归属哪个会话 —— 用来判断 activeId 变了要不要 teardown 重挂
   const containerSessionRef = useRef<string | null>(null)
   // 当前 iframe 的引用，用于校验 postMessage 来源
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
-  // Node（Vite）编译错误的去重状态。放 ref（而非订阅闭包内的局部变量）是为了能在
-  // 「应用新代码到预览」时被重置 —— 这是修复「自检漏报」的关键，详见下方两处 effect 注释。
-  const serverErrDedupeRef = useRef<{ text: string; at: number }>({ text: '', at: 0 })
 
   // —— 预览历史栈：父页面侧重建一份 iframe 内的浏览历史，用来算「能否前进/后退」——
   // iframe 跨域拿不到它真实的 history.length / 当前位置，只能靠导航桥上报的
@@ -67,7 +69,7 @@ export default function PreviewPane() {
   // 直接读 activeId 会捕获到旧值，用 ref 保证拿到最新会话 id。
   const activeIdRef = useRef(activeId)
   activeIdRef.current = activeId
-  // 待回传的日志缓冲 + debounce 定时器：日志是高频的（HMR 重连一刷一片），
+  // 待回传的日志缓冲 + debounce 定时器：日志是高频的（一次报错常连着刷好几条），
   // 攒一小批一起发，别一条一个请求。
   const pendingLogsRef = useRef<PushLog[]>([])
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -122,59 +124,64 @@ export default function PreviewPane() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, currentVersion.files])
 
-  // —— 把文件变更增量同步进运行中的预览（依赖 vite HMR，不重启 dev）——
+  // —— 把文件变更同步进容器并重新构建预览（无 HMR，构建成功后整页刷新 iframe）——
   // 触发来源有两类：
-  //   1. 流式生成途中：AI 调 update_preview → applyTick 自增 → 揭晓一次完整改动；
-  //      本轮结束（isStreaming 翻 false 让本 effect 重跑）→ 兜底同步最终态。
-  //   2. 非流式：回滚版本等场景，version 一变就直接同步。
-  // 流式途中每个 file_write 都会 bump version，但我们故意不跟着同步 ——
-  // 否则又会把「组件写好、样式没跟上」的半成品闪给用户（这正是本次改造要解决的）。
+  //   1. 流式生成途中：AI 调 check_build → applyTick 自增 → 揭晓并构建一次完整改动；
+  //      本轮结束（isStreaming 翻 false 让本 effect 重跑）→ 兜底构建最终态。
+  //   2. 非流式：回滚版本等场景，version 一变就直接构建。
+  // 流式途中每个 file_write 都会 bump version，但我们故意不跟着构建 ——
+  // 否则会把半成品（甚至构建失败的中间态）闪给用户，也白白浪费多次全量构建。
   useEffect(() => {
-    if (!isDevRunning()) return
-    // 只同步「当前会话自己的」版本变更；切会话的重挂由上面的 effect 负责，
+    if (!isPreviewRunning()) return
+    // 只构建「当前会话自己的」版本变更；切会话的重挂由上面的 effect 负责，
     // 这里若不挡住，会把新会话的文件 sync 进尚未销毁的旧容器。
     if (containerSessionRef.current !== activeId) return
-    if (syncedVersionRef.current === currentVersion.id) return
-    // 流式途中、且不是「新的 update_preview 请求」→ 暂不同步，保持上一个稳定态
-    if (isStreaming && applyTick === appliedTickRef.current) return
-    appliedTickRef.current = applyTick
 
-    // 关键：进入新一轮「揭晓代码到预览」。重置 Vite 编译错误的去重状态，
-    // 让这一轮即便报出与上一轮「文本完全相同」的编译错误，也能重新回传后端。
-    // 否则（这正是「自检经常检测不到」的根因）：AI 改了代码但没修对 → Vite 重新
-    // 编译报【相同】错误 → 被旧去重在 5s 窗口内挡掉、不回传 → 后端写入屏障之后
-    // 收不到任何日志 → get_browser_logs 误判「运行正常」→ AI 以为修好了，实际预览仍红屏。
-    serverErrDedupeRef.current = { text: '', at: 0 }
+    // 是不是「新的 check_build 揭晓请求」（applyTick 变了）。AI 每次调 check_build 都会
+    // 让 applyTick 自增 —— 这种请求【必须】回报一次 build-result，否则后端 check_build
+    // 会一直等到超时。版本变更（回滚等）则不需要回报（没有 check_build 在等）。
+    const isReveal = applyTick !== appliedTickRef.current
+    // 流式途中、非揭晓 → 暂不构建，保持上一个稳定态
+    if (isStreaming && !isReveal) return
+
+    // 版本没变 → 不用重新构建。但若这是一次 check_build 揭晓请求，仍要把上次构建结果
+    // 回报给后端（沿用 lastBuildResultRef），唤醒在等的 check_build，别让它干等到超时。
+    if (syncedVersionRef.current === currentVersion.id) {
+      if (isReveal) {
+        appliedTickRef.current = applyTick
+        const last = lastBuildResultRef.current
+        if (activeId) postBuildResult(activeId, { ok: last.ok, errors: last.error ?? '' })
+      }
+      return
+    }
+    appliedTickRef.current = applyTick
 
     setWCStatus('syncing')
     syncFiles(currentVersion.files, { onLog: setWCLog })
-      .then(() => {
+      .then((res) => {
         syncedVersionRef.current = currentVersion.id
+        lastBuildResultRef.current = { ok: res.buildOk, error: res.buildError }
         setWCStatus('ready')
-        // 揭晓新代码后，让 iframe 重报当前红屏态：覆盖「本轮没改动、但仍红屏的文件」
-        // —— 它不会被 Vite 增量编译重新 transform、错误不会重进日志流，只能靠主动重报。
-        // HMR 重新编译有延迟，所以错开多拍重报。注意 recheck 读的是「当前」红屏态，
-        // 必须有一拍落在「Vite 编译完成之后」才能读到真实结果；线上慢机器一次编译可能
-        // 要七八秒，所以一直排到 ~10s，并和后端 get_browser_logs 的 12s 窗口对齐 ——
-        // 否则最后那拍报出的红屏会落在检测窗口外，造成「修了没修对却报正常」的漏报。
-        const win = iframeRef.current?.contentWindow
-        if (win) {
-          for (const delay of [800, 2000, 4000, 7000, 10000]) {
-            setTimeout(() => {
-              try {
-                win.postMessage({ type: 'vibuild-recheck' }, '*')
-              } catch {
-                // iframe 可能已卸载/跨域失效，忽略即可
-              }
-            }, delay)
-          }
+        // 无 HMR：构建成功就整页刷新 iframe 加载新 dist；失败【不】刷新，保留上一个
+        // 能跑的产物，并把错误显示到控制台「浏览器」面板（给人看）。
+        if (res.buildOk) {
+          reloadPreview()
+        } else if (res.buildError) {
+          pushWcLog({ level: 'error', text: res.buildError })
+        }
+        // check_build 揭晓请求 → 回报构建结果，唤醒后端等待的 check_build（成功也要报）。
+        if (isReveal && activeId) {
+          postBuildResult(activeId, { ok: res.buildOk, errors: res.buildError ?? '' })
         }
       })
       .catch((e) => {
-        setWCError(e instanceof Error ? e.message : String(e))
+        const msg = e instanceof Error ? e.message : String(e)
+        setWCError(msg)
         setWCStatus('error')
+        // 同步/构建本身抛异常（容器挂了等）也要回报，否则 check_build 同样会干等。
+        if (isReveal && activeId) postBuildResult(activeId, { ok: false, errors: msg })
       })
-  }, [activeId, currentVersion.id, currentVersion.files, applyTick, isStreaming, setWCStatus, setWCLog, setWCError])
+  }, [activeId, currentVersion.id, currentVersion.files, applyTick, isStreaming, setWCStatus, setWCLog, setWCError, reloadPreview, pushWcLog])
 
   // —— 浏览器 console 桥接：iframe → 父页面 ——
   // iframe 里注入的脚本会 postMessage({ type: 'vibuild-console', level, text })，
@@ -228,21 +235,6 @@ export default function PreviewPane() {
         return
       }
 
-      // —— Vite 编译错误红屏 overlay 状态上报 ——
-      // present=true：预览此刻正红屏（编译错误）。直接回传后端当「当前报错态」，
-      // 这样即便错误来自本轮没改动的文件（不会重新进 dev server 日志流），
-      // get_browser_logs 也能知道「预览还红着」，不再误判「运行正常」。
-      // present=false 不回传（避免把「没红屏」误当成一条 error 反噬自检）。
-      if (data.type === 'vibuild-vite-overlay') {
-        if (data.present) {
-          const text = `[vite] 预览编译错误（红屏）：${String(data.text ?? '').trim()}`
-          pushWcLog({ level: 'error', text })
-          const sid = activeIdRef.current
-          if (sid) pushLogs(sid, [{ level: 'error', text, ts: Date.now() }])
-        }
-        return
-      }
-
       if (data.type !== 'vibuild-console') return
       const level: LogLevel = ['log', 'info', 'warn', 'error'].includes(data.level) ? data.level : 'log'
       const text = String(data.text ?? '')
@@ -271,31 +263,6 @@ export default function PreviewPane() {
     }
   }, [pushWcLog])
 
-  // —— Node 进程（Vite）编译错误：订阅 → 控制台面板 + 回传后端 ——
-  // Vite 编译报错只走 node 输出、不走浏览器 console，所以走单独通道抓。
-  // 抓到后一边推进「浏览器」日志面板让用户看到，一边回传后端让 agent 的
-  // get_browser_logs 能看到「代码连编译都没过」这类最常见的错误。
-  useEffect(() => {
-    // 去重：Vite 对同一个坏文件每来一个请求就重打一遍相同的错，5s 内同文本
-    // 只处理一次，免得把后端那个 50 条上限的缓冲挤爆、真报错反被挤掉。
-    // 注意：去重状态放在 serverErrDedupeRef，会在每次「揭晓新代码到预览」时被
-    // 重置（见上面 syncFiles 的 effect）。所以这里只在【同一轮内】对相同错误去重，
-    // 【跨轮】的相同错误必定放行 —— 这是保证「修复后没修对」能被自检发现、不漏报的关键。
-    const unsub = subscribeServerErrors((text) => {
-      const now = Date.now()
-      const dedupe = serverErrDedupeRef.current
-      if (text === dedupe.text && now - dedupe.at < 5000) return
-      dedupe.text = text
-      dedupe.at = now
-      // 给人看：进控制台「浏览器」面板（和浏览器报错并列展示）
-      pushWcLog({ level: 'error', text })
-      // 给 agent 看：回传后端 log_store，get_browser_logs 就能读到
-      const sid = activeIdRef.current
-      if (sid) pushLogs(sid, [{ level: 'error', text, ts: now }])
-    })
-    return unsub
-  }, [pushWcLog])
-
   // —— 把导航指令（后退/前进/刷新）postMessage 进 iframe ——
   // 只有本组件持有 iframe 引用，所以 TabBar 的按钮通过 store 的 previewNavCmd
   // 计数器间接触发这里。seq=0 是初始值，跳过。
@@ -307,7 +274,8 @@ export default function PreviewPane() {
   }, [navCmd])
 
   // ready 时延迟 900ms 再显示 iframe，让进度条动画有时间跑到 100%
-  // syncing 是增量文件同步，iframe 保持可见，交给 vite HMR 处理，不触发 overlay
+  // syncing 是「同步文件 + 重新构建」阶段，iframe 暂保持可见（展示上一个产物），
+  // 构建成功后会整页刷新换上新 dist
   const [iframeVisible, setIframeVisible] = useState(false)
   useEffect(() => {
     if (wcStatus === 'ready' && wcUrl) {
@@ -370,6 +338,7 @@ const STATUS_PROGRESS: Record<string, number> = {
   booting:    8,
   mounting:   25,
   installing: 65,
+  building:   80,
   starting:   88,
   ready:      100,
 }
@@ -379,7 +348,8 @@ const STATUS_LABEL: Record<string, string> = {
   booting:    '正在启动运行环境…',
   mounting:   '正在写入项目文件…',
   installing: '正在准备依赖包…',
-  starting:   '正在启动开发服务…',
+  building:   '正在构建预览产物…',
+  starting:   '正在启动预览服务…',
   ready:      '即将完成…',
 }
 

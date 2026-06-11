@@ -103,7 +103,7 @@ export default function MessageBubble({ message, isStreaming = false, isLast = f
 // 工具调用进度卡：让用户看到 AI "正在做什么"
 // ============================================
 // 一行细窄卡片，避免抢眼。有参数或有执行结果就可点击展开，查看参数（如 write_file
-// 的文件内容）和工具结果（如 get_browser_logs 的报错、read_file 的内容）。
+// 的文件内容）和工具结果（如 check_build 的报错、read_file 的内容）。
 function ToolCallChip({ message }: { message: Message }) {
   const { icon, label } = describeToolCall(message.toolName, message.toolArgs)
   const args = message.toolArgs
@@ -265,8 +265,8 @@ function describeToolCall(
       return { icon: <FileText size={12} />, label: `读取 ${path}` }
     case 'list_files':
       return { icon: <FolderOpen size={12} />, label: '查看项目结构' }
-    case 'get_browser_logs':
-      return { icon: <Bug size={12} />, label: '检查预览报错' }
+    case 'check_build':
+      return { icon: <Bug size={12} />, label: '构建预览并检查报错' }
     default:
       return { icon: <Wrench size={12} />, label: `调用工具 ${name ?? ''}` }
   }

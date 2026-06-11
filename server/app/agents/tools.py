@@ -17,7 +17,7 @@ from langchain_core.tools import tool
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import log_store
+from app import build_store, log_store
 from app.models.file import File
 
 
@@ -39,7 +39,7 @@ def build_tools(db: AsyncSession, session_id: str) -> list:
             db.add(File(session_id=session_id, path=path, content=content))
         await db.commit()
         # 记下写入屏障：此刻之后浏览器产生的日志，才算这次写入引发的，
-        # 供 get_browser_logs 判断「这次改动有没有跑出错」。
+        # 供 check_build 判断「这次改动有没有跑出错」。
         log_store.mark_write(session_id)
         return f"已写入 {path}"
 
@@ -75,7 +75,7 @@ def build_tools(db: AsyncSession, session_id: str) -> list:
         # 双保险（前面已确认 count==1）。
         f.content = f.content.replace(old_string, new_string, 1)
         await db.commit()
-        # 和 write_file 一样打写入屏障，供 get_browser_logs 判断这次改动有没有跑出错
+        # 和 write_file 一样打写入屏障，供 check_build 判断这次改动有没有跑出错
         log_store.mark_write(session_id)
         return f"已编辑 {path}"
 
@@ -99,29 +99,40 @@ def build_tools(db: AsyncSession, session_id: str) -> list:
         return json.dumps(result.scalars().all(), ensure_ascii=False)
 
     @tool
-    async def get_browser_logs() -> str:
-        """检查预览运行后的报错。写完文件后必须调用它，确认代码在浏览器里能正常跑。
+    async def check_build() -> str:
+        """把刚写的改动应用到预览、构建一次，并返回构建/运行报错。
 
-        返回这次写入之后浏览器产生的 error / warning；没有就说明运行正常。
+        写完一组完整、能渲染的改动后调用它：前端会把暂存文件同步进容器、跑一次
+        `vite build`（也就是把这组改动「揭晓」给用户看），然后把构建结果回传回来。
+        没有报错就说明构建通过、能正常跑。
+
+        重要：write_file / edit_file 只是把文件「暂存」下来，并不会刷新预览 —— 这样
+        用户才不会看到「组件写好了、配套样式还没写」的半成品。所以一组改动写完后，
+        务必调一次 check_build 才会真正构建 + 揭晓，也才能拿到报错。
+
+        典型用法：write_file 写完所有相关文件 → check_build → 有报错就修、再 check_build。
         """
-        # 时序：写完文件后浏览器要经历「收到文件 → HMR → 重新编译 → 报错回传」，
-        # 需要一点时间。这里轮询等「写入屏障之后的新日志」出现，最多等约 12 秒。
-        #   - 错误早到了：第一轮就拿到，立即返回。
-        #   - 错误还没到：每 0.25s 查一次，等它出现。
-        #   - 代码没问题：前端不会推任何 error/warn，一直等到超时 → 返回「正常」。
-        # 为什么放到 12 秒（原先 6 秒太短，是「修了没修对却报正常」的漏报根因）：
-        # 线上 2c2g 机器上，改几个文件后 Vite 重新编译 + 红屏 overlay 出现 + 经 postMessage
-        # 回传后端，整条链路常常要 6~10 秒；窗口只有 6 秒时，红屏日志还没落库就超时返回
-        # 「正常」，AI 便以为修好了、实际预览仍红着。前端「揭晓后多拍 recheck」也排到了
-        # ~10 秒（见 PreviewPane），这里的窗口要够长才接得住最后那拍。
-        # 命中即返回，所以有报错时会很快返回；只有「真没报错」的情况才会等满窗口。
-        for _ in range(48):  # 48 × 0.25s = 12s
+        # 时序：本工具的 tool_call 一出现，agent_loop 就会先 build_store.arm() 架好会合点、
+        # 再推 preview_refresh 信号给前端（工具闭包里没法 yield 事件，所以放在 loop 里做，
+        # 见 app.agents.loop）。前端收到后同步文件 → vite build → 把「成没成」POST 回
+        # /build-result，那个端点调 build_store.report 立旗唤醒下面这个 wait。
+
+        # ① 等前端报回构建结果。前端多快 build 完、这里就多快返回，不再猜窗口。
+        #    timeout=90 只是「前端彻底失联（构建卡死/断线）」的兜底，正常情况远用不到。
+        result = await build_store.wait(session_id, timeout=90.0)
+        if result is None:
+            return "构建超时：预览迟迟没有回报结果，可能构建卡住或预览断开，请提示用户检查预览。"
+        if not result.get("ok"):
+            errors = str(result.get("errors") or "").strip() or "（无详细错误信息）"
+            return f"预览构建失败（编译没通过），请定位并修复：\n{errors}"
+
+        # ② 编译通过 ≠ 运行时没问题（如渲染时 undefined is not a function）。这类错误要等
+        #    iframe 重载、应用真跑起来后才由浏览器 console 桥回传、落进 log_store。所以编译过
+        #    之后再短暂扫一眼运行时报错：构建确定性的部分已拿到，这里只是尽力补一下运行时。
+        for _ in range(12):  # 12 × 0.25s = 3s，只在编译通过时才花这点时间
             logs = log_store.logs_since_write(session_id)
             if logs:
-                # 同一个编译错误往往被重复上报：dev server stdout 扫描、iframe 红屏
-                # overlay、以及「揭晓后多拍 recheck」都会各打一遍。这里按 (level, text)
-                # 去重再列出，避免相同报错刷很多行 —— 既省 AI 的阅读 token，也防止把
-                # 后端那 50 条上限的缓冲挤爆、把别的真报错挤掉。
+                # 同一条报错可能连着刷好几条，按 (level, text) 去重再列出。
                 seen: set[tuple[str, str]] = set()
                 uniq = []
                 for x in logs:
@@ -131,23 +142,8 @@ def build_tools(db: AsyncSession, session_id: str) -> list:
                     seen.add(key)
                     uniq.append(x)
                 lines = "\n".join(f"[{x.level}] {x.text}" for x in uniq)
-                return f"预览有以下报错/警告，请定位并修复：\n{lines}"
+                return f"构建通过，但预览运行时报错，请定位并修复：\n{lines}"
             await asyncio.sleep(0.25)
-        return "预览运行正常，没有报错。"
+        return "构建通过，预览正常，没有报错。"
 
-    @tool
-    async def update_preview() -> str:
-        """把刚写的文件应用到预览，让它在浏览器里真正跑起来。
-
-        重要：write_file 只是把文件「暂存」下来，并不会立刻刷新预览 —— 这样用户
-        才不会看到「组件写好了、配套样式还没写」的半成品。等你写完一组完整、能正常
-        渲染的改动后，调用本工具「揭晓」一次，预览才会更新。
-
-        典型用法：write_file 写完所有相关文件 → update_preview → get_browser_logs 查报错。
-        """
-        # 这个工具本身不碰数据库，它只是一个「现在可以刷新预览了」的信号。
-        # 真正的 SSE 推送在 agent_loop 里做（和 write_file 推 file_write 同理），
-        # 因为 yield 事件得在生成器函数里，工具闭包里没法 yield。
-        return "已请求刷新预览。"
-
-    return [write_file, edit_file, read_file, list_files, get_browser_logs, update_preview]
+    return [write_file, edit_file, read_file, list_files, check_build]

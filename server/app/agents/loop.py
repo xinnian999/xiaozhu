@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import build_store
 from app.agents.prompts import SYSTEM_PROMPT
 from app.agents.tools import build_tools
 from app.llm import build_llm
@@ -120,7 +121,7 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
         images: list[str] | None = None,
     ) -> DBMessage:
         # 返回刚存的 ORM 对象,方便调用方拿着它事后回填字段
-        #（如工具结果要等执行完才有,见下面 get_browser_logs 落库）。
+        #（如工具结果要等执行完才有,见下面 check_build 落库）。
         msg = DBMessage(
             session_id=req.session_id,
             role=role,
@@ -171,7 +172,7 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
     #   - tools 节点产出的 ToolMessage 带结果 / tool_call_id(没名字 / 参数)
     # 所以这里在 call_model 阶段先把 (名字, 参数, 消息对象) 按 id 记下,等 tools 阶段拿
     # tool_call_id 回查,才能还原出「这是哪个工具、参数是什么、结果如何」,
-    # 并把结果回填到那条工具消息上(见 get_browser_logs 落库)。
+    # 并把结果回填到那条工具消息上(见 check_build 落库)。
     pending: dict[str, tuple[str, dict, DBMessage]] = {}
 
     try:
@@ -226,6 +227,14 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
                             for tc in m.tool_calls:
                                 print(f"[tool_call] name={tc['name']} args={list(tc['args'].keys())}")
                                 yield sse({"type": "tool_call", "name": tc["name"], "args": tc["args"], "id": tc["id"]})
+                                # check_build 的 tool_call 一出现就推构建信号：让前端先开始
+                                # 同步文件 + vite build。这一步必须趁早（在下面 tools 节点真正
+                                # 执行 check_build 之前）—— 因为工具闭包里没法 yield 事件。
+                                if tc["name"] == "check_build":
+                                    # 先 arm 架好会合点、再发信号：保证前端 build 完 POST 回结果
+                                    # 时，build_store 里一定已有等它的 Event（先架接收器再触发）。
+                                    build_store.arm(req.session_id)
+                                    yield sse({"type": "preview_refresh"})
                                 tool_msg = await save_message(
                                     "assistant", "", kind="tool",
                                     tool_name=tc["name"], tool_args=tc["args"],
@@ -263,12 +272,13 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
                         yield sse({"type": "tool_result", "id": tm.tool_call_id, "result": capped})
 
                         # ── 各工具特有的副作用 ──
-                        # get_browser_logs:结果已落库 / 下发,这里只补一行后端日志便于实时观察
-                        if name == "get_browser_logs":
-                            print(f"[browser_logs] {tool_result}")
+                        # check_build:构建信号已在上面 tool_call 阶段推过(preview_refresh),
+                        # 结果也已落库 / 下发,这里只补一行后端日志便于实时观察。
+                        if name == "check_build":
+                            print(f"[check_build] {tool_result}")
 
                         # write_file 落库成功后,把整文件推给前端更新代码视图 / 文件树
-                        #（预览不会立刻同步,要等 AI 调 update_preview 才揭晓）
+                        #（预览不会立刻同步,要等 AI 调 check_build 才揭晓 + 构建）
                         elif name == "write_file":
                             wrote_files = True
                             yield sse({
@@ -294,10 +304,6 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
                                     "path": args["path"],
                                     "content": content,
                                 })
-                        # AI 觉得「这组改动可以渲染了」时调 update_preview,推刷新信号,
-                        # 前端收到才把暂存的文件同步进预览。
-                        elif name == "update_preview":
-                            yield sse({"type": "preview_refresh"})
 
             if truncated:
                 break

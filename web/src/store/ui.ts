@@ -12,7 +12,8 @@ export type WCStatus =
   | 'booting'     // 正在 boot WebContainer 实例
   | 'mounting'    // 正在写入文件树
   | 'installing'  // 正在 npm install
-  | 'starting'    // 正在 npm run dev 等就绪
+  | 'building'    // 正在 vite build 出 dist（build 预览模式）
+  | 'starting'    // 正在 npm run dev / vite preview 等就绪
   | 'ready'       // 已 ready，url 可用
   | 'syncing'     // 增量同步文件中（切版本时）
   | 'error'
@@ -67,9 +68,9 @@ type UIState = {
   previewReloadTick: number
   reloadPreview: () => void
 
-  /** 预览应用计数：自增即把当前暂存文件同步进运行中的预览（增量 syncFiles，走 vite HMR）。
-   *  与 reloadPreview 的区别：这个是「把新文件应用进去」（软更新），不重挂 iframe；
-   *  reloadPreview 是「整页重载」（硬刷新）。AI 调 update_preview / 流结束兜底时自增它。 */
+  /** 预览应用计数：自增即把当前暂存文件同步进容器并重新 vite build（见 PreviewPane）。
+   *  与 reloadPreview 的区别：这个触发「同步文件 + 重新构建」，构建成功后才由 PreviewPane
+   *  调 reloadPreview 整页重载换上新 dist。AI 调 check_build / 流结束兜底时自增它。 */
   previewApplyTick: number
   requestPreviewApply: () => void
 

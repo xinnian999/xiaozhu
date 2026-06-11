@@ -73,7 +73,7 @@ export type SSEEvent =
   | { type: 'message_delta'; text: string }
   | { type: 'file_write'; path: string; content: string }
   | { type: 'file_delete'; path: string }
-  // AI 调 update_preview 时推这个：把暂存的文件揭晓到运行中的预览（无 payload，纯信号）
+  // AI 调 check_build 时推这个：把暂存的文件揭晓到预览并触发重新构建（无 payload，纯信号）
   | { type: 'preview_refresh' }
   | { type: 'plan_update'; todos: unknown[] }
   // tool_call 带 id（后端的 tool_call_id），用于把随后到达的 tool_result 关联回这张卡
@@ -307,6 +307,23 @@ export async function pushLogs(sessionId: string, logs: PushLog[]): Promise<void
     })
   } catch {
     // 旁路数据，回传失败就算了，不打扰用户
+  }
+}
+
+// 回报一次 vite build 的结果给后端：唤醒正挂在 build_store 上等结果的 check_build 工具。
+// AI 每次调 check_build → 前端构建一次 → 必须回报一次（成功也要报），否则后端会干等到超时。
+export async function postBuildResult(
+  sessionId: string,
+  result: { ok: boolean; errors: string },
+): Promise<void> {
+  try {
+    await fetch(`/api/sessions/${sessionId}/build-result`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify(result),
+    })
+  } catch {
+    // 回报失败就算了：后端 check_build 有超时兜底，不会永久卡住
   }
 }
 

@@ -153,10 +153,13 @@ export default function PreviewPane() {
         setWCStatus('ready')
         // 揭晓新代码后，让 iframe 重报当前红屏态：覆盖「本轮没改动、但仍红屏的文件」
         // —— 它不会被 Vite 增量编译重新 transform、错误不会重进日志流，只能靠主动重报。
-        // HMR 重新编译有延迟，所以错开几拍，确保落在后端 get_browser_logs 的轮询窗口内。
+        // HMR 重新编译有延迟，所以错开多拍重报。注意 recheck 读的是「当前」红屏态，
+        // 必须有一拍落在「Vite 编译完成之后」才能读到真实结果；线上慢机器一次编译可能
+        // 要七八秒，所以一直排到 ~10s，并和后端 get_browser_logs 的 12s 窗口对齐 ——
+        // 否则最后那拍报出的红屏会落在检测窗口外，造成「修了没修对却报正常」的漏报。
         const win = iframeRef.current?.contentWindow
         if (win) {
-          for (const delay of [800, 2000, 4000]) {
+          for (const delay of [800, 2000, 4000, 7000, 10000]) {
             setTimeout(() => {
               try {
                 win.postMessage({ type: 'vibuild-recheck' }, '*')

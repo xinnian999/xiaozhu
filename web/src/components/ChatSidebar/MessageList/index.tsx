@@ -68,18 +68,27 @@ export default function MessageList({ onRetry }: Props) {
   }
 
   // 是否有可重试的内容：至少有一条用户消息（手动编辑只追加版本卡、不产生用户消息）。
-  // 「仅重试最新一轮」体现在按钮放对话最末尾，点它就是重跑最后一条用户消息。
   const hasUserMessage = messages.some((m) => m.role === 'user')
+  const canRetry = !isStreaming && !!onRetry && hasUserMessage
+  // 最终回复（最后一条文本）是不是 AI 的：是 → 把「重新生成」挂到它的时间行右侧（落在版本卡之前）；
+  // 不是（少见：截断 / 报错导致这轮没产出 AI 文本）→ 退回到对话末尾的独立按钮兜底。
+  const lastTextIsAssistant = lastTextIndex >= 0 && messages[lastTextIndex].role === 'assistant'
+  const inlineRetry = canRetry && lastTextIsAssistant
 
   return (
     <div className={styles.list}>
       {messages.map((msg, i) => (
-        <MessageBubble key={msg.id} message={msg} isLast={i === lastTextIndex} />
+        <MessageBubble
+          key={msg.id}
+          message={msg}
+          isLast={i === lastTextIndex}
+          // 只把回调给最终回复那条 AI 消息，它据此在时间同行渲染「重新生成」
+          onRetry={inlineRetry && i === lastTextIndex ? onRetry : undefined}
+        />
       ))}
 
-      {/* 重试：放在 AI 最终回复下方（对话末尾）。仅在空闲（非流式）且有可重试的
-          用户消息时出现；点击用「当前项目状态」重跑最后一轮，结尾追加一个新版本。 */}
-      {!isStreaming && onRetry && hasUserMessage && (
+      {/* 兜底：这轮没有 AI 最终回复可挂（截断 / 报错）时，仍在对话末尾给一个独立的重试按钮。 */}
+      {canRetry && !lastTextIsAssistant && (
         <button
           type="button"
           className={styles.retryBtn}

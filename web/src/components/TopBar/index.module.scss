@@ -53,7 +53,9 @@
 
     .brand {
       display: flex;
-      align-items: baseline;
+      // 方块标志与文字按垂直居中对齐 —— baseline 对齐方块（flex 盒）会让它浮在文字上方，
+      // 之前靠 translateY hack 硬补，换成 center 一劳永逸。
+      align-items: center;
       gap: $space-2;
       cursor: pointer;
       padding: $space-1 $space-2;
@@ -72,7 +74,6 @@
         font-size: $fs-11;
         font-weight: $fw-bold;
         border-radius: $radius-xs;
-        transform: translateY(2px);
         letter-spacing: -0.5px;
       }
 

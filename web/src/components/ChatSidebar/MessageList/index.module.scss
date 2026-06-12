@@ -12,6 +12,36 @@
   }
 }
 
+// 「重新生成」按钮：放在对话末尾、AI 回复下方。低调的幽灵按钮，
+// 左对齐贴合 AI 回复（AI 回复无气泡、左对齐）。
+.retryBtn {
+  @include button-reset;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: $space-1;
+  margin-bottom: $space-4;
+  padding: $space-1 $space-2;
+  border-radius: $radius-sm;
+  color: var(--color-text-mute);
+  font-size: $fs-12;
+  transition: color $dur-base $ease-out, background $dur-base $ease-out;
+
+  // 图标 hover 时轻轻逆时针转一下，呼应「重新生成」的语义
+  .retryIcon {
+    transition: transform $dur-base $ease-out;
+  }
+
+  &:hover {
+    color: var(--color-text);
+    background: var(--color-bg-hover);
+
+    .retryIcon {
+      transform: rotate(-45deg);
+    }
+  }
+}
+
 // 生成中的「正在思考中」：渐变光在文字上连续流动（shimmer）
 .thinking {
   margin-bottom: $space-4;

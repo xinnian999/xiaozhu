@@ -12,11 +12,12 @@
 import json
 from collections.abc import AsyncGenerator
 
+from fastapi import HTTPException
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import build_store
@@ -27,6 +28,8 @@ from app.models.file import File
 # 起别名 DBMessage 避免和 langchain_core.messages 概念混淆
 # （那边的 SystemMessage/HumanMessage 是 LLM 对话消息,这里的是数据库行）
 from app.models.message import Message as DBMessage
+from app.models.version import VersionFile
+from app.templates import load_template
 from app.versioning import snapshot_current_files
 
 
@@ -45,6 +48,12 @@ class ChatRequest(BaseModel):
     # 随本条消息附带的图片（多模态识图）。data URL 列表,缺省空列表 = 纯文本。
     # 「模型是否支持识图、张数 / 格式是否合法」的校验同样放路由层（见 chat 函数）。
     images: list[str] = []
+    # 重试标记。为 True 时:不新存用户消息,而是复用「最新一轮的用户消息」当 prompt
+    # 重新生成一遍,并把喂给 LLM 的历史截到那条消息为止 —— 丢掉它之后的旧回复,
+    # 让模型重新作答而不是接着自己已答的内容往下说。重生成和普通一轮一样,
+    # 结尾对「当前」文件态打一个新版本快照（单线递增、不删旧版本,所以是 v8 而不是改 v3）。
+    # 此时 message / images 由前端留空,真正的 prompt 从库里捞最后一条用户消息。
+    retry: bool = False
 
 
 # ── SSE 工具函数 ────────────────────────────────────────────────────────────────
@@ -99,14 +108,124 @@ RECURSION_LIMIT = 50
 TOOL_RESULT_CAP = 4000
 
 
+async def _prepare_retry(
+    req: ChatRequest, db: AsyncSession
+) -> tuple[DBMessage, list[dict]] | None:
+    """重试前的准备:把「最新一轮」当作从没发生过,让 AI 能真正重新生成。
+
+    为什么需要回退文件:重试若直接基于「当前文件」跑,AI 会看到需求其实已经实现了,
+    于是什么都不改、也不产新版本 —— 表现就是"重试没反应"。所以必须先把文件回退到
+    「这一轮开始前」的状态,AI 才会从头再写一遍。
+
+    具体做四件事:
+      1. 捞「最新一轮的用户消息」当本轮 prompt(回填到 req.message,供版本快照 summary 用);
+      2. 把文件回退到这一轮开始前的状态 —— 即它的版本卡之前最近一张版本卡对应的快照;
+         若它之前没有任何版本卡(这是第一轮),就回退到初始模板;
+      3. 删掉这条用户消息之后的所有对话消息(旧回复 / 工具卡 / 版本卡),让对话看起来像
+         把这条消息重新发了一遍。注意只删 messages,versions / version_files 快照一律不动,
+         所以生成过的版本全部保留、仍能在「版本历史」里回滚;
+      4. 算出「回退后该同步给前端的文件事件」并返回,调用方负责 yield 出去。
+
+    返回 (最新一轮的用户消息, 文件同步事件列表);若一条用户消息都没有则返回 None。
+    """
+    # 1. 最新一轮的用户消息
+    res = await db.execute(
+        select(DBMessage)
+        .where(
+            DBMessage.session_id == req.session_id,
+            DBMessage.role == "user",
+            DBMessage.kind == "text",
+        )
+        .order_by(DBMessage.id.desc())
+        .limit(1)
+    )
+    last_user = res.scalar_one_or_none()
+    if last_user is None:
+        return None
+    req.message = last_user.text
+
+    # 2a. 当前文件(= 旧的最后一轮结束后的状态),用来和回退目标做 diff,算出哪些要删
+    res = await db.execute(select(File).where(File.session_id == req.session_id))
+    old_contents = {f.path: f.content for f in res.scalars().all()}
+
+    # 2b. 找「这一轮开始前」的版本:版本卡在 last_user 之前的最后一张。
+    #     版本卡和版本快照一一对应(见 versioning.snapshot_current_files),
+    #     从卡的 tool_args 里取 version_id 就能定位到要回退的那份快照。
+    res = await db.execute(
+        select(DBMessage)
+        .where(
+            DBMessage.session_id == req.session_id,
+            DBMessage.kind == "version",
+            DBMessage.id < last_user.id,
+        )
+        .order_by(DBMessage.id.desc())
+        .limit(1)
+    )
+    prev_card = res.scalar_one_or_none()
+
+    # 2c. 算出回退目标的文件状态 pre_round（path -> content）
+    target_vid = prev_card.tool_args.get("version_id") if (prev_card and prev_card.tool_args) else None
+    if target_vid is not None:
+        res = await db.execute(
+            select(VersionFile).where(VersionFile.version_id == target_vid)
+        )
+        pre_round = {vf.path: vf.content for vf in res.scalars().all()}
+    else:
+        # 它之前没有任何版本 = 这是第一轮,回到初始模板（和新建会话时预置的一致）
+        pre_round = load_template("vite-react")
+
+    # 3a. 用 pre_round 整体覆盖 files 表（删旧建新,和 versions.restore_version 同款写法）
+    await db.execute(delete(File).where(File.session_id == req.session_id))
+    db.add_all([
+        File(session_id=req.session_id, path=path, content=content)
+        for path, content in pre_round.items()
+    ])
+
+    # 3b. 删掉 last_user 之后的所有对话消息（versions/version_files 不动）
+    await db.execute(
+        delete(DBMessage).where(
+            DBMessage.session_id == req.session_id,
+            DBMessage.id > last_user.id,
+        )
+    )
+    await db.commit()
+
+    # 4. 算出回退后要同步给前端的文件事件：旧有新无的删、内容变了的重发。
+    #    （这些事件由调用方在流里 yield；前端用现成的 file_write / file_delete 处理逻辑消费。）
+    file_sync_events: list[dict] = []
+    for path in old_contents:
+        if path not in pre_round:
+            file_sync_events.append({"type": "file_delete", "path": path})
+    for path, content in pre_round.items():
+        if old_contents.get(path) != content:
+            file_sync_events.append({"type": "file_write", "path": path, "content": content})
+
+    return last_user, file_sync_events
+
+
 async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, None]:
     """喂入历史 → 消费图的事件流 → 映射成 SSE + 落库副作用。"""
     # 每请求构造工具(闭包 db / session_id),llm 按本请求选的模型构造。
     # create_agent 内部会 bind_tools、注入 system_prompt,所以这里不用自己绑、
     # messages 也不必塞 SystemMessage —— 这是「每条消息可变模型」的落点。
-    llm = build_llm(req.model)
-    tools = build_tools(db, req.session_id)
-    agent = create_agent(llm, tools, system_prompt=SYSTEM_PROMPT)
+    #
+    # 这一步可能失败,最常见的是 build_llm 发现「模型所属分组没在 .env 配 api_key」抛
+    # HTTPException。关键在于:此处已经在 StreamingResponse 内部,HTTP 200 头早已发出 ——
+    # 再往外抛异常,前端只会看到 SSE 流凭空中断,既收不到 error 也收不到 done,UI 永远
+    # 卡在「思考中」。所以必须就地把异常翻译成 error + done 两帧,让前端正常收尾、把原因
+    # 展示出来。HTTPException 用它的 detail(给用户的中文说明),其它异常退回 str(e)。
+    try:
+        llm = build_llm(req.model)
+        tools = build_tools(db, req.session_id)
+        agent = create_agent(llm, tools, system_prompt=SYSTEM_PROMPT)
+    except HTTPException as e:
+        yield sse({"type": "error", "message": str(e.detail)})
+        yield sse({"type": "done"})
+        return
+    except Exception as e:
+        yield sse({"type": "error", "message": str(e)})
+        yield sse({"type": "done"})
+        return
 
     # 入库小助手:把一条消息写进 messages 表。闭包捕获 db / session_id,
     # 调用处只关心"存什么"。每存一条就 commit,保证自增 id 单调递增 ——
@@ -135,13 +254,30 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
         await db.commit()
         return msg
 
-    # 1. 先把用户消息（连同附带的图片）入库 —— 即便 LLM 调用失败,用户消息也已经
-    #    持久化,刷新后能看到自己发了什么、发了哪几张图。空列表存成 None,保持纯文本干净。
-    await save_message("user", req.message, images=req.images or None)
+    # 1. 准备本轮 prompt + 文件起点。分两条路:
+    #    - 普通发送:把用户消息（连同图片）入库 —— 即便 LLM 调用失败,用户消息也已经
+    #      持久化,刷新后能看到自己发了什么、发了哪几张图。空列表存成 None,保持纯文本干净。
+    #    - 重试:见下面 _prepare_retry 的详细说明。它负责"把这一轮当作从没发生过":
+    #      回退文件、删掉旧对话、并把回退后的文件状态同步给前端。
+    if req.retry:
+        prepared = await _prepare_retry(req, db)
+        if prepared is None:
+            # 一条用户消息都没有 —— 没什么可重试的,直接收尾
+            yield sse({"type": "error", "message": "没有可重试的消息"})
+            yield sse({"type": "done"})
+            return
+        # _prepare_retry 已回退好 files 表,并算好了「回退后该同步给前端的文件事件」:
+        # 旧有新无的删掉、内容变了的重发,让代码视图 / 文件树 / 预览底子也回到这一轮开始前。
+        _last_user, file_sync_events = prepared
+        for ev in file_sync_events:
+            yield sse(ev)
+    else:
+        await save_message("user", req.message, images=req.images or None)
 
     # 2. 加载历史对话作为图的初始 State。只取 kind='text'(user 输入 + assistant 说过
     #    的话),把 kind='tool' 的工具行过滤掉 —— 工具效果已体现在 files 表的现状里,
     #    把工具调用重放给 LLM 反而会让它以为还要再调一次。
+    #    重试时上面已把旧回复删掉,这里自然就只剩到被重试消息为止的历史。
     result = await db.execute(
         select(DBMessage)
         .where(DBMessage.session_id == req.session_id, DBMessage.kind == "text")

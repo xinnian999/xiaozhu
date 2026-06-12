@@ -325,6 +325,38 @@
 }
 
 // ============================================
+// 错误卡：AI 报错时插入，红色描边 + 淡红底，图标在左、说明文字在右
+// 颜色统一用 --color-danger 派生（color-mix 取淡），深浅主题自动适配
+// ============================================
+.errorCard {
+  display: flex;
+  align-items: flex-start;
+  gap: $space-2;
+  max-width: 100%;
+  margin-bottom: $space-3;
+  padding: $space-2 $space-3;
+  border: 1px solid color-mix(in srgb, var(--color-danger) 35%, transparent);
+  border-radius: $radius-sm;
+  background: color-mix(in srgb, var(--color-danger) 8%, transparent);
+  font-size: $fs-12;
+  line-height: $lh-snug;
+  color: var(--color-text-dim);
+  animation: tool-chip-in $dur-base $ease-out;
+
+  .errorCardIcon {
+    flex-shrink: 0;
+    margin-top: 1px; // 和首行文字基线对齐
+    color: var(--color-danger);
+  }
+
+  // 错误说明：可能较长（含模型名 / 分组名），允许换行、长串也能断开
+  .errorCardText {
+    word-break: break-word;
+    white-space: pre-wrap;
+  }
+}
+
+// ============================================
 // 版本卡：每产生新版本插入一张，左侧图标 + 文案，右侧回滚按钮
 // 用 accent 淡色底，比工具卡更"实"一点，提示这是可操作的节点
 // ============================================

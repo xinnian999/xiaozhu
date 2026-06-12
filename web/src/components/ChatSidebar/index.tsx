@@ -1,8 +1,8 @@
 import { useCallback, useRef, useState } from 'react'
 import { ArrowUp, Square, Mic, Image as ImageIcon, X, Plus } from 'lucide-react'
-import { useSessionStore, makeMessage, makeVersionCard } from '@/store/session'
+import { useSessionStore, makeMessage, makeVersionCard, makeErrorCard } from '@/store/session'
 import { useUIStore } from '@/store/ui'
-import { streamChat } from '@/lib/api'
+import { streamChat, type SSEEvent } from '@/lib/api'
 import { toast } from '@/lib/toast'
 import { useClickOutside } from '@/hooks/useClickOutside'
 import MessageList from './MessageList'
@@ -32,6 +32,7 @@ export default function ChatSidebar() {
   const activeId = useSessionStore((s) => s.activeId)
   const createNew = useSessionStore((s) => s.createNew)
   const appendMessage = useSessionStore((s) => s.appendMessage)
+  const truncateAfterLastUserMessage = useSessionStore((s) => s.truncateAfterLastUserMessage)
   const setToolResult = useSessionStore((s) => s.setToolResult)
   const setStreamingText = useSessionStore((s) => s.setStreamingText)
   const beginStreaming = useSessionStore((s) => s.beginStreaming)
@@ -136,6 +137,68 @@ export default function ChatSidebar() {
     setAttachments((prev) => prev.filter((_, i) => i !== idx))
   }
 
+  // 消费一条 SSE 流：把后端事件逐条映射到 store。发送 / 重试共用同一套处理逻辑，
+  // 避免两份几乎一样的事件分发代码各写一遍、日后改协议还得改两处。
+  const consumeStream = async (stream: AsyncGenerator<SSEEvent>) => {
+    // 逐 token 累积到本地变量，再统一冲刷给 store
+    let accumulated = ''
+    for await (const event of stream) {
+      if (event.type === 'message_delta') {
+        accumulated += event.text
+        setStreamingText(accumulated)
+      } else if (event.type === 'tool_call') {
+        // 工具调用前，先把本轮已累积的叙述（模型在调工具前说的话，
+        // 如「好的，我先看看结构」）固化成一条独立气泡，再插工具卡。
+        // 这样每一轮的话会和工具进度卡自然交错排列，而不是糊成一坨。
+        if (accumulated) {
+          commitStreaming()
+          accumulated = ''
+        }
+        // 工具调用 → 在对话流里插一条"进度卡"消息，让用户看到 AI 正在做什么。
+        // 带上 toolCallId，等会儿 tool_result 事件回来好按它把结果填进这张卡。
+        // 后端会把工具消息入库（含结果），刷新后由 fromApiMessage 还原。
+        appendMessage(makeMessage('assistant', '', {
+          kind: 'tool',
+          toolName: event.name,
+          toolArgs: event.args as Record<string, unknown>,
+          toolCallId: event.id,
+        }))
+      } else if (event.type === 'tool_result') {
+        // 工具执行完 → 按 id 找到对应工具卡，把结果填上（卡片展开即可查看）
+        setToolResult(event.id, event.result)
+      } else if (event.type === 'file_write') {
+        // LLM 写文件 —— 只更新本地 files 快照（代码视图/文件树实时跟着变）。
+        // 注意：流式途中 PreviewPane 不会自动构建，运行中的预览保持上一个稳定态，
+        // 等收到 preview_refresh 才揭晓 + 重新构建，避免闪半成品、也省掉多次全量构建。
+        applyFileWrite(event.path, event.content)
+      } else if (event.type === 'file_delete') {
+        applyFileDelete(event.path)
+      } else if (event.type === 'preview_refresh') {
+        // AI 调 check_build：这一组改动写完、可渲染了 —— 把暂存文件应用进预览并重新构建
+        requestPreviewApply()
+      } else if (event.type === 'version') {
+        // 产生了新版本：先把本轮已累积的叙述固化成消息（让最终回复气泡先落位），
+        // 再插一张版本卡，保证卡片排在回复之后
+        if (accumulated) {
+          commitStreaming()
+          accumulated = ''
+        }
+        appendMessage(makeVersionCard(event.version_id, event.seq))
+      } else if (event.type === 'error') {
+        // 先把本轮已累积的叙述固化成气泡（别丢了 AI 报错前说的话），
+        // 再在对话流里就地插一张错误卡 —— 比一闪而过的 toast 更醒目、可回看。
+        if (accumulated) {
+          commitStreaming()
+          accumulated = ''
+        }
+        appendMessage(makeErrorCard(event.message))
+        break
+      } else if (event.type === 'done') {
+        break
+      }
+    }
+  }
+
   const handleSend = async () => {
     // 有文字或有图都可发；流式中 / 建会话中不可发
     if ((!draft.trim() && attachments.length === 0) || isStreaming || creating) return
@@ -174,63 +237,38 @@ export default function ChatSidebar() {
     const controller = new AbortController()
     abortRef.current = controller
 
-    // 3. 流式消费 SSE，逐 token 累积到 streamingText
-    let accumulated = ''
+    // 3. 流式消费 SSE
     try {
-      for await (const event of streamChat(text, targetSessionId, selectedModel, controller.signal, images)) {
-        if (event.type === 'message_delta') {
-          accumulated += event.text
-          setStreamingText(accumulated)
-        } else if (event.type === 'tool_call') {
-          // 工具调用前，先把本轮已累积的叙述（模型在调工具前说的话，
-          // 如「好的，我先看看结构」）固化成一条独立气泡，再插工具卡。
-          // 这样每一轮的话会和工具进度卡自然交错排列，而不是糊成一坨。
-          if (accumulated) {
-            commitStreaming()
-            accumulated = ''
-          }
-          // 工具调用 → 在对话流里插一条"进度卡"消息，让用户看到 AI 正在做什么。
-          // 带上 toolCallId，等会儿 tool_result 事件回来好按它把结果填进这张卡。
-          // 后端会把工具消息入库（含结果），刷新后由 fromApiMessage 还原。
-          appendMessage(makeMessage('assistant', '', {
-            kind: 'tool',
-            toolName: event.name,
-            toolArgs: event.args as Record<string, unknown>,
-            toolCallId: event.id,
-          }))
-        } else if (event.type === 'tool_result') {
-          // 工具执行完 → 按 id 找到对应工具卡，把结果填上（卡片展开即可查看）
-          setToolResult(event.id, event.result)
-        } else if (event.type === 'file_write') {
-          // LLM 写文件 —— 只更新本地 files 快照（代码视图/文件树实时跟着变）。
-          // 注意：流式途中 PreviewPane 不会自动构建，运行中的预览保持上一个稳定态，
-          // 等收到 preview_refresh 才揭晓 + 重新构建，避免闪半成品、也省掉多次全量构建。
-          applyFileWrite(event.path, event.content)
-        } else if (event.type === 'file_delete') {
-          applyFileDelete(event.path)
-        } else if (event.type === 'preview_refresh') {
-          // AI 调 check_build：这一组改动写完、可渲染了 —— 把暂存文件应用进预览并重新构建
-          requestPreviewApply()
-        } else if (event.type === 'version') {
-          // 产生了新版本：先把本轮已累积的叙述固化成消息（让最终回复气泡先落位），
-          // 再插一张版本卡，保证卡片排在回复之后
-          if (accumulated) {
-            commitStreaming()
-            accumulated = ''
-          }
-          appendMessage(makeVersionCard(event.version_id, event.seq))
-        } else if (event.type === 'error') {
-          toast(`AI 错误：${event.message}`)
-          break
-        } else if (event.type === 'done') {
-          break
-        }
-      }
+      await consumeStream(streamChat(text, targetSessionId, selectedModel, controller.signal, images))
     } finally {
       // 4. 无论正常结束 / 出错 / 用户中断，都冲刷累积内容并退出流式态。
       //    退出流式态会让 PreviewPane 的构建 effect 重跑：若本轮有改动还没构建过
       //    （AI 没在最后调 check_build），它会兜底构建最终态 + 刷新预览，所以这里
       //    不必再手动刷——手动刷只会重载到旧 dist（没重新构建），没有意义。
+      abortRef.current = null
+      endStreaming()
+    }
+  }
+
+  // 重试最新一轮：用「当前项目状态」重新跑最后一条用户消息，结尾追加一个新版本
+  // （比如最后一轮生成的是 v3，期间手动改到了 v7，重试就在 v7 之上生成 v8，不动 v3）。
+  // 不新增用户气泡 —— prompt 由后端复用最后一条用户消息，旧回复 / 旧版本都保留。
+  const handleRetry = async () => {
+    if (!session || isStreaming || creating) return
+
+    // 先把最新一轮用户消息之后的旧内容从对话里截掉 —— 看起来像把这条消息重新发出去。
+    // 后端会同步删掉这些消息行（但保留版本快照），两边对「最后一条用户消息」的判定一致。
+    truncateAfterLastUserMessage()
+
+    // 进入流式态 + 建中断控制器，和发送完全一致，所以「停止」按钮一样能中断重试
+    beginStreaming()
+    const controller = new AbortController()
+    abortRef.current = controller
+
+    try {
+      // message 传空串、retry=true：真正的 prompt 由后端取最后一条用户消息
+      await consumeStream(streamChat('', session.id, selectedModel, controller.signal, [], true))
+    } finally {
       abortRef.current = null
       endStreaming()
     }
@@ -274,7 +312,7 @@ export default function ChatSidebar() {
         </button>
 
         <div className={styles.chatBody}>
-          {noSession ? <EmptyHero /> : <MessageList />}
+          {noSession ? <EmptyHero /> : <MessageList onRetry={handleRetry} />}
         </div>
 
         <footer className={styles.composer}>

@@ -67,6 +67,9 @@ type SessionState = {
   /** 回到"无激活会话"的空态首屏，不真正创建会话 */
   goToEmpty: () => void
   appendMessage: (msg: Message) => void
+  /** 重试前的截断：移除「最新一轮用户消息」之后的所有消息（旧回复 / 工具卡 / 版本卡），
+   *  让对话看起来像把这条消息重新发了一遍。版本快照在后端保留，可在「版本历史」回滚。 */
+  truncateAfterLastUserMessage: () => void
   /** 工具执行完，把结果填到对应工具卡（按 toolCallId 匹配当前会话里那条 tool 消息） */
   setToolResult: (toolCallId: string, result: string) => void
   setStreamingText: (text: string) => void
@@ -175,6 +178,13 @@ export function makeMessage(
  *  让对话时间线在每次产生新版本时插入一张带回滚按钮的卡片。 */
 export function makeVersionCard(versionId: number, seq: number): Message {
   return makeMessage('assistant', '', { kind: 'version', versionId, versionSeq: seq })
+}
+
+/** 构造一张「错误卡」消息（kind='error'）。AI 报错（如模型未配 api_key、超长截断、超轮）时，
+ *  在对话流里就地插一张红色提示卡，比一闪而过的 toast 更醒目、可回看。
+ *  纯前端临时消息，不入库 —— 刷新后消失（错误本就是一次性的，不必持久化）。 */
+export function makeErrorCard(message: string): Message {
+  return makeMessage('assistant', message, { kind: 'error' })
 }
 
 // EMPTY_VERSION 仅在没有激活 session 时返回，必须是常量 —— 否则 zustand selector
@@ -345,6 +355,27 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       sessions: s.sessions.map((sess) =>
         sess.id === id ? { ...sess, messages: [...sess.messages, msg] } : sess,
       ),
+    }))
+  },
+
+  truncateAfterLastUserMessage: () => {
+    const id = get().activeId
+    if (!id) return
+    set((s) => ({
+      sessions: s.sessions.map((sess) => {
+        if (sess.id !== id) return sess
+        // 从后往前找最后一条用户消息，截断到它（含）为止：它之后的旧回复 / 工具卡 /
+        // 版本卡都从对话里移除，看起来就像把这条消息重新发了出去。
+        let lastUserIdx = -1
+        for (let i = sess.messages.length - 1; i >= 0; i--) {
+          if (sess.messages[i].role === 'user') {
+            lastUserIdx = i
+            break
+          }
+        }
+        if (lastUserIdx === -1) return sess
+        return { ...sess, messages: sess.messages.slice(0, lastUserIdx + 1) }
+      }),
     }))
   },
 

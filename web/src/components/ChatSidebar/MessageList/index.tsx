@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { MessageSquare } from 'lucide-react'
+import { MessageSquare, RotateCcw } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
 import MessageBubble from '../MessageBubble'
 import styles from './index.module.scss'
@@ -8,10 +8,15 @@ import styles from './index.module.scss'
 // 否则在动画/布局还没稳的时候滚，会滚不到最底。留一点余量取 700ms。
 const INIT_SCROLL_DELAY = 700
 
+type Props = {
+  /** 重试最新一轮的回调（由 ChatSidebar 提供，内部走流式重生成） */
+  onRetry?: () => void
+}
+
 // ============================================
 // 对话列表：渲染当前会话消息 + 流式输出中的 AI 消息
 // ============================================
-export default function MessageList() {
+export default function MessageList({ onRetry }: Props) {
   const session = useSessionStore((s) => s.activeSession())
   const endRef = useRef<HTMLDivElement>(null)
   // 记录已经为哪个会话做过「首次定位到底部」。首次（刷新 / 切会话）延时滚，
@@ -62,11 +67,29 @@ export default function MessageList() {
     }
   }
 
+  // 是否有可重试的内容：至少有一条用户消息（手动编辑只追加版本卡、不产生用户消息）。
+  // 「仅重试最新一轮」体现在按钮放对话最末尾，点它就是重跑最后一条用户消息。
+  const hasUserMessage = messages.some((m) => m.role === 'user')
+
   return (
     <div className={styles.list}>
       {messages.map((msg, i) => (
         <MessageBubble key={msg.id} message={msg} isLast={i === lastTextIndex} />
       ))}
+
+      {/* 重试：放在 AI 最终回复下方（对话末尾）。仅在空闲（非流式）且有可重试的
+          用户消息时出现；点击用「当前项目状态」重跑最后一轮，结尾追加一个新版本。 */}
+      {!isStreaming && onRetry && hasUserMessage && (
+        <button
+          type="button"
+          className={styles.retryBtn}
+          onClick={onRetry}
+          title="用当前项目状态重新生成这一轮（会追加一个新版本）"
+        >
+          <RotateCcw size={13} className={styles.retryIcon} />
+          <span>重新生成</span>
+        </button>
+      )}
 
       {/* 生成中：不再逐字显示打字，改成带扫光动画的「正在思考中」 */}
       {isStreaming && (

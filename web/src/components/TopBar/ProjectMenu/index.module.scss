@@ -77,6 +77,7 @@
 
     // 普通行：左侧选择区(itemSelect) + 右侧操作按钮(actionBtn)，整行作 flex 容器
     .item {
+      position: relative; // 给激活态左侧高亮条 ::before 定位
       display: flex;
       align-items: center;
       width: 100%;
@@ -87,8 +88,31 @@
         background: var(--color-bg-hover);
       }
 
+      // 激活态：洋红强调 —— 左侧高亮条 + 淡洋红底 + 标题变强调色，明显区分当前项目
       &.itemActive {
-        background: var(--color-bg-soft);
+        background: var(--color-accent-fade);
+
+        // 左侧竖向高亮条，标识当前选中项
+        &::before {
+          content: '';
+          position: absolute;
+          left: 0;
+          top: 50%;
+          transform: translateY(-50%);
+          width: 3px;
+          height: 18px;
+          border-radius: 0 $radius-sm $radius-sm 0;
+          background: var(--color-accent);
+        }
+
+        .itemName {
+          color: var(--color-accent);
+        }
+
+        // 激活项 hover 时加深洋红底，不被普通 hover 的灰底覆盖
+        &:hover {
+          background: var(--color-accent-glow);
+        }
       }
 
       // 鼠标移到整行时才显出操作按钮，平时隐藏保持清爽（触摸设备在底部响应式里常显）

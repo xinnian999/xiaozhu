@@ -25,9 +25,10 @@ export type Message = {
   id: string
   role: 'user' | 'assistant'
   text: string
-  /** 消息种类：'text' 正常对话气泡，'tool' 工具调用进度卡，'version' 版本卡（带回滚按钮）。
+  /** 消息种类：'text' 正常对话气泡，'tool' 工具调用进度卡，'version' 版本卡（带回滚按钮），
+   *  'error' 错误卡（AI 报错时在对话流里就地展示，text 存错误说明）。
    *  缺省视为 'text'，保持向后兼容。 */
-  kind?: 'text' | 'tool' | 'version'
+  kind?: 'text' | 'tool' | 'version' | 'error'
   /** kind === 'tool' 时使用：工具名（如 write_file / read_file / list_files） */
   toolName?: string
   /** kind === 'tool' 时使用：工具参数的摘要（如 { path: 'src/App.tsx' }） */

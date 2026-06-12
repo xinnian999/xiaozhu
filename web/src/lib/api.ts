@@ -320,6 +320,9 @@ export async function* streamChat(
   model: string | null,
   signal?: AbortSignal,
   images: string[] = [],
+  // 重试：为 true 时把 retry 标记一起发给后端。后端会忽略 message / images，
+  // 改用「最新一轮的用户消息」重新生成，结尾追加一个新版本（详见后端 ChatRequest.retry）。
+  retry = false,
 ): AsyncGenerator<SSEEvent> {
   // 用户主动中断时 fetch / reader 会抛 AbortError，这里统一识别后静默收尾，不弹错误
   const isAbort = (e: unknown) =>
@@ -337,6 +340,7 @@ export async function* streamChat(
         session_id: sessionId,
         ...(model ? { model } : {}),
         ...(images.length ? { images } : {}),
+        ...(retry ? { retry: true } : {}),
       }),
       signal,
     })

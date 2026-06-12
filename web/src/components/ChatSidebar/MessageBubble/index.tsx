@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { FileText, FilePlus, FilePen, FolderOpen, Wrench, Bug, ChevronRight, GitCommit, RotateCcw, Loader2, Check } from 'lucide-react'
+import { FileText, FilePlus, FilePen, FolderOpen, Wrench, Bug, ChevronRight, GitCommit, RotateCcw, Loader2, Check, AlertCircle } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { formatClock } from '@/lib/format'
@@ -32,6 +32,9 @@ export default function MessageBubble({ message, isStreaming = false, isLast = f
   }
   if (message.kind === 'version') {
     return <VersionCard message={message} />
+  }
+  if (message.kind === 'error') {
+    return <ErrorCard message={message} />
   }
 
   const isUser = message.role === 'user'
@@ -164,6 +167,20 @@ function ToolCallChip({ message }: { message: Message }) {
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+// ============================================
+// 错误卡：AI 报错时在对话流里就地提示
+// ============================================
+// 红色描边的一条提示，图标 + 错误说明（后端 error 事件的 message，如「未配置 api_key」）。
+// 比 toast 醒目且可回看，让用户一眼知道这轮为什么没结果。
+function ErrorCard({ message }: { message: Message }) {
+  return (
+    <div className={styles.errorCard} role="alert">
+      <AlertCircle size={14} className={styles.errorCardIcon} aria-hidden />
+      <span className={styles.errorCardText}>{message.text}</span>
     </div>
   )
 }

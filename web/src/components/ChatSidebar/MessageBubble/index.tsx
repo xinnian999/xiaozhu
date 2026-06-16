@@ -130,18 +130,24 @@ function ToolCallChip({ message }: { message: Message }) {
   const result = message.toolResult
   const hasArgs = !!args && Object.keys(args).length > 0
   const hasResult = !!result && result.length > 0
-  // 有参数或有结果都可展开；都没有（如刚发起、结果还没回来）则纯展示
-  const expandable = hasArgs || hasResult
+  // 「运行中 / 已完成」两态以「有没有工具结果」区分：结果还没回来 = 工具还在跑。
+  // 文案不分状态（保持原样），运行 / 完成只靠右侧图标区分即可。
+  const running = !hasResult
+  // 运行中不让展开（参数还没补全、也没结果可看）；跑完拿到结果后才可展开看参数 + 结果。
+  const expandable = hasResult
   const [expanded, setExpanded] = useState(false)
 
-  // 头部内容（图标 + 文案 + 可展开时的箭头）两种渲染路径共用
+  // 头部内容（图标 + 文案 + 右侧状态图标）两种渲染路径共用。
+  // 右侧：运行中是转圈的 loading 动画，完成后变成可点开的箭头。
   const inner = (
     <>
       <span className={styles.toolChipIcon} aria-hidden>
         {icon}
       </span>
       <span className={styles.toolChipLabel}>{label}</span>
-      {expandable && (
+      {running ? (
+        <Loader2 size={12} className={styles.toolChipSpinner} aria-hidden />
+      ) : (
         <ChevronRight
           size={12}
           className={`${styles.toolChipChevron} ${expanded ? styles.toolChipChevronOpen : ''}`}

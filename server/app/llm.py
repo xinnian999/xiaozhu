@@ -110,4 +110,10 @@ def build_llm(model: str) -> ChatOpenAI:
         # 一次 write_file 要塞下整个文件内容，4096 太小，写稍大的页面就会被截断
         # （finish_reason=length），导致工具参数残缺、本轮空转。先给到 16384。
         max_tokens=16384,
+        # ★全局写死关闭「思考 / 推理」。原因：qwen3.6-plus 这类模型默认开推理，agent 每一步
+        # （连「我先看下项目结构」都算）都会先默默烧几百个 reasoning_token 才出字，逐轮累加
+        # 拖慢整个生成；而本中转又只回推理的 token 计数、不返回思维链文本，开着既慢又看不到
+        # 过程，得不偿失。enable_thinking 是 qwen 系的思考开关，经 extra_body 透传给中转；
+        # 不认识它的模型（如 gpt 分组）会忽略，无副作用，所以这里对所有模型统一关掉。
+        extra_body={"enable_thinking": False},
     )

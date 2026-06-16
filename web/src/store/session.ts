@@ -72,6 +72,10 @@ type SessionState = {
   truncateAfterLastUserMessage: () => void
   /** 工具执行完，把结果填到对应工具卡（按 toolCallId 匹配当前会话里那条 tool 消息） */
   setToolResult: (toolCallId: string, result: string) => void
+  /** 工具卡「有则更新、无则新建」：流式阶段先用 {path} 提前建卡，工具调用整段生成完后
+   *  再用完整参数（含 write_file 的 content）按 toolCallId 补全同一张卡，展开即可看到全部参数。
+   *  无 path、没提前发的工具（list_files / check_build）则由完整参数这一发直接新建。 */
+  upsertToolCall: (toolCallId: string, name: string, args: Record<string, unknown>) => void
   setStreamingText: (text: string) => void
   /** 开始一轮流式：立刻把 isStreaming 置 true（不等首个 token），让发送按钮即时变成"停止" */
   beginStreaming: () => void
@@ -391,6 +395,43 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           messages: sess.messages.map((m) =>
             m.kind === 'tool' && m.toolCallId === toolCallId ? { ...m, toolResult: result } : m,
           ),
+        }
+      }),
+    }))
+  },
+
+  upsertToolCall: (toolCallId, name, args) => {
+    const id = get().activeId
+    if (!id) return
+    set((s) => ({
+      sessions: s.sessions.map((sess) => {
+        if (sess.id !== id) return sess
+        const exists = sess.messages.some(
+          (m) => m.kind === 'tool' && m.toolCallId === toolCallId,
+        )
+        if (exists) {
+          // 已有这张卡（流式阶段提前建的）→ 只更新工具名 / 参数，保留它的位置和已填的结果
+          return {
+            ...sess,
+            messages: sess.messages.map((m) =>
+              m.kind === 'tool' && m.toolCallId === toolCallId
+                ? { ...m, toolName: name, toolArgs: args }
+                : m,
+            ),
+          }
+        }
+        // 没有 → 新建一张追加到末尾
+        return {
+          ...sess,
+          messages: [
+            ...sess.messages,
+            makeMessage('assistant', '', {
+              kind: 'tool',
+              toolName: name,
+              toolArgs: args,
+              toolCallId,
+            }),
+          ],
         }
       }),
     }))

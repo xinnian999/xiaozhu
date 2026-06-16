@@ -10,6 +10,7 @@
 """
 
 import json
+import re
 from collections.abc import AsyncGenerator
 
 from fastapi import HTTPException
@@ -106,6 +107,13 @@ RECURSION_LIMIT = 50
 # 工具结果落库 / 下发前的截断上限。多数工具结果很短（"已写入 X"、报错列表），
 # 但 read_file 会返回整文件，可能上万字 —— 截断防止把消息行和 SSE 帧撑爆。
 TOOL_RESULT_CAP = 4000
+
+# 从（可能还没写完的）工具参数 JSON 片段里抠出 path 值。
+# 用途：write_file 的整个文件内容是作为 content 参数被逐 token 生成的，要等它全写完
+# 工具调用才"完整"、卡片才发得出 —— 这就是"写完才看到卡片、还得等好久"的根源。
+# path 排在参数 JSON 最前面，几个 token 就到，所以一旦正则匹配上 path，就能在内容还没
+# 写完时把工具卡提前亮出来。((?:[^"\\]|\\.)*) 容忍路径里可能出现的转义字符。
+_PATH_RE = re.compile(r'"path"\s*:\s*"((?:[^"\\]|\\.)*)"')
 
 
 async def _prepare_retry(
@@ -311,6 +319,14 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
     # 并把结果回填到那条工具消息上(见 check_build 落库)。
     pending: dict[str, tuple[str, dict, DBMessage]] = {}
 
+    # ── 工具卡「流式提前亮」用的累积状态 ──
+    # 目的：在 messages 模式里盯 tool_call_chunks（参数碎片逐 token 流过来），一旦解析出 path
+    # 就提前 yield 一张工具卡，不必等整段 content 写完。下面四个量配合完成"碎片→提前卡片"：
+    announced_tools: set[str] = set()      # 已提前发过卡片的 tool_call id —— updates 阶段据此不再重发，避免双卡
+    tool_chunk_args: dict[str, str] = {}   # tool_call id -> 已累积的参数 JSON 片段（用来匹配 path）
+    tool_chunk_idx: dict[int, str] = {}    # 流式碎片的 index -> tool_call id（续传碎片不带 id，只能靠 index 关联）
+    tool_chunk_name: dict[str, str] = {}   # tool_call id -> 工具名（只有每个调用的第一个碎片带名字，先记下备用）
+
     try:
         # 同时开 updates(节点边界,做副作用)+ messages(token 流,做打字效果)。
         async for mode, chunk in agent.astream(
@@ -328,6 +344,39 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
                     delta = extract_text(msg)
                     if delta:
                         yield sse({"type": "message_delta", "text": delta})
+
+                    # 工具调用的参数也是逐 token 流过来的（tool_call_chunks）：每个调用的第一个
+                    # 碎片带 name+id，后续"续传碎片"只有一段 args 文本、不带 id —— 只能靠 index
+                    # 关联回同一个调用。我们边收边把参数拼起来，一旦能从中抠出完整的 path，就立刻
+                    # 把工具卡发出去（早于整段 content 写完），卡片就能"秒出"而不是等文件写完。
+                    for tcc in getattr(msg, "tool_call_chunks", None) or []:
+                        idx = tcc.get("index") or 0
+                        cid = tcc.get("id")
+                        if cid:
+                            # 第一个碎片：登记 id / 名字，并以本段 args 作为累积起点
+                            tool_chunk_idx[idx] = cid
+                            tool_chunk_args[cid] = tcc.get("args") or ""
+                            tool_chunk_name[cid] = tcc.get("name") or ""
+                        else:
+                            # 续传碎片：按 index 找回它属于哪个调用，接着往后拼参数
+                            cid = tool_chunk_idx.get(idx)
+                            if cid is not None:
+                                tool_chunk_args[cid] += tcc.get("args") or ""
+                        # 还没发过卡 + 已能解析出 path → 提前发一张。只带 path：content 既没写完、
+                        # 前端工具卡也本就不展示文件内容，没必要等也没必要发。无 path 的工具
+                        #（list_files / check_build）这里匹配不到，留给下面 updates 阶段兜底补发。
+                        if cid and cid not in announced_tools:
+                            mt = _PATH_RE.search(tool_chunk_args.get(cid, ""))
+                            if mt:
+                                announced_tools.add(cid)
+                                name = tool_chunk_name.get(cid, "")
+                                print(f"[tool_call·流式提前] name={name} path={mt.group(1)}")
+                                yield sse({
+                                    "type": "tool_call",
+                                    "name": name,
+                                    "args": {"path": mt.group(1)},
+                                    "id": cid,
+                                })
                 continue
 
             # ── updates 模式:chunk = {节点名: 该节点 return 的 update} ──
@@ -362,6 +411,10 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
                             # 推进度提示 + 工具行入库 + 记下 (名字, 参数) 待回查
                             for tc in m.tool_calls:
                                 print(f"[tool_call] name={tc['name']} args={list(tc['args'].keys())}")
+                                # 这里总是再发一次「完整参数」的 tool_call。前端 tool_call 是按 id 幂等的
+                                # （upsertToolCall）：流式阶段提前发的卡只带 path，到这一步用完整参数（含
+                                # write_file 的 content）把同一张卡补全，展开就能看到全部参数。没提前发过的
+                                #（无 path 的 list_files / check_build）则由这一发直接新建卡。
                                 yield sse({"type": "tool_call", "name": tc["name"], "args": tc["args"], "id": tc["id"]})
                                 # check_build 的 tool_call 一出现就推构建信号：让前端先开始
                                 # 同步文件 + vite build。这一步必须趁早（在下面 tools 节点真正

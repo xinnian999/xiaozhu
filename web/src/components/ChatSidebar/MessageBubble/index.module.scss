@@ -317,6 +317,14 @@
     transform: rotate(90deg);
   }
 
+  // 运行中的 loading 图标：占位同箭头（靠右），持续旋转
+  .toolChipSpinner {
+    flex-shrink: 0;
+    margin-left: auto;
+    color: var(--color-text-faint);
+    animation: version-spin 0.8s linear infinite;
+  }
+
   // 参数面板：可滚动，文件内容再长也不会撑爆布局
   // 展开区：放「参数」「结果」两段，顶部用虚线和头部分隔
   .toolChipDetail {

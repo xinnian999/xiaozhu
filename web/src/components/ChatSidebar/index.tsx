@@ -34,6 +34,7 @@ export default function ChatSidebar() {
   const appendMessage = useSessionStore((s) => s.appendMessage)
   const truncateAfterLastUserMessage = useSessionStore((s) => s.truncateAfterLastUserMessage)
   const setToolResult = useSessionStore((s) => s.setToolResult)
+  const upsertToolCall = useSessionStore((s) => s.upsertToolCall)
   const setStreamingText = useSessionStore((s) => s.setStreamingText)
   const beginStreaming = useSessionStore((s) => s.beginStreaming)
   const commitStreaming = useSessionStore((s) => s.commitStreaming)
@@ -155,14 +156,11 @@ export default function ChatSidebar() {
           accumulated = ''
         }
         // 工具调用 → 在对话流里插一条"进度卡"消息，让用户看到 AI 正在做什么。
-        // 带上 toolCallId，等会儿 tool_result 事件回来好按它把结果填进这张卡。
-        // 后端会把工具消息入库（含结果），刷新后由 fromApiMessage 还原。
-        appendMessage(makeMessage('assistant', '', {
-          kind: 'tool',
-          toolName: event.name,
-          toolArgs: event.args as Record<string, unknown>,
-          toolCallId: event.id,
-        }))
+        // 用 upsertToolCall 按 toolCallId 幂等处理：后端会发两次同 id 的 tool_call ——
+        // 流式阶段先发一张只带 path 的（卡片秒出），整段参数生成完后再发一张带完整参数的
+        //（含 write_file 的 content）。第一次新建卡、第二次补全同一张卡，展开就能看到全部参数。
+        // 后端也会把工具消息入库（含完整参数 + 结果），刷新后由 fromApiMessage 还原。
+        upsertToolCall(event.id, event.name, event.args as Record<string, unknown>)
       } else if (event.type === 'tool_result') {
         // 工具执行完 → 按 id 找到对应工具卡，把结果填上（卡片展开即可查看）
         setToolResult(event.id, event.result)

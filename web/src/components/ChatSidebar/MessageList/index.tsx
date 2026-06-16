@@ -75,6 +75,11 @@ export default function MessageList({ onRetry }: Props) {
   const lastTextIsAssistant = lastTextIndex >= 0 && messages[lastTextIndex].role === 'assistant'
   const inlineRetry = canRetry && lastTextIsAssistant
 
+  // 对话末尾是不是一张「运行中」的工具卡（kind=tool 且还没拿到结果）。
+  // 是的话，那张卡自带 loading 转圈，底部就不必再显示「正在生成」，避免双 loading。
+  const tail = messages[messages.length - 1]
+  const tailToolRunning = tail?.kind === 'tool' && !tail.toolResult
+
   return (
     <div className={styles.list}>
       {messages.map((msg, i) => (
@@ -100,10 +105,12 @@ export default function MessageList({ onRetry }: Props) {
         </button>
       )}
 
-      {/* 生成中：不再逐字显示打字，改成带扫光动画的「正在思考中」 */}
-      {isStreaming && (
+      {/* 生成中：不再逐字显示打字，改成带扫光动画的「正在生成」。
+          但当对话末尾正好是一张运行中的工具卡（自带 loading 转圈）时就不再显示，
+          免得底部又冒一个 loading、和工具卡的转圈重复。空窗期 / 纯对话轮仍然显示。 */}
+      {isStreaming && !tailToolRunning && (
         <div className={styles.thinking} aria-live="polite">
-          正在思考中
+          正在生成
         </div>
       )}
 

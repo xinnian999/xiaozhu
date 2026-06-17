@@ -26,6 +26,15 @@ def price_of(tier: str) -> str | None:
     return TIER_PRICE.get(tier)
 
 
+# 档位高低排序：只能升级（买更高档），不能降级 / 重复买当前档。
+TIER_RANK: dict[str, int] = {"free": 0, "pro": 1, "max": 2}
+
+
+def tier_rank(tier: str) -> int:
+    """档位等级，未知档当 0（free）。用于「只能升级」校验。"""
+    return TIER_RANK.get(tier, 0)
+
+
 def effective_tier(user, now: datetime) -> str:
     """用户「当前实际生效」的档位（考虑月卡到期）。
 

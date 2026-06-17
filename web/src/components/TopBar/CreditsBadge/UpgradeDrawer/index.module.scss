@@ -156,8 +156,8 @@
         }
       }
 
-      // free 档不可购买，按钮位置放一行说明文字
-      .planFree {
+      // 不可点击的档位（当前套餐 / 不可降级）：按钮位置放一行说明文字
+      .planNote {
         padding: $space-2;
         text-align: center;
         color: var(--color-text-mute);
@@ -185,21 +185,24 @@
       }
     }
 
-    // 二维码白底框：二维码本身需要白底才好扫，深色主题下也强制白底
-    .qrBox {
-      display: flex;
+    // 前往支付：主色按钮（其实是个新开标签的链接）
+    .payLink {
+      display: inline-flex;
       align-items: center;
       justify-content: center;
-      width: 240px;
-      height: 240px;
+      gap: $space-2;
+      width: 100%;
       padding: $space-3;
-      border-radius: $radius-lg;
-      background: #fff;
-      border: 1px solid var(--color-border);
+      border-radius: $radius-md;
+      background: var(--color-accent);
+      color: #fff;
+      font-size: $fs-14;
+      font-weight: $fw-medium;
+      text-decoration: none;
+      transition: opacity $dur-base $ease-out;
 
-      .qrImg {
-        width: 100%;
-        height: 100%;
+      &:hover {
+        opacity: 0.9;
       }
     }
 

@@ -15,3 +15,11 @@ export const TIER_BLURB: Record<string, string> = {
   pro: '更高每日额度，适合频繁创作',
   max: '最高额度，重度使用无忧',
 }
+
+// 档位高低排序：只能升级（买更高档），不能降级 / 重复买当前档。
+export const TIER_RANK: Record<string, number> = {
+  free: 0,
+  pro: 1,
+  max: 2,
+}
+export const tierRank = (tier: string) => TIER_RANK[tier] ?? 0

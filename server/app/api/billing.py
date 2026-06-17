@@ -21,7 +21,14 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.alipay import build_alipay
-from app.billing import TIER_DAILY, daily_allowance, effective_tier, price_of, used_today
+from app.billing import (
+    TIER_DAILY,
+    daily_allowance,
+    effective_tier,
+    price_of,
+    tier_rank,
+    used_today,
+)
 from app.db import AsyncSessionLocal, get_db
 from app.deps import get_current_user
 from app.models.order import Order
@@ -119,7 +126,7 @@ class CreateOrderResponse(BaseModel):
     order_id: str  # 我们的订单号（= 支付宝 out_trade_no），前端拿它去轮询状态
     tier: str
     amount: str    # 金额（元）
-    qr_code: str   # 支付宝返回的二维码内容，前端渲染成二维码让用户扫
+    pay_url: str   # 支付宝收银台链接，前端新开标签页让用户登录付款
 
 
 @router.post("/orders", response_model=CreateOrderResponse)
@@ -128,44 +135,48 @@ async def create_order(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> CreateOrderResponse:
-    """创建一笔升级订单并向支付宝下单，返回二维码。
+    """创建一笔升级订单，返回「电脑网站支付」的收银台链接。
 
-    顺序很关键：**先调支付宝拿到二维码、成功了才把订单落库**。这样下单失败就不会在库里
-    留一堆永远 pending 的脏订单。订单号用我们自己生成的 UUID，同时充当支付宝的 out_trade_no
-    （幂等键）。
+    用的是支付宝「电脑网站支付」(alipay.trade.page.pay)：前端新开标签页跳到收银台，
+    用户登录后付款 —— 不扫码、不依赖钱包 App，沙箱里最稳。注意 page_pay 是**本地签名生成
+    链接、不发网络请求**（真正的交易在用户打开链接、进入收银台时才由支付宝创建），所以这里
+    不会有「支付宝业务报错」，只可能因配置/签名问题抛异常。订单号用我们自己的 UUID，
+    同时充当 out_trade_no（幂等键）。
     """
     price = price_of(body.tier)
     if price is None:
         raise HTTPException(status_code=400, detail=f"不可购买的档位：{body.tier}")
 
-    # 自己生成订单号（在调支付宝前就要有，作 out_trade_no）
+    # 只能升级：目标档位必须比「当前生效档位」高（过期会按 free 算）。
+    # 前端已置灰，但后端是安全边界，挡住「直接打接口降级 / 买当前档」。
+    if tier_rank(body.tier) <= tier_rank(effective_tier(current_user, datetime.now())):
+        raise HTTPException(status_code=400, detail="只能升级到更高档位")
+
+    # 自己生成订单号（作 out_trade_no）
     order_id = str(uuid.uuid4())
 
     # build_alipay 未配置会抛 HTTPException(500)，直接透传给前端
     alipay = build_alipay()
-    # SDK 是同步阻塞（urllib），丢到线程池里跑，避免堵住 async 事件循环
     try:
-        result = await run_in_threadpool(
-            alipay.api_alipay_trade_precreate,
+        # 返回的是「已签名的查询串」，拼到网关后面就是完整收银台链接
+        order_string = alipay.api_alipay_trade_page_pay(
             out_trade_no=order_id,
             total_amount=price,
             subject=f"Vibuild 订阅升级 - {body.tier}",
+            return_url=None,  # 付完跳回页（可选）；我们靠轮询确认到账，不强依赖
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"调用支付宝失败：{e}") from e
+        raise HTTPException(status_code=502, detail=f"生成支付链接失败：{e}") from e
 
-    if result.get("code") != "10000":
-        # 支付宝业务报错（如未签约当面付、参数不对），把 sub_msg 透出来好排查
-        detail = result.get("sub_msg") or result.get("msg") or "未知错误"
-        raise HTTPException(status_code=502, detail=f"支付宝下单失败：{detail}")
+    pay_url = f"{alipay._gateway}?{order_string}"
 
-    # 拿到二维码了，落库订单（pending）
+    # 落库订单（pending）。page_pay 不联网，这里直接存，等用户付款后查单转 paid。
     order = Order(id=order_id, user_id=current_user.id, tier=body.tier, amount=price, status="pending")
     db.add(order)
     await db.commit()
 
     return CreateOrderResponse(
-        order_id=order_id, tier=body.tier, amount=price, qr_code=result["qr_code"]
+        order_id=order_id, tier=body.tier, amount=price, pay_url=pay_url
     )
 
 

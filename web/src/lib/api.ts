@@ -241,12 +241,12 @@ export async function getPlans(): Promise<ApiPlan[]> {
   return data
 }
 
-// 下单返回：订单号 + 二维码内容（前端渲染成二维码让用户扫）。
+// 下单返回：订单号 + 收银台链接（前端新开标签页让用户登录付款）。
 export type ApiOrder = {
   order_id: string
   tier: string
   amount: string
-  qr_code: string
+  pay_url: string
 }
 
 /** 为某档套餐下单，返回支付二维码。 */

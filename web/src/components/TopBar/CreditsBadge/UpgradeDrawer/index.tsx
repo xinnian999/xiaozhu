@@ -1,18 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
-import { X, Check, Loader2, ArrowLeft } from 'lucide-react'
-import QRCode from 'qrcode'
+import { X, Loader2, ArrowLeft, ExternalLink } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
 import { getPlans, createOrder, getOrderStatus, type ApiPlan, type ApiOrder } from '@/lib/api'
 import { toast } from '@/lib/toast'
-import { tierLabel, TIER_BLURB } from '../tiers'
+import { tierLabel, TIER_BLURB, tierRank } from '../tiers'
 import styles from './index.module.scss'
 
 // ============================================
-// 升级订阅抽屉：从右侧滑出，列出套餐 → 下单 → 扫码支付
+// 升级订阅抽屉：从右侧滑出，列出套餐 → 下单 → 跳转支付宝收银台支付
 // ============================================
-// 流程：点某档「升级」→ 调后端下单拿二维码 → 切到支付视图渲染二维码 → 每 2 秒轮询订单状态
-//（后端会主动问支付宝）→ 一旦 paid，刷新额度 + 提示 + 关闭。
-// 真实支付走支付宝沙箱：用沙箱版支付宝 App 扫码付款即可完成。
+// 流程：点某档「升级」→ 调后端下单拿收银台链接 → 切到支付视图，用户点「前往支付」新开标签
+// 跳支付宝收银台付款 → 本抽屉每 2 秒轮询订单状态（后端会主动问支付宝）→ 一旦 paid，
+// 刷新额度 + 提示 + 关闭。走支付宝沙箱：用沙箱买家账号登录付款即可。
 
 type Props = {
   onClose: () => void
@@ -26,10 +25,8 @@ export default function UpgradeDrawer({ onClose }: Props) {
   const loadBilling = useSessionStore((s) => s.loadBilling)
 
   const [plans, setPlans] = useState<ApiPlan[]>([])
-  // 当前正在支付的订单（含二维码）；null = 还在套餐列表视图
+  // 当前正在支付的订单（含收银台链接）；null = 还在套餐列表视图
   const [order, setOrder] = useState<ApiOrder | null>(null)
-  // 二维码图片（data URL），由 order.qr_code 渲染而来
-  const [qrDataUrl, setQrDataUrl] = useState<string>('')
   // 正在下单的档位（按钮 loading 用）
   const [creating, setCreating] = useState<string | null>(null)
 
@@ -41,17 +38,6 @@ export default function UpgradeDrawer({ onClose }: Props) {
       .then(setPlans)
       .catch(() => toast('套餐列表加载失败'))
   }, [])
-
-  // 进入支付视图：把 qr_code 字符串渲染成二维码图片
-  useEffect(() => {
-    if (!order) {
-      setQrDataUrl('')
-      return
-    }
-    QRCode.toDataURL(order.qr_code, { width: 220, margin: 1 })
-      .then(setQrDataUrl)
-      .catch(() => toast('二维码生成失败'))
-  }, [order])
 
   // 进入支付视图后轮询订单状态，paid 即收尾。用 ref 存定时器，便于清理。
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -120,21 +106,24 @@ export default function UpgradeDrawer({ onClose }: Props) {
         </div>
 
         {order ? (
-          // ── 支付视图：二维码 + 等待轮询 ──
+          // ── 支付视图：跳转收银台 + 等待轮询 ──
           <div className={styles.pay}>
             <p className={styles.paySubtitle}>
               升级到 <b>{tierLabel(order.tier)}</b>，应付 <b>¥{order.amount}</b>
             </p>
-            <div className={styles.qrBox}>
-              {qrDataUrl ? (
-                <img className={styles.qrImg} src={qrDataUrl} alt="支付二维码" />
-              ) : (
-                <Loader2 size={22} className={styles.spin} />
-              )}
-            </div>
+            {/* 用 <a target=_blank> 直接由用户点击打开，避免被浏览器拦截弹窗 */}
+            <a
+              className={styles.payLink}
+              href={order.pay_url}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <ExternalLink size={15} />
+              前往支付宝支付
+            </a>
             <p className={styles.payHint}>
               <Loader2 size={13} className={styles.spin} />
-              请用支付宝扫码支付，支付后自动到账…
+              在新标签页用沙箱买家账号登录付款，支付后自动到账…
             </p>
           </div>
         ) : (
@@ -144,8 +133,9 @@ export default function UpgradeDrawer({ onClose }: Props) {
             <div className={styles.plans}>
               {plans.map((p) => {
                 const isCurrent = p.tier === currentTier
-                const isFree = p.price === null
                 const isBusy = creating === p.tier
+                // 只能升级：比当前档高才可点；当前档 / 更低档都不可点
+                const canUpgrade = tierRank(p.tier) > tierRank(currentTier ?? 'free')
                 return (
                   <div
                     key={p.tier}
@@ -161,10 +151,10 @@ export default function UpgradeDrawer({ onClose }: Props) {
                     </div>
                     <p className={styles.planBlurb}>{TIER_BLURB[p.tier] ?? ''}</p>
 
-                    {/* free 不可购买，只作展示；pro/max 显示价格 + 升级按钮 */}
-                    {isFree ? (
-                      <div className={styles.planFree}>{isCurrent ? '当前免费版' : '基础版'}</div>
-                    ) : (
+                    {/* 只能升级：当前档显示「当前套餐」，更低档显示「不可降级」，更高档才给升级按钮 */}
+                    {isCurrent ? (
+                      <div className={styles.planNote}>当前套餐</div>
+                    ) : canUpgrade ? (
                       <button
                         type="button"
                         className={styles.planBtn}
@@ -180,6 +170,8 @@ export default function UpgradeDrawer({ onClose }: Props) {
                           `¥${p.price} 升级`
                         )}
                       </button>
+                    ) : (
+                      <div className={styles.planNote}>不可降级</div>
                     )}
                   </div>
                 )

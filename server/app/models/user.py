@@ -55,6 +55,11 @@ class User(Base):
     # 再把这里更新成今天。可空：新用户/老用户初始没有值，第一次扣费时才写。
     daily_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
+    # 付费档位的到期时间（月卡式）。支付成功时设为「现在 + 30 天」；
+    # 过了这个时间，effective_tier 就把用户当 free 算（自动降级）。
+    # free 用户 / 从没付过费的用户为 None。
+    tier_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
 
 # ── Pydantic Schemas ───────────────────────────────────────────────────────────
 

@@ -5,7 +5,7 @@
 工具在 app.agents.tools。这里不含任何业务逻辑。
 """
 
-from datetime import date
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.loop import ChatRequest, agent_loop
-from app.billing import daily_allowance, used_today
+from app.billing import allowance_for, used_today
 from app.db import get_db
 from app.deps import get_current_user
 # 模型注册表 + LLM 构造都集中在 app.llm，这里只是引用方
@@ -86,9 +86,11 @@ async def chat(
     # 额度校验（只校验、不扣费）。扣费是「成功才扣」：真正 += cost 在 agent_loop 跑完收尾处，
     # 中断 / 报错都不会扣，所以这里开跑前只需判断「今天还够不够再跑这一轮」，不够就 402。
     #   used_today 处理跨天：daily_date 不是今天就当 0（昨天的用量不算）。
-    #   cost 是本轮模型的倍率（1 / 2），allowance 是该用户档位的每日额度。
+    #   allowance_for 取「生效档位」的额度：付费档过了 tier_expires_at 会自动按 free 算。
+    #   cost 是本轮模型的倍率（1 / 2）。
+    now = datetime.now()
     cost = MODELS_BY_ID[req.model]["cost"]
-    if used_today(current_user, date.today()) + cost > daily_allowance(current_user.tier):
+    if used_today(current_user, now.date()) + cost > allowance_for(current_user, now):
         raise HTTPException(status_code=402, detail="今日额度已用完，明天恢复或升级套餐")
 
     # 注意：StreamingResponse 拿到的是生成器，FastAPI 会保持 db 依赖存活

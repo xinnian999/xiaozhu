@@ -39,7 +39,9 @@
       color: var(--color-text);
     }
 
-    .closeBtn {
+    // 返回（支付视图回到套餐列表）和关闭，长一样
+    .closeBtn,
+    .backBtn {
       @include button-reset;
       display: inline-flex;
       align-items: center;
@@ -153,7 +155,67 @@
           animation: drawer-spin 0.8s linear infinite;
         }
       }
+
+      // free 档不可购买，按钮位置放一行说明文字
+      .planFree {
+        padding: $space-2;
+        text-align: center;
+        color: var(--color-text-mute);
+        font-size: $fs-12;
+      }
     }
+  }
+
+  // ── 支付视图：二维码 + 等待 ──
+  .pay {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: $space-3;
+    margin-top: $space-2;
+
+    .paySubtitle {
+      margin: 0;
+      color: var(--color-text-dim);
+      font-size: $fs-13;
+
+      b {
+        color: var(--color-text);
+        font-weight: $fw-semibold;
+      }
+    }
+
+    // 二维码白底框：二维码本身需要白底才好扫，深色主题下也强制白底
+    .qrBox {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 240px;
+      height: 240px;
+      padding: $space-3;
+      border-radius: $radius-lg;
+      background: #fff;
+      border: 1px solid var(--color-border);
+
+      .qrImg {
+        width: 100%;
+        height: 100%;
+      }
+    }
+
+    .payHint {
+      display: inline-flex;
+      align-items: center;
+      gap: $space-1;
+      margin: 0;
+      color: var(--color-text-mute);
+      font-size: $fs-12;
+    }
+  }
+
+  // 通用旋转图标（支付视图 / 按钮里都用）
+  .spin {
+    animation: drawer-spin 0.8s linear infinite;
   }
 
   .footnote {

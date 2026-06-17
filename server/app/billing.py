@@ -11,7 +11,38 @@
 没跑完一律不扣，所以也不存在「中断了要不要返还」的问题。
 """
 
-from datetime import date
+from datetime import date, datetime
+
+# 各付费档的价格（元，字符串形式，直接当支付宝 total_amount 用，避免浮点）。
+# free 不在表里 —— 免费档不需要下单。沙箱阶段先给小额，方便测试。
+TIER_PRICE: dict[str, str] = {
+    "pro": "9.90",
+    "max": "19.90",
+}
+
+
+def price_of(tier: str) -> str | None:
+    """取某档价格（元字符串）。free / 未知档返回 None（表示不可购买）。"""
+    return TIER_PRICE.get(tier)
+
+
+def effective_tier(user, now: datetime) -> str:
+    """用户「当前实际生效」的档位（考虑月卡到期）。
+
+    规则：付费档一旦过了 tier_expires_at（或压根没有到期时间），就当 free 算 —— 自动降级。
+    这样「买了一个月」到期后不用定时任务也能立刻按免费额度限流，逻辑简单可靠。
+    """
+    if user.tier == DEFAULT_TIER:
+        return DEFAULT_TIER
+    exp = getattr(user, "tier_expires_at", None)
+    if exp is None or exp < now:
+        return DEFAULT_TIER
+    return user.tier
+
+
+def allowance_for(user, now: datetime) -> int:
+    """用户当前每日额度 = 生效档位对应的额度（已考虑到期降级）。"""
+    return daily_allowance(effective_tier(user, now))
 
 
 def used_today(user, today: date) -> int:

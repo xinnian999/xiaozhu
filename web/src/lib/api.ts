@@ -228,15 +228,44 @@ export async function getBilling(): Promise<ApiBilling> {
   return data
 }
 
-// 一个套餐档位（升级抽屉用）。每日额度由后端 TIER_DAILY 派生，前端不硬编码数字。
+// 一个套餐档位（升级抽屉用）。每日额度 / 价格由后端派生，前端不硬编码数字。
 export type ApiPlan = {
   tier: string // free / pro / max
   daily_allowance: number // 每日点数额度
+  price: string | null // 价格（元字符串）；free 为 null（不可购买）
 }
 
 /** 拉取套餐列表，给「升级订阅」抽屉渲染。 */
 export async function getPlans(): Promise<ApiPlan[]> {
   const { data } = await http.get<ApiPlan[]>('/api/billing/plans')
+  return data
+}
+
+// 下单返回：订单号 + 二维码内容（前端渲染成二维码让用户扫）。
+export type ApiOrder = {
+  order_id: string
+  tier: string
+  amount: string
+  qr_code: string
+}
+
+/** 为某档套餐下单，返回支付二维码。 */
+export async function createOrder(tier: string): Promise<ApiOrder> {
+  const { data } = await http.post<ApiOrder>('/api/billing/orders', { tier })
+  return data
+}
+
+// 查单返回：订单状态（pending / paid）。
+export type ApiOrderStatus = {
+  order_id: string
+  tier: string
+  amount: string
+  status: string // pending / paid
+}
+
+/** 查一笔订单的支付状态（前端轮询用；后端会主动问支付宝）。 */
+export async function getOrderStatus(orderId: string): Promise<ApiOrderStatus> {
+  const { data } = await http.get<ApiOrderStatus>(`/api/billing/orders/${orderId}`)
   return data
 }
 

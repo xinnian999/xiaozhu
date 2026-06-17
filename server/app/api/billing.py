@@ -1,13 +1,14 @@
-"""Billing API —— 额度查询 + 改档。
+"""Billing API —— 额度查询 + 套餐购买（支付宝）。
 
-两个接口：
-  - GET  /api/billing/me        查当前用户的档位 / 每日额度 / 今日已用 / 今日剩余（前端展示用）。
-  - POST /api/billing/dev/set-tier  把当前用户切到 free/pro/max。
+接口：
+  - GET  /api/billing/me            查当前用户的档位 / 每日额度 / 今日已用 / 今日剩余。
+  - GET  /api/billing/plans         套餐列表（每日额度 + 价格）。
+  - POST /api/billing/orders        为某档下单，返回支付二维码。
+  - GET  /api/billing/orders/{id}   查订单状态（前端轮询；后端主动问支付宝）。
+  - POST /api/billing/notify/alipay 支付宝异步回调（生产用，验签）。
 
-⚠️ set-tier 是「真实订阅支付」上线前的临时替身（付费第 3 步）：它让用户**给自己免费改档**，
-   纯粹为了开发期能在浏览器里把额度调大调小、端到端验证扣费链路。
-   第 5 步接入真实支付后，这个 dev 接口必须删掉或改成「只有支付成功的 webhook 能改档」——
-   否则等于谁都能白嫖 max。
+升档只能靠「支付成功」触发（_fulfill_order）。早期那个让用户免费改档的 dev/set-tier 已删除，
+避免任何人白嫖高档。
 """
 
 import uuid
@@ -239,28 +240,3 @@ async def alipay_notify(request: Request) -> PlainTextResponse:
                 await _fulfill_order(db, order)
 
     return PlainTextResponse("success")
-
-
-class SetTierRequest(BaseModel):
-    tier: str  # 只能是 TIER_DAILY 里的键：free/pro/max
-
-
-@router.post("/dev/set-tier", response_model=BillingStatus)
-async def dev_set_tier(
-    body: SetTierRequest,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-) -> BillingStatus:
-    """【开发期临时】把当前用户切到指定档位，返回切换后的额度状态。
-
-    只校验档位合法（必须在 TIER_DAILY 里），不做任何支付/权限校验 —— 见模块顶部警告。
-    不动 daily_used：改档只换「每日上限」，今天已用的不清零（更贴近真实订阅的体感）。
-    """
-    if body.tier not in TIER_DAILY:
-        raise HTTPException(
-            status_code=400,
-            detail=f"非法档位 {body.tier}，可选：{list(TIER_DAILY)}",
-        )
-    current_user.tier = body.tier
-    await db.commit()
-    return _status_of(current_user)

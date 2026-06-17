@@ -269,13 +269,6 @@ export async function getOrderStatus(orderId: string): Promise<ApiOrderStatus> {
   return data
 }
 
-/** 【开发期临时】切换当前用户的套餐档位，返回切换后的额度状态。
- *  真实支付接入后这条要换成支付成功后的回调改档（见后端 billing.py 警告）。 */
-export async function setTier(tier: string): Promise<ApiBilling> {
-  const { data } = await http.post<ApiBilling>('/api/billing/dev/set-tier', { tier })
-  return data
-}
-
 // ── Files ───────────────────────────────────────────────────────
 
 /** 拉取一个 session 下的所有文件（含 content）。返回 {path: content} 扁平字典，

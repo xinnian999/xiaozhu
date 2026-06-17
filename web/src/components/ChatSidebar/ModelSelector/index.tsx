@@ -63,6 +63,8 @@ export default function ModelSelector() {
                 >
                   <span className={styles.itemIcon}>{renderIcon(m.icon, 16)}</span>
                   <span className={styles.itemLabel}>{m.label}</span>
+                  {/* 付费倍率：一轮扣几点（1x / 2x），让用户选模型时心里有数 */}
+                  <span className={styles.itemCost}>{m.cost}x</span>
                   {m.id === selectedModel && <Check size={14} className={styles.itemCheck} />}
                 </button>
               </li>

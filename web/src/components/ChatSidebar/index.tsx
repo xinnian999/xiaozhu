@@ -43,6 +43,7 @@ export default function ChatSidebar() {
   const applyFileDelete = useSessionStore((s) => s.applyFileDelete)
   const selectedModel = useSessionStore((s) => s.selectedModel)
   const models = useSessionStore((s) => s.models)
+  const loadBilling = useSessionStore((s) => s.loadBilling)
   const mobileChatOpen = useUIStore((s) => s.mobileChatOpen)
   const setMobileChatOpen = useUIStore((s) => s.setMobileChatOpen)
   const chatCollapsed = useUIStore((s) => s.chatCollapsed)
@@ -245,6 +246,9 @@ export default function ChatSidebar() {
       //    不必再手动刷——手动刷只会重载到旧 dist（没重新构建），没有意义。
       abortRef.current = null
       endStreaming()
+      // 一轮结束刷新额度：成功跑完后端已扣点，这里把「今日剩余」拉到最新。
+      // 中断 / 报错没扣点，刷新拿到的还是原值，UI 也对。
+      loadBilling()
     }
   }
 
@@ -269,6 +273,7 @@ export default function ChatSidebar() {
     } finally {
       abortRef.current = null
       endStreaming()
+      loadBilling() // 重试一轮同样可能扣点，结束后刷新今日剩余
     }
   }
 

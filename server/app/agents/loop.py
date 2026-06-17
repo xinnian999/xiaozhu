@@ -12,6 +12,7 @@
 import json
 import re
 from collections.abc import AsyncGenerator
+from datetime import date
 
 from fastapi import HTTPException
 from langchain.agents import create_agent
@@ -24,11 +25,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import build_store
 from app.agents.prompts import SYSTEM_PROMPT
 from app.agents.tools import build_tools
-from app.llm import build_llm
+from app.llm import MODELS_BY_ID, build_llm
 from app.models.file import File
 # 起别名 DBMessage 避免和 langchain_core.messages 概念混淆
 # （那边的 SystemMessage/HumanMessage 是 LLM 对话消息,这里的是数据库行）
 from app.models.message import Message as DBMessage
+from app.models.user import User
 from app.models.version import VersionFile
 from app.templates import load_template
 from app.versioning import snapshot_current_files
@@ -114,6 +116,31 @@ TOOL_RESULT_CAP = 4000
 # path 排在参数 JSON 最前面，几个 token 就到，所以一旦正则匹配上 path，就能在内容还没
 # 写完时把工具卡提前亮出来。((?:[^"\\]|\\.)*) 容忍路径里可能出现的转义字符。
 _PATH_RE = re.compile(r'"path"\s*:\s*"((?:[^"\\]|\\.)*)"')
+
+
+async def _charge_user(db: AsyncSession, user_id: str, model: str) -> None:
+    """一轮「干净跑完」后按模型倍率扣点。只在成功路径调用（见 agent_loop 收尾）。
+
+    扣费时机是「成功才扣」：报错 / 截断 / 用户中断都不会走到这里，所以没扣过、也无需返还。
+    隔天重置就在这里发生：daily_date 不是今天 → 先把 daily_used 清零、再累加本轮 cost。
+
+    自己吞掉异常：计费环节出问题也不该污染「已经成功」的 SSE 流——宁可这轮漏扣，
+    也不要在 done 之前抛错、把一次成功的生成变成给用户看的报错。
+    """
+    try:
+        cost = MODELS_BY_ID[model]["cost"]
+        user = await db.get(User, user_id)
+        if user is None:
+            return
+        today = date.today()
+        if user.daily_date != today:
+            user.daily_used = 0
+            user.daily_date = today
+        user.daily_used += cost
+        await db.commit()
+        print(f"[扣费] user={user_id} model={model} cost={cost} → daily_used={user.daily_used}")
+    except Exception as e:
+        print(f"[扣费失败] user={user_id} model={model}: {type(e).__name__}: {e}")
 
 
 async def _prepare_retry(
@@ -211,8 +238,13 @@ async def _prepare_retry(
     return last_user, file_sync_events
 
 
-async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, None]:
-    """喂入历史 → 消费图的事件流 → 映射成 SSE + 落库副作用。"""
+async def agent_loop(
+    req: ChatRequest, db: AsyncSession, user_id: str
+) -> AsyncGenerator[str, None]:
+    """喂入历史 → 消费图的事件流 → 映射成 SSE + 落库副作用。
+
+    user_id：本轮请求者。用于「成功才扣」——干净跑完时按模型倍率给他扣点（见收尾处）。
+    """
     # 每请求构造工具(闭包 db / session_id),llm 按本请求选的模型构造。
     # create_agent 内部会 bind_tools、注入 system_prompt,所以这里不用自己绑、
     # messages 也不必塞 SystemMessage —— 这是「每条消息可变模型」的落点。
@@ -511,6 +543,12 @@ async def agent_loop(req: ChatRequest, db: AsyncSession) -> AsyncGenerator[str, 
             # 推送版本事件,前端在对话流里实时插入一张「版本卡」(带回滚按钮)。
             if version is not None:
                 yield sse({"type": "version", "version_id": version.id, "seq": version.seq})
+
+        # 「成功才扣」：走到这里且没被截断 = 这一轮干净跑完，按模型倍率扣点。
+        # 截断（truncated）虽然也流到这条收尾，但属于失败，用 not truncated 挡掉、不扣。
+        # 报错 / 用户中断更不会到这里（在 except 分支或 yield 处就被打断了）。
+        if not truncated:
+            await _charge_user(db, user_id, req.model)
 
         yield sse({"type": "done"})
 

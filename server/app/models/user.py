@@ -7,9 +7,9 @@
 """
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import DateTime, String, func
+from sqlalchemy import Date, DateTime, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -41,6 +41,19 @@ class User(Base):
     avatar: Mapped[str] = mapped_column(String, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    # ── 付费/额度（第 1 步：只建字段，扣费逻辑在第 2 步）──────────────────────────
+    # 套餐档位：free / pro / max。每档每天有不同的点数额度（见 app/billing.py 的 TIER_DAILY）。
+    # server_default="free" 保证迁移给「已有用户」自动回填成免费档，不会留空。
+    tier: Mapped[str] = mapped_column(String, nullable=False, server_default="free")
+
+    # 今日已用点数。每轮对话按模型倍率累加；跨天会在扣费时先重置为 0（配合 daily_date）。
+    # server_default="0" 让老用户迁移后从 0 起算。
+    daily_used: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+    # daily_used 对应的「自然日」。扣费时若它 != 今天，说明跨天了 → 先把 daily_used 清零、
+    # 再把这里更新成今天。可空：新用户/老用户初始没有值，第一次扣费时才写。
+    daily_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
 
 # ── Pydantic Schemas ───────────────────────────────────────────────────────────

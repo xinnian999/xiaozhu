@@ -101,6 +101,14 @@
         @include truncate;
       }
 
+      // 付费倍率标（1x/2x）：靠右、低调，等宽数字
+      .itemCost {
+        flex-shrink: 0;
+        color: var(--color-text-mute);
+        font-size: $fs-11;
+        font-variant-numeric: tabular-nums;
+      }
+
       .itemCheck {
         flex-shrink: 0;
         color: var(--color-accent);

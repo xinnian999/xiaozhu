@@ -1,7 +1,8 @@
 import { useState } from 'react'
-import { Eye, Code2, ChevronLeft, RotateCw, ExternalLink, Terminal, Save, Undo2, Loader2 } from 'lucide-react'
+import { Eye, Code2, ChevronLeft, RotateCw, ExternalLink, Terminal, Save, Undo2, Download, Loader2 } from 'lucide-react'
 import { useUIStore, type WorkTab } from '@/store/ui'
 import { useSessionStore } from '@/store/session'
+import { downloadSourceAsZip } from '@/lib/download'
 import { toast } from '@/lib/toast'
 import { isPreviewRunning } from '@/lib/webcontainer'
 import ShareDialog from './ShareDialog'
@@ -43,8 +44,31 @@ export default function TabBar() {
   const [saving, setSaving] = useState(false)
   // 分享弹窗开关
   const [shareOpen, setShareOpen] = useState(false)
+  // 下载源码打包中的忙碌态，避免重复点击
+  const [downloading, setDownloading] = useState(false)
 
   const isCode = workTab === 'code'
+
+  // 下载当前会话源码：取当前文件快照打包成 zip（从 TopBar 搬过来，作 Tab 栏常驻按钮）
+  const handleDownload = async () => {
+    if (downloading) return
+    const { activeSession, currentVersion } = useSessionStore.getState()
+    const session = activeSession()
+    if (!session) return
+    const files = currentVersion().files
+    if (Object.keys(files).length === 0) {
+      toast('当前还没有可下载的文件')
+      return
+    }
+    setDownloading(true)
+    try {
+      await downloadSourceAsZip(files, session.title)
+    } catch (e) {
+      console.error('下载源码失败', e)
+    } finally {
+      setDownloading(false)
+    }
+  }
 
   // 打开分享：必须预览已经跑起来（vite preview ready），否则容器里没法 vite build
   const handleShare = () => {
@@ -158,6 +182,17 @@ export default function TabBar() {
               title="分享预览"
             >
               <ExternalLink size={12} />
+            </button>
+
+            {/* 下载源码：放在分享按钮旁边，做成同款地址栏图标按钮 */}
+            <button
+              className={styles.urlIconBtn}
+              onClick={handleDownload}
+              disabled={downloading}
+              aria-label="下载源码"
+              title="下载源码"
+            >
+              {downloading ? <Loader2 size={12} className={styles.spin} /> : <Download size={12} />}
             </button>
           </div>
         )}

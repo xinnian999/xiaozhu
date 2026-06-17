@@ -1,0 +1,136 @@
+@use '@/styles/variables' as *;
+@use '@/styles/common' as *;
+
+.badge {
+  position: relative;
+
+  // 触发器：积分图标 + 数字 + 小箭头
+  .trigger {
+    @include button-reset;
+    display: inline-flex;
+    align-items: center;
+    gap: $space-1;
+    padding: $space-1 $space-2;
+    border-radius: $radius-md;
+    color: var(--color-text-dim);
+    font-size: $fs-13;
+    transition: color $dur-base $ease-out, background $dur-base $ease-out;
+
+    &:hover,
+    &.triggerOpen {
+      color: var(--color-text);
+      background: var(--color-bg-hover);
+    }
+
+    .coin {
+      flex-shrink: 0;
+      color: var(--color-accent);
+    }
+
+    .count {
+      font-weight: $fw-medium;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .caret {
+      flex-shrink: 0;
+      color: var(--color-text-mute);
+      transition: transform $dur-base $ease-out;
+    }
+
+    &.triggerOpen .caret {
+      transform: rotate(180deg);
+    }
+
+    // 额度用完：图标 + 数字转危险色，提示该升级或等明天
+    &.triggerEmpty {
+      .coin,
+      .count {
+        color: var(--color-danger);
+      }
+    }
+  }
+
+  // 下拉面板：从顶栏向下弹，右对齐避免溢出屏幕右缘
+  .panel {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 50;
+    width: 240px;
+    padding: $space-3;
+    background: var(--color-bg-elev);
+    border: 1px solid var(--color-border);
+    border-radius: $radius-lg;
+    box-shadow: var(--shadow-pop);
+    animation: fade-down 0.15s $ease-out;
+
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: $space-1 0;
+
+      .rowLabel {
+        color: var(--color-text-mute);
+        font-size: $fs-12;
+      }
+
+      .rowValue {
+        color: var(--color-text);
+        font-size: $fs-13;
+        font-weight: $fw-medium;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .rowValueEmpty {
+        color: var(--color-danger);
+      }
+    }
+
+    .divider {
+      height: 1px;
+      margin: $space-2 0;
+      background: var(--color-border);
+    }
+
+    .hint {
+      margin: 0 0 $space-3;
+      color: var(--color-text-mute);
+      font-size: $fs-11;
+      line-height: $lh-relaxed;
+    }
+
+    // 升级按钮：主色实心，醒目
+    .upgradeBtn {
+      @include button-reset;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: $space-1;
+      width: 100%;
+      padding: $space-2;
+      border-radius: $radius-md;
+      background: var(--color-accent);
+      color: #fff;
+      font-size: $fs-13;
+      font-weight: $fw-medium;
+      transition: opacity $dur-base $ease-out;
+
+      &:hover {
+        opacity: 0.9;
+      }
+    }
+  }
+}
+
+@keyframes fade-down {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

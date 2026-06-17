@@ -6,6 +6,8 @@ import {
   listSessionFiles,
   listSessionMessages,
   listModels,
+  getBilling,
+  setTier,
   saveVersion,
   restoreVersion,
   listVersions,
@@ -14,6 +16,7 @@ import {
   type ApiSession,
   type ApiMessage,
   type ApiModel,
+  type ApiBilling,
 } from '@/lib/api'
 
 // ============================================
@@ -56,6 +59,13 @@ type SessionState = {
   loadModels: () => Promise<void>
   /** 切换当前选中的模型 */
   setSelectedModel: (id: string) => void
+
+  // 当前用户的额度状态（档位 + 今日剩余点数），全局共享。null = 还没拉到。
+  billing: ApiBilling | null
+  /** 拉取/刷新额度状态。每轮对话结束后调一次，让「今日剩余」实时跟着扣减。 */
+  loadBilling: () => Promise<void>
+  /** 【开发期临时】切换套餐档位（接真实支付前的占位），切完直接更新 billing 状态。 */
+  changeTier: (tier: string) => Promise<void>
 
   init: () => Promise<void>
   createNew: (title?: string) => Promise<ChatSession>
@@ -245,6 +255,24 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   setSelectedModel: (id) => set({ selectedModel: id }),
+
+  billing: null,
+
+  loadBilling: async () => {
+    try {
+      const billing = await getBilling()
+      set({ billing })
+    } catch (e) {
+      // 额度拉取失败不该影响主流程（如未登录）—— 静默，UI 会退回不显示额度
+      console.error('加载额度状态失败', e)
+    }
+  },
+
+  changeTier: async (tier) => {
+    // 切档接口直接返回切换后的额度状态，省一次 GET，拿到就更新 store
+    const billing = await setTier(tier)
+    set({ billing })
+  },
 
   init: async () => {
     set({ loading: true })

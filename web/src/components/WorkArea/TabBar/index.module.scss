@@ -93,6 +93,7 @@
         }
       }
     }
+
   }
 
   .center {
@@ -130,6 +131,11 @@
         &:disabled {
           opacity: 0.4;
           cursor: not-allowed;
+        }
+
+        // 下载打包中的 loading 图标旋转（复用 .tabbar 里的 tabbar-spin 关键帧）
+        .spin {
+          animation: tabbar-spin 0.8s linear infinite;
         }
       }
 

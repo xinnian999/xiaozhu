@@ -1,0 +1,187 @@
+@use '@/styles/variables' as *;
+@use '@/styles/common' as *;
+
+// 遮罩：铺满全屏，抽屉靠右
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(2px);
+  animation: drawer-fade 0.18s $ease-out;
+}
+
+// 抽屉本体：右侧整列，从右滑入
+.drawer {
+  display: flex;
+  flex-direction: column;
+  width: 360px;
+  max-width: 92vw;
+  height: 100%;
+  padding: $space-5;
+  background: var(--color-bg-elev);
+  border-left: 1px solid var(--color-border);
+  box-shadow: var(--shadow-pop);
+  animation: drawer-slide 0.22s $ease-out;
+  overflow-y: auto;
+
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+
+    .title {
+      margin: 0;
+      font-size: $fs-16;
+      font-weight: $fw-semibold;
+      color: var(--color-text);
+    }
+
+    .closeBtn {
+      @include button-reset;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      border-radius: $radius-sm;
+      color: var(--color-text-mute);
+      transition: color $dur-base $ease-out, background $dur-base $ease-out;
+
+      &:hover {
+        color: var(--color-text);
+        background: var(--color-bg-hover);
+      }
+    }
+  }
+
+  .subtitle {
+    margin: $space-2 0 $space-4;
+    color: var(--color-text-mute);
+    font-size: $fs-13;
+    line-height: $lh-relaxed;
+  }
+
+  // 套餐卡片纵向排列
+  .plans {
+    display: flex;
+    flex-direction: column;
+    gap: $space-3;
+
+    .plan {
+      padding: $space-4;
+      border: 1px solid var(--color-border);
+      border-radius: $radius-lg;
+      background: var(--color-bg-soft);
+
+      // 当前档位：主色描边高亮
+      &.planCurrent {
+        border-color: var(--color-accent);
+      }
+
+      .planHead {
+        display: flex;
+        align-items: center;
+        gap: $space-2;
+
+        .planName {
+          font-size: $fs-15;
+          font-weight: $fw-semibold;
+          color: var(--color-text);
+        }
+
+        .planTag {
+          padding: 1px $space-2;
+          border-radius: $radius-sm;
+          background: var(--color-accent);
+          color: #fff;
+          font-size: $fs-11;
+          font-weight: $fw-medium;
+        }
+      }
+
+      .planCredits {
+        margin-top: $space-2;
+        color: var(--color-text);
+        font-size: $fs-20;
+        font-weight: $fw-semibold;
+        font-variant-numeric: tabular-nums;
+
+        .planCreditsUnit {
+          font-size: $fs-12;
+          font-weight: $fw-normal;
+          color: var(--color-text-mute);
+        }
+      }
+
+      .planBlurb {
+        margin: $space-1 0 $space-3;
+        color: var(--color-text-mute);
+        font-size: $fs-12;
+        line-height: $lh-relaxed;
+      }
+
+      .planBtn {
+        @include button-reset;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: $space-1;
+        width: 100%;
+        padding: $space-2;
+        border-radius: $radius-md;
+        background: var(--color-accent);
+        color: #fff;
+        font-size: $fs-13;
+        font-weight: $fw-medium;
+        transition: opacity $dur-base $ease-out;
+
+        &:hover:not(:disabled) {
+          opacity: 0.9;
+        }
+
+        // 当前档位 / 切换中：置灰不可点
+        &:disabled {
+          background: var(--color-bg-hover);
+          color: var(--color-text-mute);
+          cursor: default;
+        }
+
+        .spin {
+          animation: drawer-spin 0.8s linear infinite;
+        }
+      }
+    }
+  }
+
+  .footnote {
+    margin: $space-4 0 0;
+    color: var(--color-text-faint);
+    font-size: $fs-11;
+    line-height: $lh-relaxed;
+  }
+}
+
+@keyframes drawer-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes drawer-slide {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+@keyframes drawer-spin {
+  to { transform: rotate(360deg); }
+}
+
+// 移动端：抽屉占满宽度
+@include mobile {
+  .drawer {
+    width: 100%;
+    max-width: 100%;
+  }
+}

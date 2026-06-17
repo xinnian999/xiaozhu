@@ -104,11 +104,13 @@ export type ApiFile = {
 // 注意：后端不会返回 group / api_key 这些内部字段，前端拿不到也不需要。
 // vision：该模型是否支持识图（多模态图片输入），由后端实测标定，
 // 前端据此把「添加图片」置灰 —— 不支持的模型不让传图。
+// cost：付费倍率（1/2），一轮对话扣几点；前端据此在模型旁标 1x/2x。
 export type ApiModel = {
   id: string
   label: string
   icon: string
   vision: boolean
+  cost: number
 }
 
 // ── 鉴权（注册 / 登录 / 获取自身信息）────────────────────────────
@@ -208,6 +210,40 @@ export async function deleteSession(sessionId: string): Promise<void> {
 /** 拉取可选模型清单，给模型下拉框渲染。 */
 export async function listModels(): Promise<ApiModel[]> {
   const { data } = await http.get<ApiModel[]>('/api/models')
+  return data
+}
+
+// ── Billing（额度）──────────────────────────────────────────────
+// 后端 GET /api/billing/me 返回的额度状态：当前档位 + 今日额度/已用/剩余。
+export type ApiBilling = {
+  tier: string // free / pro / max
+  daily_allowance: number // 该档每日额度
+  used_today: number // 今日已用点数
+  remaining: number // 今日剩余 = 额度 - 已用
+}
+
+/** 拉取当前用户的额度状态（档位 + 今日剩余）。 */
+export async function getBilling(): Promise<ApiBilling> {
+  const { data } = await http.get<ApiBilling>('/api/billing/me')
+  return data
+}
+
+// 一个套餐档位（升级抽屉用）。每日额度由后端 TIER_DAILY 派生，前端不硬编码数字。
+export type ApiPlan = {
+  tier: string // free / pro / max
+  daily_allowance: number // 每日点数额度
+}
+
+/** 拉取套餐列表，给「升级订阅」抽屉渲染。 */
+export async function getPlans(): Promise<ApiPlan[]> {
+  const { data } = await http.get<ApiPlan[]>('/api/billing/plans')
+  return data
+}
+
+/** 【开发期临时】切换当前用户的套餐档位，返回切换后的额度状态。
+ *  真实支付接入后这条要换成支付成功后的回调改档（见后端 billing.py 警告）。 */
+export async function setTier(tier: string): Promise<ApiBilling> {
+  const { data } = await http.post<ApiBilling>('/api/billing/dev/set-tier', { tier })
   return data
 }
 
@@ -352,8 +388,18 @@ export async function* streamChat(
   }
 
   if (!res.ok || !res.body) {
-    toast(`发送失败：HTTP ${res.status}`)
-    yield { type: 'error', message: `请求失败: ${res.status}` }
+    // 读后端返回的 detail（FastAPI HTTPException 的 {detail}），把具体原因给到用户。
+    let detail = `HTTP ${res.status}`
+    try {
+      const data = await res.json()
+      if (data?.detail) detail = data.detail
+    } catch {
+      // 不是 JSON（如网关错误页）就用状态码兜底
+    }
+    // 402 = 今日额度用完，是「业务结果」不是「发送失败」，文案不带“发送失败”前缀，
+    // 直接把后端的「今日额度已用完，明天恢复或升级套餐」原样提示。
+    toast(res.status === 402 ? detail : `发送失败：${detail}`)
+    yield { type: 'error', message: detail }
     yield { type: 'done' }
     return
   }

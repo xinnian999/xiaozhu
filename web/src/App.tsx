@@ -15,6 +15,7 @@ function App() {
   const theme = useThemeStore((s) => s.theme)
   const init = useSessionStore((s) => s.init)
   const loadModels = useSessionStore((s) => s.loadModels)
+  const loadBilling = useSessionStore((s) => s.loadBilling)
   // 没有激活会话时进入"空态"：隐藏右侧工作区，让对话框全屏展开
   const hasActive = useSessionStore((s) => s.activeId !== null)
 
@@ -39,6 +40,7 @@ function App() {
     // 错误统一由 axios 拦截器 toast，这里只需阻止 unhandled rejection
     init().catch(() => {})
     loadModels()
+    loadBilling() // 拉一次额度，渲染「今日剩余」；之后每轮对话结束会再刷新
     // 依赖快照预热放到登录之后再启动 —— 它是个几 MB 的下载，登录前就开跑会和
     // 登录/拉会话等首屏请求抢带宽，把首次登录拖慢。登录后才需要它（进项目 boot
     // WebContainer 时用），这里启动既不耽误它就绪、又不挡登录。配合 fetch 的

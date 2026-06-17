@@ -5,12 +5,15 @@
 工具在 app.agents.tools。这里不含任何业务逻辑。
 """
 
+from datetime import date
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.loop import ChatRequest, agent_loop
+from app.billing import daily_allowance, used_today
 from app.db import get_db
 from app.deps import get_current_user
 # 模型注册表 + LLM 构造都集中在 app.llm，这里只是引用方
@@ -80,10 +83,19 @@ async def chat(
     if result.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    # 额度校验（只校验、不扣费）。扣费是「成功才扣」：真正 += cost 在 agent_loop 跑完收尾处，
+    # 中断 / 报错都不会扣，所以这里开跑前只需判断「今天还够不够再跑这一轮」，不够就 402。
+    #   used_today 处理跨天：daily_date 不是今天就当 0（昨天的用量不算）。
+    #   cost 是本轮模型的倍率（1 / 2），allowance 是该用户档位的每日额度。
+    cost = MODELS_BY_ID[req.model]["cost"]
+    if used_today(current_user, date.today()) + cost > daily_allowance(current_user.tier):
+        raise HTTPException(status_code=402, detail="今日额度已用完，明天恢复或升级套餐")
+
     # 注意：StreamingResponse 拿到的是生成器，FastAPI 会保持 db 依赖存活
     # 直到生成器耗尽（即整个 SSE 流结束），所以工具里使用 db 是安全的。
+    # 把 user_id 传进去：loop 跑完干净收尾时按它扣点。
     return StreamingResponse(
-        agent_loop(req, db),
+        agent_loop(req, db, current_user.id),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

@@ -1,4 +1,4 @@
-# Vibuild — 技术方案 v0.1
+# 小筑（Xiaozhu）— 技术方案 v0.1
 
 > 类 V0 的 AI 代码生成平台。练手项目，目标是学习 Python + LangChain / LangGraph / DeepAgents。1
 

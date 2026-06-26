@@ -58,8 +58,8 @@ export default function AuthGate() {
       <form className={styles.card} onSubmit={handleSubmit}>
         {/* 品牌位 */}
         <div className={styles.brand}>
-          <span className={styles.brandMark}>vb</span>
-          <span className={styles.brandText}>vibuild</span>
+          <span className={styles.brandMark}>筑</span>
+          <span className={styles.brandText}>小筑</span>
         </div>
 
         <h1 className={styles.title}>{isLogin ? '登录' : '创建账号'}</h1>

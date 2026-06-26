@@ -235,7 +235,7 @@ export default function PreviewPane() {
   }, [activeId, currentVersion.id, currentVersion.files, applyTick, isStreaming, setWCStatus, setWCLog, setWCError, reloadPreview, pushWcLog, finishReveal])
 
   // —— 浏览器 console 桥接：iframe → 父页面 ——
-  // iframe 里注入的脚本会 postMessage({ type: 'vibuild-console', level, text })，
+  // iframe 里注入的脚本会 postMessage({ type: 'xiaozhu-console', level, text })，
   // 这里挂全局监听：推到控制台面板（给人看）；揭晓收集中时，error 还攒进 revealRef
   // 供 build-result 回报（给 agent 看）。不再单独往后端推日志（log_store 已废）。
   useEffect(() => {
@@ -246,7 +246,7 @@ export default function PreviewPane() {
       if (iframeRef.current && e.source !== iframeRef.current.contentWindow) return
 
       // —— 路由导航上报：维护历史栈，更新地址栏 + 前进后退可用态 ——
-      if (data.type === 'vibuild-nav') {
+      if (data.type === 'xiaozhu-nav') {
         const path = typeof data.path === 'string' ? data.path : '/'
         const stack = histStackRef.current
         let idx = histIdxRef.current
@@ -277,7 +277,7 @@ export default function PreviewPane() {
         return
       }
 
-      if (data.type !== 'vibuild-console') return
+      if (data.type !== 'xiaozhu-console') return
       const level: LogLevel = ['log', 'info', 'warn', 'error'].includes(data.level) ? data.level : 'log'
       const text = String(data.text ?? '')
       pushWcLog({ level, text })
@@ -308,7 +308,7 @@ export default function PreviewPane() {
     if (navCmd.seq === 0) return
     const win = iframeRef.current?.contentWindow
     if (!win) return
-    win.postMessage({ type: 'vibuild-nav-cmd', action: navCmd.action }, '*')
+    win.postMessage({ type: 'xiaozhu-nav-cmd', action: navCmd.action }, '*')
   }, [navCmd])
 
   // ready 时延迟 900ms 再显示 iframe，让进度条动画有时间跑到 100%

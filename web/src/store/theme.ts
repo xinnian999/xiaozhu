@@ -6,7 +6,7 @@ import { create } from 'zustand'
 
 export type Theme = 'dark' | 'light'
 
-const STORAGE_KEY = 'vibuild:theme'
+const STORAGE_KEY = 'xiaozhu:theme'
 
 const getInitial = (): Theme => {
   if (typeof window === 'undefined') return 'light'

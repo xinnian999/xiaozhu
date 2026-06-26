@@ -10,7 +10,7 @@
 // 关键点：key 是依赖哈希、不是项目 id —— 模板固定 → 哈希恒定 →
 // 这台机器上只要装过一次，之后任何项目 / 任何刷新都秒开，共享同一份 node_modules。
 
-const DB_NAME = 'vibuild-deps-cache'
+const DB_NAME = 'xiaozhu-deps-cache'
 const STORE = 'node_modules'
 // 缓存格式版本：快照格式 / 这套逻辑有变动时 +1，自动让旧缓存失效
 const CACHE_VERSION = 'v1'

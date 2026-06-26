@@ -162,7 +162,7 @@ async def create_order(
         order_string = alipay.api_alipay_trade_page_pay(
             out_trade_no=order_id,
             total_amount=price,
-            subject=f"Vibuild 订阅升级 - {body.tier}",
+            subject=f"小筑 订阅升级 - {body.tier}",
             return_url=None,  # 付完跳回页（可选）；我们靠轮询确认到账，不强依赖
         )
     except Exception as e:

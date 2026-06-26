@@ -6,14 +6,14 @@
 // 命中后既省掉切版本的几秒 build，连刷新后首屏 boot 的那次 build 也能跳过（见 bootAndRun）。
 //
 // key = 源文件内容哈希（见 webcontainer.computeFilesKey），同一份源文件 → 同一份 dist。
-// 和依赖快照缓存（vibuild-deps-cache）分库，各管各的、互不影响。
+// 和依赖快照缓存（xiaozhu-deps-cache）分库，各管各的、互不影响。
 //
 // 记录形如 { key, files, usedAt }：usedAt 用于「超量淘汰」——dist 按内容寻址，
 // 用户生成的版本越多、不同内容越多，条目会无限增长，所以按最近使用淘汰封顶。
 
 import type { BuiltFile } from '@/lib/webcontainer'
 
-const DB_NAME = 'vibuild-dist-cache'
+const DB_NAME = 'xiaozhu-dist-cache'
 const STORE = 'dist'
 // 最多持久化多少份 dist。超了按 usedAt 升序（最久未用）淘汰。dist 本身不大，给宽松些。
 const MAX_ENTRIES = 24

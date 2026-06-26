@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     # ── 数据库 ────────────────────────────────────────────────
     # SQLite 文件路径。sqlite+aiosqlite 前缀是 SQLAlchemy 的方言写法，
     # 代表"用 aiosqlite 驱动的 SQLite"（async 版本）。
-    database_url: str = "sqlite+aiosqlite:///./vibuild.db"
+    database_url: str = "sqlite+aiosqlite:///./xiaozhu.db"
 
     # 是否把每条 SQL 打到控制台。dev 调试时设为 true 很有用，
     # 生产环境保持 false：避免日志噪音 + 轻微性能开销。

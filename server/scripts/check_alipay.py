@@ -30,7 +30,7 @@ def main() -> None:
     result = alipay.api_alipay_trade_precreate(
         out_trade_no=out_trade_no,
         total_amount="0.01",      # 沙箱随便给个小额
-        subject="Vibuild 沙箱冒烟测试",
+        subject="小筑 沙箱冒烟测试",
     )
 
     # 返回是「alipay_trade_precreate_response」节点的内容：code=10000 表示成功

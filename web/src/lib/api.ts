@@ -7,7 +7,7 @@ import { toast } from '@/lib/toast'
 
 // ── 登录 token 的存取 ───────────────────────────────────────────
 // token 存在 localStorage：刷新页面 / 重开标签页都还在，做到"记住登录"。
-const TOKEN_KEY = 'vibuild:token'
+const TOKEN_KEY = 'xiaozhu:token'
 
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY)

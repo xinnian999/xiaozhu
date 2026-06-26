@@ -52,7 +52,7 @@ export default function MonacoView({ path }: Props) {
       noSyntaxValidation: false, // 保留语法校验：真正的括号 / 拼写错误仍然提示
     })
 
-    monaco.editor.defineTheme('vibuild-dark', {
+    monaco.editor.defineTheme('xiaozhu-dark', {
       base: 'vs-dark',
       inherit: true,
       rules: [
@@ -82,7 +82,7 @@ export default function MonacoView({ path }: Props) {
         'scrollbarSlider.activeBackground': '#3a373f',
       },
     })
-    monaco.editor.defineTheme('vibuild-light', {
+    monaco.editor.defineTheme('xiaozhu-light', {
       base: 'vs',
       inherit: true,
       rules: [
@@ -109,7 +109,7 @@ export default function MonacoView({ path }: Props) {
         path={path}
         value={value}
         language={language}
-        theme={theme === 'dark' ? 'vibuild-dark' : 'vibuild-light'}
+        theme={theme === 'dark' ? 'xiaozhu-dark' : 'xiaozhu-light'}
         onMount={handleMount}
         onChange={handleChange}
         options={{

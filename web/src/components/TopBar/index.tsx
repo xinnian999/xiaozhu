@@ -26,9 +26,9 @@ export default function TopBar() {
           <Menu size={18} />
         </button>
 
-        <a className={styles.brand} aria-label="vibuild">
-          <span className={styles.brandMark}>vb</span>
-          <span className={styles.brandText}>vibuild</span>
+        <a className={styles.brand} aria-label="小筑">
+          <span className={styles.brandMark}>筑</span>
+          <span className={styles.brandText}>小筑</span>
         </a>
       </div>
 

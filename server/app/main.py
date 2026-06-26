@@ -1,4 +1,4 @@
-"""Vibuild 后端入口。
+"""小筑 后端入口。
 
 startup 事件 + CORS + 路由注册三件事在这里完成。
 其他所有业务逻辑都在各自的模块里，main.py 只做装配。
@@ -86,7 +86,7 @@ async def lifespan(app: FastAPI):
     await engine.dispose()
 
 
-app = FastAPI(title="Vibuild Backend", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Xiaozhu Backend", version="0.2.0", lifespan=lifespan)
 
 # 给所有响应加跨域隔离头（dev / 生产都加，无副作用，让两边环境更一致）
 app.add_middleware(CrossOriginIsolationMiddleware)

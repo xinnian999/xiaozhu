@@ -58,7 +58,7 @@ export default function AuthGate() {
       <form className={styles.card} onSubmit={handleSubmit}>
         {/* 品牌位 */}
         <div className={styles.brand}>
-          <span className={styles.brandMark}>筑</span>
+          <img className={styles.brandMark} src="/logo.png" alt="小筑" />
           <span className={styles.brandText}>小筑</span>
         </div>
 

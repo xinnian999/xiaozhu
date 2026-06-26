@@ -62,19 +62,12 @@
       border-radius: $radius-sm;
 
       .brandMark {
-        // 方块小标志
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
+        // 方块小标志（吉祥物 logo 图片）
+        display: block;
         width: 22px;
         height: 22px;
-        background: var(--color-text);
-        color: var(--color-bg);
-        font-family: var(--font-mono);
-        font-size: $fs-11;
-        font-weight: $fw-bold;
         border-radius: $radius-xs;
-        letter-spacing: -0.5px;
+        object-fit: contain;
       }
 
       .brandText {
@@ -86,8 +79,8 @@
       }
 
       &:hover .brandMark {
-        background: var(--color-accent);
-        color: white;
+        // 悬停轻微放大反馈
+        transform: scale(1.08);
       }
     }
   }
@@ -142,12 +135,6 @@
     }
   }
 
-  // —— 浅色主题下的细微差异（仅结构差异，颜色靠 CSS 变量自动）——
-  @include light {
-    .left .brand .brandMark {
-      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
-    }
-  }
 }
 
 // —— 响应式：移动端 ——

@@ -27,7 +27,7 @@ export default function TopBar() {
         </button>
 
         <a className={styles.brand} aria-label="小筑">
-          <span className={styles.brandMark}>筑</span>
+          <img className={styles.brandMark} src="/logo.png" alt="小筑" />
           <span className={styles.brandText}>小筑</span>
         </a>
       </div>

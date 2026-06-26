@@ -32,17 +32,12 @@
       margin-bottom: $space-6;
 
       .brandMark {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
+        // 吉祥物 logo 图片
+        display: block;
         width: 28px;
         height: 28px;
         border-radius: $radius-sm;
-        background: var(--color-accent);
-        color: #fff;
-        font-family: var(--font-mono);
-        font-size: $fs-13;
-        font-weight: $fw-bold;
+        object-fit: contain;
       }
 
       .brandText {

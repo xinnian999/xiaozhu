@@ -16,11 +16,9 @@ dependencies = [
     "bcrypt>=5.0.0",
     "pyjwt>=2.13.0",
     "alembic>=1.18.4",
-    "python-alipay-sdk>=3.4.0",
 ]
 
 [dependency-groups]
 dev = [
-    "qrcode>=8.2",
     "ruff>=0.15.15",
 ]

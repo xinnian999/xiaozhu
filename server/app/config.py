@@ -80,22 +80,8 @@ class Settings(BaseSettings):
     # pydantic-settings 会自动解析成列表。
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
-    # ── 支付宝（沙箱）──────────────────────────────────────────
-    # 这些值都在「支付宝开放平台 → 沙箱」控制台拿，填进 .env（密钥别进仓库）。
-    # 留空时支付相关接口会报「未配置」错，不影响其它功能。
-    alipay_app_id: str = ""                 # 沙箱应用 APPID
-    # 沙箱网关地址：以控制台显示的为准（沙箱地址换过几次），所以做成可配置而不写死。
-    alipay_gateway: str = ""
-    # 两个密钥用「文件路径」存，不直接把 PEM 塞进 .env（PEM 多行、塞 env 很别扭）。
-    # 路径相对 server/ 目录。keys/ 已在 .gitignore，密钥不会进仓库。
-    alipay_app_private_key_path: str = "keys/app_private_key.pem"   # 你的应用私钥
-    alipay_alipay_public_key_path: str = "keys/alipay_public_key.pem"  # 支付宝公钥（控制台给的）
-    # 异步回调地址：支付宝支付成功后 POST 通知到这里。本地联调可先留空，
-    # 用「前端轮询 + 后端主动查单」验证（不需要公网可达）；上生产再填公网 HTTPS 地址。
-    alipay_notify_url: str = ""
-
     # ── 爱发电（afdian / ifdian.net）收款 ──────────────────────
-    # 与支付宝并行的第二支付渠道。接入模型：在爱发电建「商品(售卖)」，下单链接带上
+    # 本项目唯一支付渠道。接入模型：在爱发电建「商品(售卖)」，下单链接带上
     # custom_order_id（= 我们的订单号）透传 → 用户付款 → 爱发电 webhook 通知我们 →
     # 后端调 query-order API 核单 → 复用 _fulfill_order 升档。值都在 .env 的 AFDIAN_* 里。
     afdian_user_id: str = ""    # 开发者后台的 user_id（创作者身份，调 API 要用）

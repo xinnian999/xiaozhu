@@ -13,8 +13,8 @@
 
 from datetime import date, datetime
 
-# 各付费档的价格（元，字符串形式，直接当支付宝 total_amount 用，避免浮点）。
-# free 不在表里 —— 免费档不需要下单。沙箱阶段先给小额，方便测试。
+# 各付费档的价格（元，字符串形式，和爱发电商品定价一致，避免浮点）。
+# free 不在表里 —— 免费档不需要下单。
 TIER_PRICE: dict[str, str] = {
     "pro": "9.90",
     "max": "19.90",

@@ -147,6 +147,23 @@ git push origin master
 > 见 docker-compose 的 `env_file`）。所以**新增/修改环境变量**（如新接入支付渠道的 `AFDIAN_*`）必须先
 > SSH 到服务器改那份 `.env`，否则自动部署拉的新镜像仍读到旧/空配置。只改代码不涉及新 env 时，push 即可。
 
+**「服务器拉取」一环的实现**：ACR 触发器回调 `http://xiaozhu.elin521.cn/deploy/xiaozhu?token=***`
+→ Caddy 把 `/deploy/xiaozhu*` 反代到宿主机 `:19001`（systemd 服务 `xiaozhu-deploy-webhook.service`，
+脚本 `/opt/xiaozhu-deploy/server.py`，token 鉴权见 `token.txt` / `DEPLOY_TOKEN`）→ 校验通过后跑
+`/opt/xiaozhu-deploy/deploy.sh`（`cd /www/server/panel/data/compose/xiaozhu && docker compose pull && up -d`）。
+部署目录：`/www/server/panel/data/compose/xiaozhu/`（宝塔托管的 compose，`.env` 在此）。
+
+> ⚠️ **坑（2026-06-27 已修）**：Caddy 站点配置 `/root/caddy/sites/xiaozhu.caddy` 把上游写成了
+> **网关 IP `172.20.0.1`**；`xiaozhu_default` 网络重建后网段变成 `172.21.x`，Caddy 转发 502、部署请求
+> 到不了脚本（而 ACR 把 502 也显示成「请求成功」，极具迷惑性）。已改为当前网关 `172.21.0.1` 并热重载。
+> **若以后该 docker 网络又被重建、网段再变，需同步改这里**（更稳的做法：给 caddy compose 加
+> `extra_hosts: ["host.docker.internal:host-gateway"]`，配置里用 `host.docker.internal:19001` 取代写死 IP）。
+
+> 手动部署兜底（自动链路异常时用）：
+> ```bash
+> ssh root@8.141.0.39 'cd /www/server/panel/data/compose/xiaozhu/ && docker compose pull && docker compose up -d'
+> ```
+
 ## 目录结构
 
 ```

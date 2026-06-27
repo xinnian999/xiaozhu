@@ -241,7 +241,7 @@ export async function getPlans(): Promise<ApiPlan[]> {
   return data
 }
 
-// 下单返回：订单号 + 收银台链接（前端新开标签页让用户登录付款）。
+// 下单返回：订单号 + 爱发电下单页链接（前端新开标签页让用户付款）。
 export type ApiOrder = {
   order_id: string
   tier: string
@@ -249,12 +249,9 @@ export type ApiOrder = {
   pay_url: string
 }
 
-// 支付渠道：支付宝 / 爱发电。
-export type PayMethod = 'alipay' | 'afdian'
-
-/** 为某档套餐下单，返回付款链接。method 选支付渠道，默认支付宝。 */
-export async function createOrder(tier: string, method: PayMethod = 'alipay'): Promise<ApiOrder> {
-  const { data } = await http.post<ApiOrder>('/api/billing/orders', { tier, method })
+/** 为某档套餐下单，返回爱发电下单页链接。 */
+export async function createOrder(tier: string): Promise<ApiOrder> {
+  const { data } = await http.post<ApiOrder>('/api/billing/orders', { tier })
   return data
 }
 
@@ -266,7 +263,7 @@ export type ApiOrderStatus = {
   status: string // pending / paid
 }
 
-/** 查一笔订单的支付状态（前端轮询用；后端会主动问支付宝）。 */
+/** 查一笔订单的支付状态（前端轮询用；后端会兜底查爱发电订单）。 */
 export async function getOrderStatus(orderId: string): Promise<ApiOrderStatus> {
   const { data } = await http.get<ApiOrderStatus>(`/api/billing/orders/${orderId}`)
   return data

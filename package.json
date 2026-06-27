@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "workspaces": ["web"],
   "scripts": {
-    "dev": "concurrently -n web,server -c cyan,magenta \"bun run dev:server\" \"bun run dev:web\"",
+    "dev": "sh scripts/predev-clean.sh && concurrently -k -n web,server -c cyan,magenta \"bun run dev:server\" \"bun run dev:web\"",
     "dev:web": "bun run --cwd web dev",
     "db:migrate": "uv run --directory server alembic upgrade head",
     "dev:server": "bun run db:migrate && uv run --directory server fastapi dev app/main.py --port 8000",

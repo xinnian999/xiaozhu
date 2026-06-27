@@ -66,6 +66,14 @@ class User(Base):
 from pydantic import BaseModel, EmailStr, Field  # noqa: E402
 
 
+class SendCodeRequest(BaseModel):
+    """POST /api/users/send-code 的请求体：只要邮箱。
+
+    EmailStr 顺手校验格式，格式不对直接 422，连验证码都不会发。
+    """
+    email: EmailStr
+
+
 class UserCreate(BaseModel):
     """POST /api/users/register 的请求体。
 
@@ -73,9 +81,12 @@ class UserCreate(BaseModel):
     password 用 Field 限制长度：
       min_length=6  → 太短的弱密码挡掉；
       max_length=72 → 对齐 bcrypt 的 72 字节上限，避免后面哈希时出错。
+    code：邮箱验证码（先调 send-code 拿）。注册时后端校验它，确保邮箱真实可达，
+      从而「一个真实邮箱只能注册一个号」，挡住乱填邮箱多开小号。
     """
     email: EmailStr
     password: str = Field(min_length=6, max_length=72)
+    code: str = Field(min_length=4, max_length=8)
 
 
 class UserRead(BaseModel):

@@ -95,6 +95,28 @@
           color: var(--color-text-faint);
         }
       }
+
+      // 验证码行右侧的「发送验证码 / 倒计时」按钮
+      .sendCodeBtn {
+        @include button-reset;
+        flex-shrink: 0;
+        padding: 0 $space-1;
+        color: var(--color-accent);
+        font-size: $fs-13;
+        font-weight: $fw-medium;
+        white-space: nowrap;
+        transition: opacity $dur-fast $ease-out;
+
+        &:hover:not(:disabled) {
+          opacity: 0.8;
+        }
+
+        // 发送中 / 倒计时中：置灰不可点
+        &:disabled {
+          color: var(--color-text-faint);
+          cursor: not-allowed;
+        }
+      }
     }
 
     .error {

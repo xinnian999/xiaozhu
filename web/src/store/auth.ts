@@ -27,8 +27,8 @@ type AuthState = {
   init: () => Promise<void>
   /** 登录：换 token → 存起来 → 拉用户信息。失败抛错由调用方（登录页）提示。 */
   login: (email: string, password: string) => Promise<void>
-  /** 注册：建账号后自动登录（后端注册不返回 token，需再登录一次）。 */
-  register: (email: string, password: string) => Promise<void>
+  /** 注册：带邮箱验证码建账号后自动登录（后端注册不返回 token，需再登录一次）。 */
+  register: (email: string, password: string, code: string) => Promise<void>
   /** 登出：清 token + 用户，并刷新回首屏，确保不残留上一个用户的会话数据。 */
   logout: () => void
   /** 修改资料（昵称 / 头像）：提交后端并同步更新本地 user。 */
@@ -64,8 +64,8 @@ export const useAuthStore = create<AuthState>((set) => ({
     set({ user })
   },
 
-  register: async (email, password) => {
-    await apiRegister(email, password)
+  register: async (email, password, code) => {
+    await apiRegister(email, password, code)
     // 注册成功后直接复用登录逻辑拿 token（避免让用户再手动登一次）
     const token = await apiLogin(email, password)
     setToken(token)

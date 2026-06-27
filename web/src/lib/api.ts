@@ -27,7 +27,12 @@ function authHeaders(): Record<string, string> {
 // 不触发"自动登出跳转"的接口：
 //   - login/register：401 是"密码错/邮箱占用"的业务结果，由登录页自己提示，不该跳转
 //   - me：恢复登录态时用，401 表示 token 失效，由 auth store 自己 catch 处理
-const SILENT_AUTH_PATHS = ['/api/users/login', '/api/users/register', '/api/users/me']
+const SILENT_AUTH_PATHS = [
+  '/api/users/login',
+  '/api/users/register',
+  '/api/users/send-code',
+  '/api/users/me',
+]
 
 // ── axios 实例 ─────────────────────────────────────────────────
 // 走 Vite 代理，baseURL 留空即可（/api/xxx 会被代理到后端）
@@ -129,9 +134,19 @@ export type ProfileUpdate = {
   avatar?: string
 }
 
-/** 注册新用户。后端返回用户对象（不含 token），注册成功后通常紧跟一次登录。 */
-export async function register(email: string, password: string): Promise<ApiUser> {
-  const { data } = await http.post<ApiUser>('/api/users/register', { email, password })
+/** 给注册邮箱发验证码（注册前先调）。成功返回 204，无响应体。 */
+export async function sendCode(email: string): Promise<void> {
+  await http.post('/api/users/send-code', { email })
+}
+
+/** 注册新用户。需带邮箱验证码（先调 sendCode 拿）。后端返回用户对象（不含 token），
+ *  注册成功后通常紧跟一次登录。 */
+export async function register(
+  email: string,
+  password: string,
+  code: string,
+): Promise<ApiUser> {
+  const { data } = await http.post<ApiUser>('/api/users/register', { email, password, code })
   return data
 }
 

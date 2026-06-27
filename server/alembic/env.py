@@ -15,6 +15,7 @@ from alembic import context
 from app.config import settings  # noqa: E402
 from app.db import Base  # noqa: E402
 from app.models import (  # noqa: E402, F401
+    email_code,
     file,
     message,
     order,

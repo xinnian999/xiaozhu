@@ -94,6 +94,15 @@ class Settings(BaseSettings):
     # 线上公网域名（不带末尾斜杠），目前没直接用到，留作记录 / 将来生成回跳地址备用。
     afdian_public_base: str = ""
 
+    # ── 邮件 SMTP（发注册验证码用）────────────────────────────
+    # 走标准 SMTP 协议发信。smtp_password 填邮箱的「授权码」(QQ/163 在邮箱设置里单独生成的
+    # 专用密钥)，不是登录密码——可单独吊销，泄露也不连累主密码。值都进 .env（密钥别入仓库）。
+    smtp_host: str = ""            # SMTP 服务器，如 smtp.qq.com / smtp.163.com
+    smtp_port: int = 465          # 465=SSL（最常用）；587=STARTTLS
+    smtp_user: str = ""           # 发信邮箱账号（同时作为 From 地址）
+    smtp_password: str = ""       # 邮箱「授权码」（不是登录密码！）
+    smtp_from_name: str = "小筑"  # 发件人显示名
+
 
 # 单例：整个应用只实例化一次，其他模块 from app.config import settings 直接用
 settings = Settings()

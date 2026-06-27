@@ -249,9 +249,12 @@ export type ApiOrder = {
   pay_url: string
 }
 
-/** 为某档套餐下单，返回支付二维码。 */
-export async function createOrder(tier: string): Promise<ApiOrder> {
-  const { data } = await http.post<ApiOrder>('/api/billing/orders', { tier })
+// 支付渠道：支付宝 / 爱发电。
+export type PayMethod = 'alipay' | 'afdian'
+
+/** 为某档套餐下单，返回付款链接。method 选支付渠道，默认支付宝。 */
+export async function createOrder(tier: string, method: PayMethod = 'alipay'): Promise<ApiOrder> {
+  const { data } = await http.post<ApiOrder>('/api/billing/orders', { tier, method })
   return data
 }
 

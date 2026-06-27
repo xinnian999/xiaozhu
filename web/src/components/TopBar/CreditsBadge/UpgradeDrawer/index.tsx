@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { X, Loader2, ArrowLeft, ExternalLink } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
-import { getPlans, createOrder, getOrderStatus, type ApiPlan, type ApiOrder } from '@/lib/api'
+import { getPlans, createOrder, getOrderStatus, type ApiPlan, type ApiOrder, type PayMethod } from '@/lib/api'
 import { toast } from '@/lib/toast'
 import { tierLabel, TIER_BLURB, tierRank } from '../tiers'
 import styles from './index.module.scss'
@@ -29,6 +29,8 @@ export default function UpgradeDrawer({ onClose }: Props) {
   const [order, setOrder] = useState<ApiOrder | null>(null)
   // 正在下单的档位（按钮 loading 用）
   const [creating, setCreating] = useState<string | null>(null)
+  // 选中的支付渠道：支付宝 / 爱发电。默认支付宝。
+  const [payMethod, setPayMethod] = useState<PayMethod>('alipay')
 
   const currentTier = billing?.tier
 
@@ -67,7 +69,7 @@ export default function UpgradeDrawer({ onClose }: Props) {
     if (creating) return
     setCreating(tier)
     try {
-      const o = await createOrder(tier)
+      const o = await createOrder(tier, payMethod)
       setOrder(o)
     } catch {
       // 错误已由 axios 拦截器 toast
@@ -99,7 +101,7 @@ export default function UpgradeDrawer({ onClose }: Props) {
           ) : (
             <span />
           )}
-          <h2 className={styles.title}>{order ? '扫码支付' : '升级订阅'}</h2>
+          <h2 className={styles.title}>{order ? '前往支付' : '升级订阅'}</h2>
           <button type="button" className={styles.closeBtn} onClick={onClose} aria-label="关闭">
             <X size={16} />
           </button>
@@ -119,11 +121,13 @@ export default function UpgradeDrawer({ onClose }: Props) {
               rel="noopener noreferrer"
             >
               <ExternalLink size={15} />
-              前往支付宝支付
+              {payMethod === 'alipay' ? '前往支付宝支付' : '前往爱发电支付'}
             </a>
             <p className={styles.payHint}>
               <Loader2 size={13} className={styles.spin} />
-              在新标签页用沙箱买家账号登录付款，支付后自动到账…
+              {payMethod === 'alipay'
+                ? '在新标签页用沙箱买家账号登录付款，支付后自动到账…'
+                : '在新标签页选支付宝/微信付款，支付后自动到账…'}
             </p>
           </div>
         ) : (
@@ -177,7 +181,31 @@ export default function UpgradeDrawer({ onClose }: Props) {
                 )
               })}
             </div>
-            <p className={styles.footnote}>支付宝沙箱支付，用沙箱版支付宝 App 扫码完成。</p>
+            {/* 支付渠道选择：支付宝 / 爱发电，分段切换 */}
+            <div className={styles.methods}>
+              <span className={styles.methodsLabel}>支付方式</span>
+              <div className={styles.methodTabs}>
+                <button
+                  type="button"
+                  className={`${styles.methodTab} ${payMethod === 'alipay' ? styles.methodTabActive : ''}`}
+                  onClick={() => setPayMethod('alipay')}
+                >
+                  支付宝
+                </button>
+                <button
+                  type="button"
+                  className={`${styles.methodTab} ${payMethod === 'afdian' ? styles.methodTabActive : ''}`}
+                  onClick={() => setPayMethod('afdian')}
+                >
+                  爱发电
+                </button>
+              </div>
+            </div>
+            <p className={styles.footnote}>
+              {payMethod === 'alipay'
+                ? '支付宝沙箱支付，用沙箱版支付宝 App 扫码完成。'
+                : '爱发电支持支付宝 / 微信付款，付款后自动到账。'}
+            </p>
           </>
         )}
       </aside>

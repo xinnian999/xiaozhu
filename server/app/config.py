@@ -94,6 +94,20 @@ class Settings(BaseSettings):
     # 用「前端轮询 + 后端主动查单」验证（不需要公网可达）；上生产再填公网 HTTPS 地址。
     alipay_notify_url: str = ""
 
+    # ── 爱发电（afdian / ifdian.net）收款 ──────────────────────
+    # 与支付宝并行的第二支付渠道。接入模型：在爱发电建「商品(售卖)」，下单链接带上
+    # custom_order_id（= 我们的订单号）透传 → 用户付款 → 爱发电 webhook 通知我们 →
+    # 后端调 query-order API 核单 → 复用 _fulfill_order 升档。值都在 .env 的 AFDIAN_* 里。
+    afdian_user_id: str = ""    # 开发者后台的 user_id（创作者身份，调 API 要用）
+    afdian_token: str = ""      # 开发者后台生成的 API Token（密钥！只进 .env 不进仓库）
+    # 两个会员商品的 plan_id（= 商品 item_id）和各自的 sku_id（型号 id），拼下单链接用。
+    afdian_pro_plan_id: str = ""
+    afdian_pro_sku_id: str = ""
+    afdian_max_plan_id: str = ""
+    afdian_max_sku_id: str = ""
+    # 线上公网域名（不带末尾斜杠），目前没直接用到，留作记录 / 将来生成回跳地址备用。
+    afdian_public_base: str = ""
+
 
 # 单例：整个应用只实例化一次，其他模块 from app.config import settings 直接用
 settings = Settings()

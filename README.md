@@ -121,7 +121,31 @@ uv run --directory server alembic upgrade head
 
 ## 部署
 
-`Dockerfile` 多阶段构建:前端 `bun run build` → 拷进 `server/static` 由后端托管(同源);容器启动自动 `alembic upgrade head`,并把 `deps-snapshot.bin` gzip 成 `.bin.gz` 供生产分发。`DATABASE_URL` 指向挂载的持久化目录。详见 [docker-compose.yml](docker-compose.yml)。
+**全自动 CI/CD:你只需 `git push origin master`,剩下全自动。**
+
+```
+git push origin master
+  → GitHub: xinnian999/xiaozhu (master 分支)
+  → 阿里云 ACR「自动构建仓库」监听到代码变更，自动构建镜像（海外构建机 + 根目录 Dockerfile）
+       产出 crpi-a7p27yxlrmekg1a3.cn-beijing.personal.cr.aliyuncs.com/elin/xiaozhu:latest（约 2 分钟）
+  → 构建成功触发「触发器 xiaozhu_deploy」(全部触发)，回调服务器上的部署 webhook
+       (http://xiaozhu.elin521.cn/<部署钩子>)
+  → 服务器执行 docker compose pull && docker compose up -d（拉新 latest、重启容器）
+  → 容器启动命令先 `alembic upgrade head` 自动迁移，再起 uvicorn
+线上地址：https://xiaozhu.elin521.cn
+```
+
+**ACR 构建规则**（容器镜像服务 → 个人版实例 → elin/xiaozhu → 构建）：
+- `branches:master` → 镜像 tag `latest`（日常发布走这条）
+- `tags:release-v$version` → 镜像 tag `$version`（打版本 tag 时用）
+
+**镜像构建细节**：`Dockerfile` 多阶段构建——前端 `bun run build` → 拷进 `server/static` 由后端托管(同源)；
+顺带把 `deps-snapshot.bin` gzip 成 `.bin.gz` 供生产分发。`DATABASE_URL` 指向挂载的持久化目录。详见
+[docker-compose.yml](docker-compose.yml)。
+
+> ⚠️ **改了环境变量要手动同步到服务器**：镜像里**不含** `.env`（密钥/环境配置运行时由 docker 注入，
+> 见 docker-compose 的 `env_file`）。所以**新增/修改环境变量**（如新接入支付渠道的 `AFDIAN_*`）必须先
+> SSH 到服务器改那份 `.env`，否则自动部署拉的新镜像仍读到旧/空配置。只改代码不涉及新 env 时，push 即可。
 
 ## 目录结构
 

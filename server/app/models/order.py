@@ -29,6 +29,10 @@ class Order(Base):
         String, ForeignKey("users.id"), nullable=False, index=True
     )
 
+    # 支付渠道：alipay（支付宝）/ afdian（爱发电）。决定查单时去问哪一家。
+    # server_default="alipay"：老订单（迁移前已存在的）自动补成支付宝，符合历史事实。
+    payment_method: Mapped[str] = mapped_column(String, nullable=False, server_default="alipay")
+
     # 买的是哪一档（pro / max）。free 不需要下单，所以这里只会是付费档。
     tier: Mapped[str] = mapped_column(String, nullable=False)
 

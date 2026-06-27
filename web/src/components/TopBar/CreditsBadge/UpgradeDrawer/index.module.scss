@@ -166,6 +166,48 @@
     }
   }
 
+  // 支付方式选择：左侧标签 + 右侧分段按钮
+  .methods {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: $space-4;
+
+    .methodsLabel {
+      color: var(--color-text-mute);
+      font-size: $fs-13;
+    }
+
+    .methodTabs {
+      display: inline-flex;
+      gap: $space-1;
+      padding: 2px;
+      border-radius: $radius-md;
+      background: var(--color-bg-soft);
+      border: 1px solid var(--color-border);
+
+      .methodTab {
+        @include button-reset;
+        padding: $space-1 $space-3;
+        border-radius: $radius-sm;
+        color: var(--color-text-mute);
+        font-size: $fs-12;
+        font-weight: $fw-medium;
+        transition: color $dur-base $ease-out, background $dur-base $ease-out;
+
+        &:hover {
+          color: var(--color-text);
+        }
+
+        // 选中态：主色填充
+        &.methodTabActive {
+          background: var(--color-accent);
+          color: #fff;
+        }
+      }
+    }
+  }
+
   // ── 支付视图：二维码 + 等待 ──
   .pay {
     display: flex;

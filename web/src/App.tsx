@@ -1,7 +1,6 @@
-import { useEffect } from 'react'
+import { lazy, Suspense, useEffect } from 'react'
 import TopBar from '@/components/TopBar'
 import ChatSidebar from '@/components/ChatSidebar'
-import WorkArea from '@/components/WorkArea'
 import Toast from '@/components/Toast'
 import ImageLightbox from '@/components/ImageLightbox'
 import AuthGate from '@/components/AuthGate'
@@ -10,6 +9,10 @@ import { useSessionStore } from '@/store/session'
 import { useAuthStore } from '@/store/auth'
 import { warmupSnapshot } from '@/lib/depsCache'
 import styles from './App.module.scss'
+
+// WorkArea 含 Monaco 编辑器 / WebContainer / xterm 等重型依赖，且仅在有活动会话时才用，
+// 故懒加载成独立 chunk —— 首屏初始包不含这些，大幅缩短第一次打开的白屏时间。
+const WorkArea = lazy(() => import('@/components/WorkArea'))
 
 function App() {
   const theme = useThemeStore((s) => s.theme)
@@ -68,7 +71,11 @@ function App() {
       <TopBar />
       <main className={`${styles.main} ${hasActive ? '' : styles.noSession}`}>
         <ChatSidebar />
-        {hasActive && <WorkArea />}
+        {hasActive && (
+          <Suspense fallback={<div className={styles.workLoading}>加载工作区…</div>}>
+            <WorkArea />
+          </Suspense>
+        )}
       </main>
       <Toast />
       <ImageLightbox />

@@ -13,6 +13,17 @@
   font-size: $fs-14;
 }
 
+// 工作区懒加载占位：WorkArea 是按需加载的独立 chunk，下载/解析期间填这个
+.workLoading {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-dim);
+  font-size: $fs-14;
+}
+
 .app {
   width: 100vw;
   height: 100vh;

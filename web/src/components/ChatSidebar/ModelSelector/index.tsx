@@ -2,7 +2,7 @@ import { useCallback, useRef, useState } from 'react'
 import { ChevronDown, Check, Bot } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
 import { useClickOutside } from '@/hooks/useClickOutside'
-import { getLobeHubIcon } from '@/lib/lobeIcon'
+import { ModelIcon } from '@/lib/lobeIcon'
 import styles from './index.module.scss'
 
 // ============================================
@@ -32,9 +32,14 @@ export default function ModelSelector() {
   // 模型清单还没加载出来时不渲染，避免出现空按钮
   if (models.length === 0) return null
 
-  // lobe 解析不出图标时用 lucide 的 <Bot> 兜底
-  const renderIcon = (icon: string, size: number) =>
-    getLobeHubIcon(icon, size) ?? <Bot size={size} className={styles.fallbackIcon} />
+  // 图标库按需异步加载；加载完成前 / 解析不出时用 lucide 的 <Bot> 兜底
+  const renderIcon = (icon: string, size: number) => (
+    <ModelIcon
+      name={icon}
+      size={size}
+      fallback={<Bot size={size} className={styles.fallbackIcon} />}
+    />
+  )
 
   return (
     <div className={styles.selector} ref={rootRef}>

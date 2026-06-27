@@ -15,9 +15,42 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300..700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap"
     />
+
+    <!-- 首屏加载占位：在主 JS 下载/解析、React 挂载前显示，避免纯白屏。
+         React 挂载时会用应用内容替换 #root 的子节点，这个占位随之消失。 -->
+    <style>
+      #initial-loader {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #f7f5f0;
+      }
+      #initial-loader .spinner {
+        width: 34px;
+        height: 34px;
+        border: 3px solid rgba(0, 0, 0, 0.12);
+        border-top-color: rgba(0, 0, 0, 0.55);
+        border-radius: 50%;
+        animation: il-spin 0.7s linear infinite;
+      }
+      @keyframes il-spin {
+        to { transform: rotate(360deg); }
+      }
+      @media (prefers-color-scheme: dark) {
+        #initial-loader { background: #1a1a1a; }
+        #initial-loader .spinner {
+          border-color: rgba(255, 255, 255, 0.15);
+          border-top-color: rgba(255, 255, 255, 0.6);
+        }
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="initial-loader"><div class="spinner"></div></div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

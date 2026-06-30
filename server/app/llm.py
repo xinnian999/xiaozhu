@@ -119,6 +119,13 @@ def build_llm(model: str) -> ChatOpenAI:
         base_url=meta.get("base_url") or None,
         # 一次 write_file 要塞下整个文件内容，4096 太小，写稍大的页面就会被截断。先给到 16384。
         max_tokens=16384,
+        # 禁止「并行工具调用」：让模型一次只发一个 tool_call，工具按顺序逐个执行。
+        # 我们一个请求共享同一个 async DB 会话，而 AsyncSession 不允许被并发使用 ——
+        # 模型若一轮同时发多个 write_file，LangGraph 会并发执行，多个 commit 撞在一起报
+        # "transaction is closed" / "_prepare_impl in progress"。串行化后该类竞态彻底消失，
+        # 也更贴合「逐个文件写入、渐进预览」的设计。tools.py 里的 db 锁是第二道保险
+        #（防个别中转无视此参数）。经 model_kwargs 透传到 OpenAI 兼容请求体。
+        model_kwargs={"parallel_tool_calls": False},
         # 全局关闭 qwen 系的「思考」开关：开着既慢又看不到思维链（中转只回计数），得不偿失。
         # 经 extra_body 透传，不认识它的模型（gpt 系）会忽略，无副作用。
         extra_body={"enable_thinking": False},

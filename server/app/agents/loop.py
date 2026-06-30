@@ -9,6 +9,7 @@
 输入契约 ChatRequest、两个 SSE 辅助函数也放这里。路由层(app.api.chat)只做鉴权 / 校验。
 """
 
+import asyncio
 import json
 import re
 from collections.abc import AsyncGenerator
@@ -245,6 +246,13 @@ async def agent_loop(
 
     user_id：本轮请求者。用于「成功才扣」——干净跑完时按模型倍率给他扣点（见收尾处）。
     """
+    # 请求级 db 锁：本请求共享一个 AsyncSession，而它**不允许被并发使用**。
+    # LangGraph 是在后台任务里跑图的 —— 图里工具的 db 写入，会和本消费端 add_message /
+    # 落库 tool_result 的写入并发，撞上同一个会话就报 "concurrent operations are not
+    # permitted" / "transaction is closed"。所以凡是碰这个 db 的地方（工具 + 这里的落库）
+    # 都用这把锁串起来。锁只圈 db 调用本身、绝不跨 yield 持有（否则可能和图互相等待）。
+    db_lock = asyncio.Lock()
+
     # 每请求构造工具(闭包 db / session_id),llm 按本请求选的模型构造。
     # create_agent 内部会 bind_tools、注入 system_prompt,所以这里不用自己绑、
     # messages 也不必塞 SystemMessage —— 这是「每条消息可变模型」的落点。
@@ -256,7 +264,7 @@ async def agent_loop(
     # 展示出来。HTTPException 用它的 detail(给用户的中文说明),其它异常退回 str(e)。
     try:
         llm = build_llm(req.model)
-        tools = build_tools(db, req.session_id)
+        tools = build_tools(db, req.session_id, db_lock)
         agent = create_agent(llm, tools, system_prompt=SYSTEM_PROMPT)
     except HTTPException as e:
         yield sse({"type": "error", "message": str(e.detail)})
@@ -290,8 +298,9 @@ async def agent_loop(
             tool_args=tool_args,
             images=images,
         )
-        db.add(msg)
-        await db.commit()
+        async with db_lock:
+            db.add(msg)
+            await db.commit()
         return msg
 
     # 1. 准备本轮 prompt + 文件起点。分两条路:
@@ -354,7 +363,8 @@ async def agent_loop(
     # ── 工具卡「流式提前亮」用的累积状态 ──
     # 目的：在 messages 模式里盯 tool_call_chunks（参数碎片逐 token 流过来），一旦解析出 path
     # 就提前 yield 一张工具卡，不必等整段 content 写完。下面四个量配合完成"碎片→提前卡片"：
-    announced_tools: set[str] = set()      # 已提前发过卡片的 tool_call id —— updates 阶段据此不再重发，避免双卡
+    announced_tools: set[str] = set()      # 已发过卡片的 tool_call id —— updates 阶段据此不再重发，避免双卡
+    path_sent: set[str] = set()            # 已补过 path 那一帧的 tool_call id（避免重复补）
     tool_chunk_args: dict[str, str] = {}   # tool_call id -> 已累积的参数 JSON 片段（用来匹配 path）
     tool_chunk_idx: dict[int, str] = {}    # 流式碎片的 index -> tool_call id（续传碎片不带 id，只能靠 index 关联）
     tool_chunk_name: dict[str, str] = {}   # tool_call id -> 工具名（只有每个调用的第一个碎片带名字，先记下备用）
@@ -379,8 +389,13 @@ async def agent_loop(
 
                     # 工具调用的参数也是逐 token 流过来的（tool_call_chunks）：每个调用的第一个
                     # 碎片带 name+id，后续"续传碎片"只有一段 args 文本、不带 id —— 只能靠 index
-                    # 关联回同一个调用。我们边收边把参数拼起来，一旦能从中抠出完整的 path，就立刻
-                    # 把工具卡发出去（早于整段 content 写完），卡片就能"秒出"而不是等文件写完。
+                    # 关联回同一个调用。
+                    #
+                    # 卡片要「秒出」：一旦拿到工具名（第一个碎片就带）就立刻发一张空参卡，让前端先
+                    # 显示卡片 + 转圈，不必等参数写完。原先靠正则等 path 才发卡，但模型并不保证
+                    # 按 schema 顺序吐参数（实测 write_file 会先吐一大段 content、最后才吐 path），
+                    # 那样卡片要等整个文件写完才出，等于没有提前。改成「见名出卡」就稳了。
+                    # path 流到了再补一帧（让卡片标题从「写入」变成「写入 src/App.tsx」）。
                     for tcc in getattr(msg, "tool_call_chunks", None) or []:
                         idx = tcc.get("index") or 0
                         cid = tcc.get("id")
@@ -394,15 +409,20 @@ async def agent_loop(
                             cid = tool_chunk_idx.get(idx)
                             if cid is not None:
                                 tool_chunk_args[cid] += tcc.get("args") or ""
-                        # 还没发过卡 + 已能解析出 path → 提前发一张。只带 path：content 既没写完、
-                        # 前端工具卡也本就不展示文件内容，没必要等也没必要发。无 path 的工具
-                        #（list_files / check_build）这里匹配不到，留给下面 updates 阶段兜底补发。
-                        if cid and cid not in announced_tools:
+                        if not cid:
+                            continue
+                        name = tool_chunk_name.get(cid, "")
+                        # ① 见名出卡：拿到工具名且没发过 → 立刻发一张空参卡（卡片+转圈秒出）
+                        if name and cid not in announced_tools:
+                            announced_tools.add(cid)
+                            print(f"[tool_call·流式提前·出卡] name={name}")
+                            yield sse({"type": "tool_call", "name": name, "args": {}, "id": cid})
+                        # ② path 补帧：参数里一旦能解析出 path 且还没补过 → 再发一帧带 path 的，
+                        #    让卡片标题补上文件名。content 不在这里发（前端工具卡本就不展示文件内容）。
+                        if cid in announced_tools and cid not in path_sent:
                             mt = _PATH_RE.search(tool_chunk_args.get(cid, ""))
                             if mt:
-                                announced_tools.add(cid)
-                                name = tool_chunk_name.get(cid, "")
-                                print(f"[tool_call·流式提前] name={name} path={mt.group(1)}")
+                                path_sent.add(cid)
                                 yield sse({
                                     "type": "tool_call",
                                     "name": name,
@@ -489,7 +509,8 @@ async def agent_loop(
                             else tool_result[:TOOL_RESULT_CAP] + "\n…（结果过长已截断）"
                         )
                         tool_msg.text = capped
-                        await db.commit()
+                        async with db_lock:
+                            await db.commit()
                         yield sse({"type": "tool_result", "id": tm.tool_call_id, "result": capped})
 
                         # ── 各工具特有的副作用 ──
@@ -511,13 +532,14 @@ async def agent_loop(
                         # 但前端要整文件 mount,所以改成功后从库里回读完整内容再推。
                         # 只在「真改成功」时推:成功返回 "已编辑 {path}",失败返回别的说明文字。
                         elif name == "edit_file" and tool_result == f"已编辑 {args['path']}":
-                            res = await db.execute(
-                                select(File.content).where(
-                                    File.session_id == req.session_id,
-                                    File.path == args["path"],
+                            async with db_lock:
+                                res = await db.execute(
+                                    select(File.content).where(
+                                        File.session_id == req.session_id,
+                                        File.path == args["path"],
+                                    )
                                 )
-                            )
-                            content = res.scalar_one_or_none()
+                                content = res.scalar_one_or_none()
                             if content is not None:
                                 wrote_files = True
                                 yield sse({

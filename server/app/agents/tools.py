@@ -8,8 +8,16 @@
 注意：工具闭包里没法 yield SSE 事件，所以这些工具只负责「读写数据库 + 返回字符串」；
 「写完后推 file_write / preview_refresh 给前端」这类事件，统一在 agent_loop 里
 根据工具名做（见 app.agents.loop）。
+
+并发安全：一组工具共享同一个请求级 AsyncSession，而它**不允许被并发使用**。LangGraph
+在后台任务里跑图：工具的 db 写入会和 agent_loop 消费端的落库（add_message / 写
+tool_result）并发，撞同一个会话就报 "concurrent operations are not permitted" /
+"transaction is closed"。所以由 agent_loop 建一把请求级 asyncio.Lock 传进来，**工具和
+消费端共用同一把锁**，把所有碰 db 的操作串起来。check_build 不碰 db、且会长等（最多
+90s）、不能占着锁，故不纳入。
 """
 
+import asyncio
 import json
 
 from langchain_core.tools import tool
@@ -20,23 +28,27 @@ from app import build_store
 from app.models.file import File
 
 
-def build_tools(db: AsyncSession, session_id: str) -> list:
-    """构造一组绑定到指定 session 的工具。"""
+def build_tools(db: AsyncSession, session_id: str, db_lock: asyncio.Lock) -> list:
+    """构造一组绑定到指定 session 的工具。
+
+    db_lock：agent_loop 传入的请求级 asyncio.Lock，与消费端共用，串行化所有 db 操作。
+    """
 
     @tool
     async def write_file(path: str, content: str) -> str:
         """写入或覆盖一个文件。path 是相对路径（如 src/App.tsx），content 是完整文件内容。"""
         # upsert：File 表对 (session_id, path) 有唯一约束，
         # 已存在则改 content，不存在则新建。
-        result = await db.execute(
-            select(File).where(File.session_id == session_id, File.path == path)
-        )
-        existing = result.scalar_one_or_none()
-        if existing is not None:
-            existing.content = content
-        else:
-            db.add(File(session_id=session_id, path=path, content=content))
-        await db.commit()
+        async with db_lock:
+            result = await db.execute(
+                select(File).where(File.session_id == session_id, File.path == path)
+            )
+            existing = result.scalar_one_or_none()
+            if existing is not None:
+                existing.content = content
+            else:
+                db.add(File(session_id=session_id, path=path, content=content))
+            await db.commit()
         return f"已写入 {path}"
 
     @tool
@@ -48,38 +60,40 @@ def build_tools(db: AsyncSession, session_id: str) -> list:
         要求：old_string 必须在文件中**唯一且完整**匹配（带上足够的上下文行来区分），
         否则无法确定改哪一处。新建文件请用 write_file。
         """
-        result = await db.execute(
-            select(File).where(File.session_id == session_id, File.path == path)
-        )
-        f = result.scalar_one_or_none()
-        # 下面三种情况都不抛异常，而是返回说明性字符串 —— 它会作为 ToolMessage 回喂给
-        # LLM，让模型自己读懂「为什么没改成」并纠正（比如改用 write_file、或补上下文）。
-        if f is None:
-            return f"文件 {path} 不存在，无法编辑。新建文件请用 write_file。"
-        count = f.content.count(old_string)
-        if count == 0:
-            return (
-                f"未找到要替换的内容：old_string 在 {path} 里不存在。"
-                "请先用 read_file 读出原文，按原文逐字提供 old_string。"
+        async with db_lock:
+            result = await db.execute(
+                select(File).where(File.session_id == session_id, File.path == path)
             )
-        if count > 1:
-            return (
-                f"old_string 在 {path} 里出现了 {count} 次，无法确定改哪一处。"
-                "请在 old_string 里多带几行上下文，让它在文件中唯一。"
-            )
-        # 唯一命中：替换并存回完整内容。注意 str.replace 第三参数限定只替 1 次，
-        # 双保险（前面已确认 count==1）。
-        f.content = f.content.replace(old_string, new_string, 1)
-        await db.commit()
+            f = result.scalar_one_or_none()
+            # 下面三种情况都不抛异常，而是返回说明性字符串 —— 它会作为 ToolMessage 回喂给
+            # LLM，让模型自己读懂「为什么没改成」并纠正（比如改用 write_file、或补上下文）。
+            if f is None:
+                return f"文件 {path} 不存在，无法编辑。新建文件请用 write_file。"
+            count = f.content.count(old_string)
+            if count == 0:
+                return (
+                    f"未找到要替换的内容：old_string 在 {path} 里不存在。"
+                    "请先用 read_file 读出原文，按原文逐字提供 old_string。"
+                )
+            if count > 1:
+                return (
+                    f"old_string 在 {path} 里出现了 {count} 次，无法确定改哪一处。"
+                    "请在 old_string 里多带几行上下文，让它在文件中唯一。"
+                )
+            # 唯一命中：替换并存回完整内容。注意 str.replace 第三参数限定只替 1 次，
+            # 双保险（前面已确认 count==1）。
+            f.content = f.content.replace(old_string, new_string, 1)
+            await db.commit()
         return f"已编辑 {path}"
 
     @tool
     async def read_file(path: str) -> str:
         """读取文件内容。修改已有文件前必须先调此工具，否则会覆盖原有代码。"""
-        result = await db.execute(
-            select(File).where(File.session_id == session_id, File.path == path)
-        )
-        f = result.scalar_one_or_none()
+        async with db_lock:
+            result = await db.execute(
+                select(File).where(File.session_id == session_id, File.path == path)
+            )
+            f = result.scalar_one_or_none()
         if f is None:
             # 不抛异常 —— 返回字符串让 LLM 自己处理「文件不存在」的语义
             return f"文件 {path} 不存在"
@@ -89,8 +103,10 @@ def build_tools(db: AsyncSession, session_id: str) -> list:
     async def list_files() -> str:
         """列出当前项目下所有文件路径。开始生成前先调用，了解项目现有结构。"""
         # 只 select 一列，比把整个 File 行拉出来再 .path 省内存
-        result = await db.execute(select(File.path).where(File.session_id == session_id))
-        return json.dumps(result.scalars().all(), ensure_ascii=False)
+        async with db_lock:
+            result = await db.execute(select(File.path).where(File.session_id == session_id))
+            paths = result.scalars().all()
+        return json.dumps(paths, ensure_ascii=False)
 
     @tool
     async def check_build() -> str:

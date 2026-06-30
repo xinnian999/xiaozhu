@@ -1,125 +1,163 @@
-"""LLM 模型注册表 + 构造 —— 模型配置的单一真相源。
+"""LLM 模型注册表 + 构造 —— 以数据库为真相源，内存缓存为读取层。
 
-加一个新模型，原则上只动这个文件的 AVAILABLE_MODELS 一处：
-  - 已有分组的模型：只在 AVAILABLE_MODELS 加一项。
-  - 新分组的模型：AVAILABLE_MODELS 加一项 + 在 .env 加一行 API_KEY_{分组大写}。
-config.py / chat.py 都不用改。
+模型搬进数据库（单张 llm_models 表，每个模型自带 base_url + api_key），
+可在管理后台运行时增删改。本文件职责：
+  1. 启动时 reload_registry() 把表读进内存缓存（_MODELS_BY_ID / _ORDERED_IDS）。
+  2. 对外提供 allowed_model_ids() / default_model_id() / public_models() / build_llm()，
+     都查内存缓存，不每条请求打库。
+  3. 后台改了模型后调 reload_registry() 刷新缓存即时生效。
+  4. 首次部署用 SEED_MODELS + .env 里的 API_KEY_* / OPENAI_BASE_URL 把库灌好（ensure_seeded）。
 """
 
 from fastapi import HTTPException
 from langchain_openai import ChatOpenAI
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.models.llm_config import LlmModel
 
 
-# ── 可选模型白名单 ────────────────────────────────────────────────────────────────
-# 前端只能从这个列表里「选」，不能「传」任意 model 字符串。原因：
-#   1. 安全 —— 模型名是计费/能力相关的敏感参数，不该把选择权完全交给客户端。
-#   2. 可控 —— 中转到底支持哪些模型由后端说了算，前端瞎传一个不存在的会神秘失败。
-#   3. 解耦 —— 以后改清单只动这一处，前端从 GET /api/models 动态拉，不用跟着改。
-# 这就是「白名单」：它是可选模型的唯一真相源。
-#
-# 每项三个字段：
-#   id    —— 真正传给中转的模型名（后端 / API 用）
-#   label —— 给前端下拉框展示的人类可读名
-#   group —— 该模型属于中转站的哪个「分组」。中转站按分组发不同 api_key，
-#            所以这里只存分组名（不存 key！），真正的 key 在 build_llm 里按分组从 .env 取。
-#            同一分组下的多个模型共用一个 key —— 这正是「分组」存在的意义。
-#            另：分组在本项目里就等于「厂商」，所以 logo 也按分组派生（见 GROUP_ICONS）。
-#   vision —— 是否支持识图（多模态图片输入）。前端据此把「添加图片」置灰，不支持的不让传图。
-#            这个值不是查文档拍脑袋填的，而是用 scripts/check_vision.py 实测出来的
-#            （发一张「左右两半不同色」的结构图、要求同时答对两边的颜色）。
-#            ★为什么要结构图而不是纯色图：纯色图答案空间只有 3 种，没视觉的模型瞎猜也可能
-#            蒙中，给出假阳性 —— qwen3-coder-next 当初就是这么被误标成支持的。双色图要同时读
-#            对两个区域，蒙不过去，标定才可信。换中转站后能力可能变，记得重跑脚本核对。
-#   cost  —— 付费倍率：一轮对话扣多少「点数」。普通模型 1，更贵的模型 2（gpt-5.5 单轮成本
-#            实测约 2~3 倍）。扣费按档位的每日额度走，定义见 app/billing.py。这是后端内部
-#            的计费参数，public_models 暂不外吐（前端要显示 1x/2x 时再开，见付费第 4 步）。
-AVAILABLE_MODELS = [
-    # qwen3-coder-next 是「代码」专精模型，实测经本中转**不具备可用的识图能力**：
-    # 发三张不同的双色图（红绿/绿蓝/蓝红）它都回同一个固定答案「left=red right=blue」——
-    # 根本不看图；发用户的真实图更是直接否认「我无法看见」。之前误标成 True，是因为旧版
-    # check_vision.py 用单张纯色图探测，被它的固定答案恰好撞中一次就当成支持（假阳性）。
-    # 已把探测脚本改成「连测三组双色图、必须全对」（固定答案必被识破）—— 详见 scripts/check_vision.py。
-    {"id": "qwen3-coder-next", "label": "Qwen3 Coder Next", "group": "qwen", "vision": False, "cost": 1},
-    # qwen3.6-plus 是通用大模型，实测能准确识图（连 WebP 都支持），带上完整 system prompt
-    # 也不受影响。要发图给 AI 看就用这个模型。
-    {"id": "qwen3.6-plus", "label": "Qwen3.6 Plus", "group": "qwen", "vision": True, "cost": 1},
-    {"id": "gpt-5.5", "label": "GPT-5.5", "group": "gpt", "vision": False, "cost": 2},
+# ── 种子数据（仅首次建库用）────────────────────────────────────────────────────
+# 原来写死在代码里的模型清单，现在只当「初始数据」：库为空时灌进去一次。
+# vision / cost 都是实测标定过的值（见 scripts/check_vision.py 与 billing.py），别凭记忆改。
+# _env_key 仅用于首次播种时去 .env 的 API_KEY_* 取对应 key，不入库、不是模型字段。
+SEED_MODELS = [
+    {"id": "qwen3-coder-next", "name": "Qwen3 Coder Next", "logo": "Qwen.Color", "vision": False, "cost": 1, "_env_key": "qwen"},
+    {"id": "qwen3.6-plus", "name": "Qwen3.6 Plus", "logo": "Qwen.Color", "vision": True, "cost": 1, "_env_key": "qwen"},
+    {"id": "gpt-5.5", "name": "GPT-5.5", "logo": "OpenAI", "vision": False, "cost": 2, "_env_key": "gpt"},
 ]
 
-# 分组 → 品牌 logo（@lobehub/icons 的「组件标识符」，不是 URL！）。
-# 格式 "{Name}" 或 "{Name}.{Variant}"，如 "Qwen.Color" / "OpenAI"。前端拿这个字符串解析成图标组件。
-# logo 是「厂商」属性，而分组在本项目里就是厂商，所以同分组的模型共用一个 logo —— 没必要每个模型重复写。
-# 注意：不是每个厂商都有 .Color 彩色变体（如 OpenAI logo 本身是纯黑，只有默认 Mono 形态）。
-GROUP_ICONS = {
-    "qwen": "Qwen.Color",
-    "gpt": "OpenAI",
-}
 
-# 校验用的集合：判断「前端传来的 model 是否合法」时，用 set 查 O(1)，
-# 比每次遍历 AVAILABLE_MODELS 快，也读着更清楚（in 一个集合 = 在不在白名单里）。
-ALLOWED_MODEL_IDS = {m["id"] for m in AVAILABLE_MODELS}
+# ── 内存缓存（注册表）──────────────────────────────────────────────────────────
+# 由 reload_registry() 从数据库填充。业务代码只读这两个结构。
+# _MODELS_BY_ID: 模型 id → {全部字段}
+# _ORDERED_IDS:  按 sort_order 排好序的「已启用」模型 id 列表（默认模型 / 清单顺序用）。
+_MODELS_BY_ID: dict[str, dict] = {}
+_ORDERED_IDS: list[str] = []
 
-# 「模型 id → 该模型的元信息」索引，build_llm 里 O(1) 查到它属于哪个分组。
-MODELS_BY_ID = {m["id"]: m for m in AVAILABLE_MODELS}
 
-# 白名单第一个模型当默认 —— 前端不传 model 时用它，保证向后兼容。
-DEFAULT_MODEL_ID = AVAILABLE_MODELS[0]["id"]
+async def reload_registry(session: AsyncSession) -> None:
+    """从数据库重建内存缓存。启动时与后台改动后调用。"""
+    global _MODELS_BY_ID, _ORDERED_IDS
+
+    models = (
+        await session.execute(select(LlmModel).order_by(LlmModel.sort_order))
+    ).scalars().all()
+    _MODELS_BY_ID = {
+        m.id: {
+            "id": m.id,
+            "name": m.name,
+            "base_url": m.base_url,
+            "api_key": m.api_key,
+            "logo": m.logo,
+            "vision": m.vision,
+            "cost": m.cost,
+            "enabled": m.enabled,
+            "sort_order": m.sort_order,
+        }
+        for m in models
+    }
+    # 只有「启用」的模型能被选择 / 当默认；已按 sort_order 取出，这里保持顺序过滤即可。
+    _ORDERED_IDS = [m.id for m in models if m.enabled]
+
+
+# ── 对外读取接口（都查内存缓存）────────────────────────────────────────────────
+def models_by_id() -> dict[str, dict]:
+    """模型 id → 元信息（含已禁用的）。供 chat/loop 查 cost / vision。"""
+    return _MODELS_BY_ID
+
+
+def allowed_model_ids() -> set[str]:
+    """允许被前端选择 / 调用的模型 id 集合 —— 只含「已启用」的。"""
+    return set(_ORDERED_IDS)
+
+
+def default_model_id() -> str:
+    """默认模型：已启用模型里 sort_order 最靠前的那个。一个都没有时返回空串
+    （chat 的白名单校验会据此返回明确的 400，而不是神秘失败）。"""
+    return _ORDERED_IDS[0] if _ORDERED_IDS else ""
 
 
 def public_models() -> list[dict]:
-    """给前端的模型清单。只吐 id / label / icon / vision —— 故意不含 group，更不含 api_key：
-    group 是后端内部「选哪个 key」的路由信息，前端不需要知道；
-    api_key 是密钥，绝不能出现在任何响应里。
-
-    icon 不存在模型里，而是这里按 group 现派生出来：分组找不到对应 logo 就给空串，
-    前端解析不出会自动退回兜底图标，不会报错。
-    vision 直透出去，前端据此把不支持识图的模型对应的「添加图片」按钮置灰。
+    """给前端的模型清单。只吐已启用模型的 id / label / icon / vision / cost ——
+    故意不含 api_key（密钥，绝不外吐）。
+    字段名沿用前端约定：label=name、icon=logo。
     """
-    return [
-        {
-            "id": m["id"],
-            "label": m["label"],
-            "icon": GROUP_ICONS.get(m["group"], ""),
-            "vision": m["vision"],
-            # cost 是付费倍率（1/2），前端据此在模型旁标 1x/2x。它不是密钥也不敏感，
-            # 直接吐没问题；group/api_key 才是后端内部信息，依旧不吐。
-            "cost": m["cost"],
-        }
-        for m in AVAILABLE_MODELS
-    ]
+    result = []
+    for mid in _ORDERED_IDS:
+        m = _MODELS_BY_ID[mid]
+        result.append(
+            {
+                "id": m["id"],
+                "label": m["name"],
+                "icon": m["logo"],
+                "vision": m["vision"],
+                "cost": m["cost"],
+            }
+        )
+    return result
 
 
 def build_llm(model: str) -> ChatOpenAI:
-    """按指定模型名构造一个 LLM 实例。model 必须已通过白名单校验。
+    """按模型名构造 LLM 实例。model 必须已通过白名单校验。
 
-    根据模型所属的「分组」取对应的 api_key —— 中转站按分组发不同 key。
-    base_url 全局共用；变的只是 key。
-
-    故意不在这里 bind_tools：工具实现要闭包捕获请求级别的 db / session_id，
-    所以每次请求才能把工具构造出来再 bind。
+    api_key / base_url 都取自该模型自己的字段。base_url 为空则走官方地址。
     """
-    group = MODELS_BY_ID[model]["group"]
-    api_key = settings.api_keys.get(group)
+    meta = _MODELS_BY_ID.get(model)
+    if meta is None:
+        raise HTTPException(status_code=400, detail=f"未知模型：{model}")
+    api_key = meta.get("api_key")
     if not api_key:
-        # 分组的 key 没在 .env 配置 —— 明确报错，而不是带空 key 去调用、
-        # 等中转返回 401 才发现。早报错好定位。
         raise HTTPException(
             status_code=400,
-            detail=f"模型 {model} 所属分组「{group}」未配置 api_key，请在 .env 设置对应 API_KEY_*。",
+            detail=f"模型 {model} 未配置 api_key，请在管理后台设置。",
         )
     return ChatOpenAI(
         model=model,
         api_key=api_key,
-        base_url=settings.openai_base_url,
-        # 一次 write_file 要塞下整个文件内容，4096 太小，写稍大的页面就会被截断
-        # （finish_reason=length），导致工具参数残缺、本轮空转。先给到 16384。
+        base_url=meta.get("base_url") or None,
+        # 一次 write_file 要塞下整个文件内容，4096 太小，写稍大的页面就会被截断。先给到 16384。
         max_tokens=16384,
-        # ★全局写死关闭「思考 / 推理」。原因：qwen3.6-plus 这类模型默认开推理，agent 每一步
-        # （连「我先看下项目结构」都算）都会先默默烧几百个 reasoning_token 才出字，逐轮累加
-        # 拖慢整个生成；而本中转又只回推理的 token 计数、不返回思维链文本，开着既慢又看不到
-        # 过程，得不偿失。enable_thinking 是 qwen 系的思考开关，经 extra_body 透传给中转；
-        # 不认识它的模型（如 gpt 分组）会忽略，无副作用，所以这里对所有模型统一关掉。
+        # 全局关闭 qwen 系的「思考」开关：开着既慢又看不到思维链（中转只回计数），得不偿失。
+        # 经 extra_body 透传，不认识它的模型（gpt 系）会忽略，无副作用。
         extra_body={"enable_thinking": False},
     )
+
+
+async def ensure_seeded(session: AsyncSession) -> None:
+    """首次建库把模型灌进去。幂等：表里已有数据就不动（不覆盖后台改动）。
+
+    api_key 取自 .env 的 API_KEY_*（settings.api_keys），base_url 取 .env 的 OPENAI_BASE_URL。
+    这样老 .env 部署第一次启动后，模型与 key 自动迁进库，行为和以前完全一致。
+    """
+    has_model = (await session.execute(select(LlmModel.id).limit(1))).first() is not None
+    if has_model:
+        return
+
+    env_keys = settings.api_keys  # {分组名: api_key}，从 .env 的 API_KEY_* 扫出来
+    base_url = settings.openai_base_url  # 全局中转地址，作为每个模型 base_url 的初始值
+
+    for i, m in enumerate(SEED_MODELS):
+        session.add(
+            LlmModel(
+                id=m["id"],
+                name=m["name"],
+                base_url=base_url,
+                api_key=env_keys.get(m["_env_key"], ""),
+                logo=m["logo"],
+                vision=m["vision"],
+                cost=m["cost"],
+                enabled=True,
+                sort_order=i,
+            )
+        )
+    await session.commit()
+
+
+async def refresh() -> None:
+    """后台改完模型后刷新缓存。自己开 session。"""
+    from app.db import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as session:
+        await reload_registry(session)

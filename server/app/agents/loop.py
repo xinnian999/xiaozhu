@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import build_store
 from app.agents.prompts import SYSTEM_PROMPT
 from app.agents.tools import build_tools
-from app.llm import MODELS_BY_ID, build_llm
+from app.llm import build_llm, models_by_id
 from app.models.file import File
 # 起别名 DBMessage 避免和 langchain_core.messages 概念混淆
 # （那边的 SystemMessage/HumanMessage 是 LLM 对话消息,这里的是数据库行）
@@ -128,7 +128,7 @@ async def _charge_user(db: AsyncSession, user_id: str, model: str) -> None:
     也不要在 done 之前抛错、把一次成功的生成变成给用户看的报错。
     """
     try:
-        cost = MODELS_BY_ID[model]["cost"]
+        cost = models_by_id()[model]["cost"]
         user = await db.get(User, user_id)
         if user is None:
             return

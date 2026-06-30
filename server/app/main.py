@@ -24,8 +24,10 @@ from app.api import (
     users,
     versions,
 )
+from app import llm, runtime_config
+from app.admin import setup_admin
 from app.config import settings
-from app.db import engine
+from app.db import AsyncSessionLocal, engine
 
 
 # ── 跨域隔离中间件（WebContainer 硬性前提）──────────────────
@@ -81,6 +83,16 @@ async def lifespan(app: FastAPI):
     #   - 本地 dev：`bun run dev` 会在起后端前自动跑 `db:migrate`（alembic upgrade head）。
     # 这样「改模型 → 生成迁移 → upgrade」是唯一的建表/改表入口，
     # 彻底告别 create_all「只建新表、不改老表」导致的线上 schema 漂移。
+
+    # 启动时把「动态配置」和「模型注册表」准备好：
+    #   1. 首次部署：把 .env 现值灌进 app_settings、把种子模型灌进 llm_*（幂等，再启动不覆盖）。
+    #   2. 把两者读进内存缓存 —— 之后业务代码读缓存，不每条请求打库。
+    # 这一步依赖表已存在（迁移已 upgrade），所以放在 yield 前、迁移之后。
+    async with AsyncSessionLocal() as session:
+        await runtime_config.ensure_seeded(session)
+        await llm.ensure_seeded(session)
+        await runtime_config.load(session)
+        await llm.reload_registry(session)
     yield
     # shutdown 时：关闭连接池（FastAPI 进程退出时自动触发）
     await engine.dispose()
@@ -108,6 +120,11 @@ app.include_router(messages.router)
 app.include_router(build_result.router)
 app.include_router(chat.router)
 app.include_router(billing.router)
+
+# ── 管理后台（SQLAdmin）─────────────────────────────────────
+# 必须在下方「/ 静态挂载」之前装配：Starlette 按注册顺序匹配路由，
+# 静态挂载是吞掉一切剩余路径的 catch-all，挂在它后面 /admin 永远命中不了。
+setup_admin(app)
 
 
 @app.get("/health")

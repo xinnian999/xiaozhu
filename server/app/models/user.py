@@ -9,7 +9,7 @@
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import Date, DateTime, Integer, String, func
+from sqlalchemy import Boolean, Date, DateTime, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -41,6 +41,11 @@ class User(Base):
     avatar: Mapped[str] = mapped_column(String, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    # 是否管理员。管理后台（/admin）只放行 is_admin=True 的账号登录。
+    # server_default="0" 让迁移给已有用户回填成「非管理员」，不会留空；
+    # 把自己设为管理员用 scripts/make_admin.py（不开放界面自助升管理员，避免越权）。
+    is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="0")
 
     # ── 付费/额度（第 1 步：只建字段，扣费逻辑在第 2 步）──────────────────────────
     # 套餐档位：free / pro / max。每档每天有不同的点数额度（见 app/billing.py 的 TIER_DAILY）。

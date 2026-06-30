@@ -53,6 +53,9 @@ COPY server/app ./app
 COPY server/templates ./templates
 COPY server/alembic ./alembic
 COPY server/alembic.ini ./alembic.ini
+# scripts/ 里有 make_admin.py：生产里把自己设为管理员要用
+#   docker compose exec xiaozhu /app/.venv/bin/python -m scripts.make_admin you@example.com
+COPY server/scripts ./scripts
 
 # 把阶段1构建好的前端产物放到 /app/static
 # main.py 用 Path(__file__).parent.parent / "static" 定位，正好命中这里。

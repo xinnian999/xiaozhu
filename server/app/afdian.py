@@ -18,7 +18,7 @@ from urllib.parse import quote
 import httpx
 from fastapi import HTTPException
 
-from app.config import settings
+from app.runtime_config import cfg
 
 # 爱发电开放接口根地址（注意是 ifdian.net，不是 afdian.com，两个域名不通用）
 API_BASE = "https://ifdian.net/api/open"
@@ -33,8 +33,8 @@ def plan_sku_for(tier: str) -> tuple[str, str] | None:
     free 不可购买，自然查不到。
     """
     mapping = {
-        "pro": (settings.afdian_pro_plan_id, settings.afdian_pro_sku_id),
-        "max": (settings.afdian_max_plan_id, settings.afdian_max_sku_id),
+        "pro": (cfg.afdian_pro_plan_id, cfg.afdian_pro_sku_id),
+        "max": (cfg.afdian_max_plan_id, cfg.afdian_max_sku_id),
     }
     pair = mapping.get(tier)
     if not pair or not pair[0] or not pair[1]:
@@ -71,7 +71,7 @@ def _sign(params: str, ts: int) -> str:
 
     注意 params 必须是「最终发送的那个 JSON 字符串」本身（含紧凑格式），多一个空格都会验签失败。
     """
-    raw = f"{settings.afdian_token}params{params}ts{ts}user_id{settings.afdian_user_id}"
+    raw = f"{cfg.afdian_token}params{params}ts{ts}user_id{cfg.afdian_user_id}"
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
@@ -80,13 +80,13 @@ async def _call(endpoint: str, params: dict) -> dict:
 
     请求体四件套：user_id（我是谁）、params（业务参数 JSON 串）、ts（秒级时间戳）、sign（防伪签名）。
     """
-    if not settings.afdian_token or not settings.afdian_user_id:
+    if not cfg.afdian_token or not cfg.afdian_user_id:
         raise RuntimeError("爱发电未配置：AFDIAN_TOKEN / AFDIAN_USER_ID 为空")
     # params 先序列化成紧凑 JSON 串，这个串既要参与签名、也要原样发出去（两处必须完全一致）
     params_str = json.dumps(params, separators=(",", ":"))
     ts = int(time.time())
     payload = {
-        "user_id": settings.afdian_user_id,
+        "user_id": cfg.afdian_user_id,
         "params": params_str,
         "ts": ts,
         "sign": _sign(params_str, ts),

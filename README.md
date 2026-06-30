@@ -2,7 +2,6 @@
 
 对话式 AI 代码生成平台(类 V0)。描述需求 → AI 生成可运行的前端项目 → 在浏览器里**实时预览**,可继续对话迭代、保存版本、分享成品。
 
-> 练手项目,目标是学 Python + FastAPI + LangChain / LangGraph + WebContainer。详见 [TECH_DESIGN.md](TECH_DESIGN.md)。
 
 ## 特性
 

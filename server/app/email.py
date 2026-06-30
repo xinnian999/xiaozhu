@@ -14,33 +14,33 @@ from email.utils import formataddr
 from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
 
-from app.config import settings
+from app.runtime_config import cfg
 
 
 def _send_sync(to: str, subject: str, body: str) -> None:
     """同步发一封纯文本邮件。配置缺失或发送失败都抛异常，由上层转成 HTTP 错误。"""
-    if not settings.smtp_host or not settings.smtp_user or not settings.smtp_password:
+    if not cfg.smtp_host or not cfg.smtp_user or not cfg.smtp_password:
         raise HTTPException(status_code=500, detail="邮件未配置：请在 .env 设置 SMTP_*。")
 
     # EmailMessage 负责把「发件人/收件人/主题/正文」拼成符合规范的邮件报文，
     # 省得我们手拼 MIME 头（中文主题的编码它也会自动处理）。
     msg = EmailMessage()
     # formataddr 把「显示名 + 地址」拼成 "小筑 <xxx@qq.com>" 这种规范写法
-    msg["From"] = formataddr((settings.smtp_from_name, settings.smtp_user))
+    msg["From"] = formataddr((cfg.smtp_from_name, cfg.smtp_user))
     msg["To"] = to
     msg["Subject"] = subject
     msg.set_content(body)
 
     # 465 用 SSL（整条连接加密）；587 用 STARTTLS（先明文连上再升级为加密）。
     # QQ/163 都推荐 465。timeout 防止 SMTP 服务器没响应时把线程一直挂住。
-    if settings.smtp_port == 465:
-        with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=15) as s:
-            s.login(settings.smtp_user, settings.smtp_password)
+    if cfg.smtp_port == 465:
+        with smtplib.SMTP_SSL(cfg.smtp_host, cfg.smtp_port, timeout=15) as s:
+            s.login(cfg.smtp_user, cfg.smtp_password)
             s.send_message(msg)
     else:
-        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15) as s:
+        with smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=15) as s:
             s.starttls()
-            s.login(settings.smtp_user, settings.smtp_password)
+            s.login(cfg.smtp_user, cfg.smtp_password)
             s.send_message(msg)
 
 

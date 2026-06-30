@@ -1,0 +1,78 @@
+{% extends "sqladmin/base.html" %}
+{% from 'sqladmin/_macros.html' import display_menu %}
+{% block body %}
+<div class="wrapper">
+  <aside class="navbar navbar-expand-lg navbar-vertical navbar-expand-md navbar-dark" data-bs-theme="dark">
+    <div class="container-fluid">
+      <h1 class="navbar-brand navbar-brand-autodark">
+        <a href="{{ url_for('admin:index') }}">
+          {% if admin.logo_url %}
+          <img src="{{ admin.logo_url }}" width="{{ admin.logo_width }}" height="{{ admin.logo_height }}" alt="{{ admin.title }}" class="navbar-brand-logo" />
+          {% else %}
+          <h3>{{ admin.title }}</h3>
+          {% endif %}
+        </a>
+      </h1>
+      <nav class="navbar navbar-expand-sm shadow-none" id="navbar-menu">
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent"
+          aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="切换导航">
+          <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="navbarSupportedContent">
+          {{ display_menu(admin._menu, request) }}
+        </div>
+      </nav>
+      {% if admin.authentication_backend %}
+      <a href="{{ request.url_for('admin:logout') }}" class="btn btn-secondary btn-icon m-2 px-2">
+        <span class="me-2">退出登录</span>
+        <i class="fa fa-sign-out"></i>
+      </a>
+      {% endif %}
+    </div>
+  </aside>
+  <div class="page-wrapper">
+    <div class="container-fluid">
+      <div class="page-header d-print-none">
+        {% block content_header %}
+        <div class="row align-items-center">
+          <div class="col">
+            <h2 class="page-title">{{ title }}</h2>
+            <div class="page-pretitle">{{ subtitle }}</div>
+          </div>
+        </div>
+        {% endblock %}
+      </div>
+    </div>
+    <div class="page-body flex-grow-1">
+      <div class="container-fluid">
+        <div class="row row-deck row-cards">
+          {% block content %} {% endblock %}
+          {% block flash %}
+          {% include 'sqladmin/flash.html' %}
+          {% endblock %}
+          {% block secret_modal %}
+          {% include 'sqladmin/secret_modal.html' %}
+          {% endblock %}
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{# 删除确认弹窗那句提示由 main.js 写死成英文。这里在 main.js 之后再绑一个同事件处理器，
+   后绑后执行，把 #modal-delete-text 覆盖成中文。name/pk 的取法与 main.js 完全一致。 #}
+{% block tail %}
+<script type="text/javascript">
+  $(document).on('shown.bs.modal', '#modal-delete', function (event) {
+    var element = $(event.relatedTarget);
+    var name = element.data("name");
+    var pk = element.data("pk");
+    if (pk === undefined || pk === null || pk === "") {
+      $("#modal-delete-text").text("确定要删除所选的「" + name + "」吗？此操作不可恢复。");
+    } else {
+      $("#modal-delete-text").text("确定要永久删除「" + name + "」(" + pk + ") 吗？此操作不可恢复。");
+    }
+  });
+</script>
+{% endblock %}

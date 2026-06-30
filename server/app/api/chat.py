@@ -16,8 +16,9 @@ from app.agents.loop import ChatRequest, agent_loop
 from app.billing import allowance_for, used_today
 from app.db import get_db
 from app.deps import get_current_user
-# 模型注册表 + LLM 构造都集中在 app.llm，这里只是引用方
-from app.llm import ALLOWED_MODEL_IDS, DEFAULT_MODEL_ID, MODELS_BY_ID, public_models
+# 模型注册表 + LLM 构造都集中在 app.llm，这里只是引用方。
+# 现在模型在数据库、由内存缓存提供，所以引用的是「读缓存的函数」而非模块常量。
+from app.llm import allowed_model_ids, default_model_id, models_by_id, public_models
 from app.models.session import Session
 from app.models.user import User
 
@@ -50,8 +51,8 @@ async def chat(
     #   - 没传 model：用白名单第一个当默认，保证老前端 / curl 不带 model 也能跑。
     #   - 传了但不在白名单：拒绝。绝不把未经许可的 model 字符串透传给中转。
     if req.model is None:
-        req.model = DEFAULT_MODEL_ID
-    elif req.model not in ALLOWED_MODEL_IDS:
+        req.model = default_model_id()
+    elif req.model not in allowed_model_ids():
         raise HTTPException(status_code=400, detail=f"不支持的模型：{req.model}")
 
     # 图片校验：只在带了图时才做。
@@ -61,7 +62,7 @@ async def chat(
     #   3. 每张必须是 data:image/ 开头的 data URL —— 我们直接把它当 image_url 透传给中转,
     #      挡掉非法 / 非图片内容,避免把任意字符串塞进多模态消息。
     if req.images:
-        if not MODELS_BY_ID[req.model]["vision"]:
+        if not models_by_id()[req.model]["vision"]:
             raise HTTPException(status_code=400, detail="当前模型不支持识图，请切换到支持识图的模型")
         if len(req.images) > MAX_IMAGES_PER_MESSAGE:
             raise HTTPException(
@@ -89,7 +90,7 @@ async def chat(
     #   allowance_for 取「生效档位」的额度：付费档过了 tier_expires_at 会自动按 free 算。
     #   cost 是本轮模型的倍率（1 / 2）。
     now = datetime.now()
-    cost = MODELS_BY_ID[req.model]["cost"]
+    cost = models_by_id()[req.model]["cost"]
     if used_today(current_user, now.date()) + cost > allowance_for(current_user, now):
         raise HTTPException(status_code=402, detail="今日额度已用完，明天恢复或升级套餐")
 

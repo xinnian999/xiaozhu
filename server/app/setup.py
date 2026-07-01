@@ -53,6 +53,13 @@ def mark_initialized() -> None:
     _initialized = True
 
 
+def is_initialized_cached() -> bool:
+    """只读内存缓存、不查库。给请求热路径用（已初始化后每次请求都会问一下）。
+    返回 True 仅当确定已初始化；None/False 都返回 False，交给调用方再走 is_initialized 查库。
+    """
+    return _initialized is True
+
+
 # ── 向导页 HTML（内联，避免为一次性页面新建模板文件）──────────────────────────
 def _render_form(error: str = "") -> str:
     """渲染初始化向导表单。error 非空时在顶部显示红色错误条。"""

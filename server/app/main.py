@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -28,6 +28,7 @@ from app import llm, runtime_config, setup
 from app.admin import setup_admin
 from app.config import settings
 from app.db import AsyncSessionLocal, engine
+from app.setup import is_initialized, is_initialized_cached
 
 
 # ── 跨域隔离中间件（WebContainer 硬性前提）──────────────────
@@ -62,6 +63,55 @@ class CrossOriginIsolationMiddleware:
             await send(msg)
 
         await self.app(scope, receive, send_with_headers)
+
+
+# ── 初始化闸门中间件 ────────────────────────────────────────
+# 系统还没初始化（库里没有任何管理员）时，前台/接口都不该能用 —— 否则全新库里
+# 前台是一堆空数据和报错。这里在最外层拦一道：未初始化就把请求引导去 /setup。
+#
+# 为什么又是纯 ASGI 中间件：和跨域隔离中间件同理，@app.middleware 会缓冲 SSE、
+# 破坏 /api/chat 流式。这里只在「未初始化」时才拦，且对放行的请求一个字节都不碰响应体。
+#
+# 放行清单（未初始化时仍可访问）：
+#   /setup           —— 初始化向导本身（否则死循环）
+#   /admin           —— 后台入口，它的 authenticate 会自己再跳 /setup
+#   /health          —— 健康检查，探活用
+#   /deps-snapshot   —— 大文件，无所谓
+# 其余一切（前台 SPA、/api/*、静态资源）→ 302 跳 /setup。
+#
+# 性能：已初始化后 is_initialized_cached() 命中内存缓存、直接放行，不查库、零额外开销。
+# 只有「还没初始化」这段短暂时期才会对每个请求查一次库（且很快就 mark 成 True）。
+class SetupGateMiddleware:
+    _ALLOW_PREFIXES = ("/setup", "/admin", "/health", "/deps-snapshot")
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        # 快路径：已初始化（缓存命中）→ 直接放行，绝大多数请求走这里
+        if is_initialized_cached():
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if path.startswith(self._ALLOW_PREFIXES):
+            await self.app(scope, receive, send)
+            return
+
+        # 缓存未命中：可能是「首次启动还没查过库」，也可能是「真没初始化」。查一次库确认。
+        async with AsyncSessionLocal() as db:
+            initialized = await is_initialized(db)
+        if initialized:
+            await self.app(scope, receive, send)
+            return
+
+        # 确认未初始化 → 引导去向导页
+        response = RedirectResponse("/setup", status_code=302)
+        await response(scope, receive, send)
 
 
 # ── 应用生命周期 ────────────────────────────────────────────
@@ -102,6 +152,9 @@ app = FastAPI(title="Xiaozhu Backend", version="0.2.0", lifespan=lifespan)
 
 # 给所有响应加跨域隔离头（dev / 生产都加，无副作用，让两边环境更一致）
 app.add_middleware(CrossOriginIsolationMiddleware)
+# 初始化闸门：未初始化时把前台/接口都引导去 /setup。最后 add = 最外层先执行，
+# 让它在其它中间件之前拦下未初始化的请求。
+app.add_middleware(SetupGateMiddleware)
 
 # CORS 由 Vite 代理处理，后端不再需要设置
 

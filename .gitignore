@@ -28,3 +28,8 @@ pnpm-debug.log*
 *.suo
 *.sw?
 *.db
+# SQLite 备份 / 临时文件（如 xiaozhu.db.bak、xiaozhu.db-wal），都不该入库
+*.db.*
+*.db-journal
+*.db-wal
+*.db-shm

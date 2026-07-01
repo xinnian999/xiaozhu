@@ -12,6 +12,7 @@ export default defineConfig({
   },
   server: {
     // WebContainer 必需的跨域隔离响应头，缺失则 SharedArrayBuffer 不可用
+    port: 9000,
     headers: {
       "Cross-Origin-Opener-Policy": "same-origin",
       "Cross-Origin-Embedder-Policy": "require-corp",

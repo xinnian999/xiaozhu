@@ -24,7 +24,7 @@ from app.api import (
     users,
     versions,
 )
-from app import llm, runtime_config
+from app import llm, runtime_config, setup
 from app.admin import setup_admin
 from app.config import settings
 from app.db import AsyncSessionLocal, engine
@@ -120,6 +120,11 @@ app.include_router(messages.router)
 app.include_router(build_result.router)
 app.include_router(chat.router)
 app.include_router(billing.router)
+
+# ── 系统初始化向导（/setup）────────────────────────────────
+# 首次部署（库里还没有管理员）时引导「建首个管理员 + 填运营配置」。
+# 放在 admin 与静态挂载之前注册，确保 /setup 能命中。
+app.include_router(setup.router)
 
 # ── 管理后台（SQLAdmin）─────────────────────────────────────
 # 必须在下方「/ 静态挂载」之前装配：Starlette 按注册顺序匹配路由，

@@ -27,6 +27,7 @@ from app.models.order import Order
 from app.models.session import Session
 from app.models.user import User
 from app.security import verify_password
+from app.setup import is_initialized
 
 
 def _mask(value: str | None) -> str:
@@ -72,7 +73,13 @@ class AdminAuth(AuthenticationBackend):
         request.session.clear()
         return True
 
-    async def authenticate(self, request: Request) -> bool:
+    async def authenticate(self, request: Request):
+        # 系统还没初始化（库里没有任何管理员）→ 把访问 /admin 的人引导去初始化向导。
+        # authenticate 返回 Response 时 SQLAdmin 会直接返回它（见 sqladmin 源码），
+        # 所以这里可以直接重定向。
+        async with AsyncSessionLocal() as db:
+            if not await is_initialized(db):
+                return RedirectResponse("/setup", status_code=302)
         user_id = request.session.get("user_id")
         if not user_id:
             return False

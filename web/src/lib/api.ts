@@ -32,6 +32,7 @@ const SILENT_AUTH_PATHS = [
   '/api/users/register',
   '/api/users/send-code',
   '/api/users/me',
+  '/api/setup-status',
 ]
 
 // ── axios 实例 ─────────────────────────────────────────────────
@@ -163,6 +164,17 @@ export async function login(email: string, password: string): Promise<string> {
 export async function getMe(): Promise<ApiUser> {
   const { data } = await http.get<ApiUser>('/api/users/me')
   return data
+}
+
+/** 查询系统是否已初始化。未初始化时（全新部署、库里没有管理员）前端首屏据此把用户导去 /setup。
+ *  无需鉴权。查询失败一律当「已初始化」处理，避免后端临时抖动就把用户踢去初始化页。 */
+export async function getSetupStatus(): Promise<boolean> {
+  try {
+    const { data } = await http.get<{ initialized: boolean }>('/api/setup-status')
+    return data.initialized
+  } catch {
+    return true
+  }
 }
 
 /** 修改当前用户资料（昵称 / 头像），返回更新后的用户对象。 */

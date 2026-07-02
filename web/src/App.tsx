@@ -8,6 +8,7 @@ import { useThemeStore } from '@/store/theme'
 import { useSessionStore } from '@/store/session'
 import { useAuthStore } from '@/store/auth'
 import { warmupSnapshot } from '@/lib/depsCache'
+import { getSetupStatus } from '@/lib/api'
 import styles from './App.module.scss'
 
 // WorkArea 含 Monaco 编辑器 / WebContainer / xterm 等重型依赖，且仅在有活动会话时才用，
@@ -30,6 +31,17 @@ function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme
   }, [theme])
+
+  // 应用启动：先查系统是否已初始化。未初始化（全新部署、库里没管理员）→ 整站导去 /setup 向导。
+  // 为什么放前端做：开发期前台由 Vite 直接服务、不经过后端的初始化闸门中间件，靠这次查询兜住。
+  // window.location 硬跳转（而非 React 路由）：/setup 是后端渲染的独立页面，不在 SPA 里。
+  useEffect(() => {
+    getSetupStatus().then((initialized) => {
+      if (!initialized) {
+        window.location.href = '/setup'
+      }
+    })
+  }, [])
 
   // 应用启动：恢复登录态（看本地 token 是否有效）。
   useEffect(() => {

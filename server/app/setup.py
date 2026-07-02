@@ -13,15 +13,15 @@
 """
 
 import html
+import json
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import llm, runtime_config
 from app.db import get_db
-from app.llm import SEED_MODELS
 from app.mock_profile import random_avatar_seed, random_nickname
 from app.models.llm_config import LlmModel
 from app.models.user import User
@@ -60,21 +60,24 @@ def is_initialized_cached() -> bool:
     return _initialized is True
 
 
+# 向导「添加模型」下拉里给的常见 icon 建议（@lobehub/icons 组件标识符）。
+# 只是 datalist 建议，用户可自由填别的；前端解析不出会自动兜底，不会报错。
+ICON_SUGGESTIONS = [
+    "OpenAI", "Qwen.Color", "Claude.Color", "Gemini.Color", "DeepSeek.Color",
+    "Moonshot", "Doubao.Color", "Grok", "Zhipu.Color", "MiniMax.Color",
+]
+
+
 # ── 向导页 HTML（内联，避免为一次性页面新建模板文件）──────────────────────────
 def _render_form(error: str = "") -> str:
-    """渲染初始化向导表单。error 非空时在顶部显示红色错误条。"""
-    # 每个 seed 模型一行：模型名（只读展示）+ 该模型的 api_key 输入框。
-    # base_url 所有模型共用一个全局输入（绝大多数情况一个中转地址；需要各异可事后进后台改）。
-    model_rows = "".join(
-        f"""
-        <div class="model-row">
-          <span class="model-name">{html.escape(m['name'])}</span>
-          <input name="apikey__{html.escape(m['id'])}" type="text"
-                 placeholder="该模型的 API Key" required>
-        </div>"""
-        for m in SEED_MODELS
-    )
+    """渲染初始化向导表单。error 非空时在顶部显示红色错误条。
+
+    模型区是「动态手填」：默认一行，可增删。每行手填全部字段
+    （模型 ID / 显示名 / Base URL / API Key / icon / 识图 / 倍率）。
+    提交时前端把所有行序列化成一个隐藏字段 models(JSON)，后端解析入库。
+    """
     err_html = f'<div class="err">{html.escape(error)}</div>' if error else ""
+    icon_options = "".join(f'<option value="{html.escape(v)}">' for v in ICON_SUGGESTIONS)
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -85,23 +88,33 @@ def _render_form(error: str = "") -> str:
   * {{ box-sizing: border-box; }}
   body {{ margin:0; font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
          background:#f5f5f7; color:#1d1d1f; }}
-  .wrap {{ max-width:560px; margin:40px auto; padding:0 20px; }}
+  .wrap {{ max-width:600px; margin:40px auto; padding:0 20px; }}
   h1 {{ font-size:24px; margin:0 0 4px; }}
   .sub {{ color:#86868b; font-size:14px; margin:0 0 24px; }}
   .card {{ background:#fff; border-radius:14px; padding:24px; box-shadow:0 1px 3px rgba(0,0,0,.08); margin-bottom:16px; }}
   .card h2 {{ font-size:15px; margin:0 0 4px; }}
   .card .hint {{ color:#86868b; font-size:12px; margin:0 0 16px; }}
   label {{ display:block; font-size:13px; margin:12px 0 4px; color:#424245; }}
-  input {{ width:100%; padding:9px 12px; border:1px solid #d2d2d7; border-radius:8px; font-size:14px; }}
-  input:focus {{ outline:none; border-color:#0071e3; }}
-  .model-row {{ display:flex; align-items:center; gap:12px; margin:10px 0; }}
-  .model-row .model-name {{ flex:0 0 150px; font-size:13px; color:#1d1d1f; }}
-  .model-row input {{ flex:1; margin:0; }}
+  input, select {{ width:100%; padding:9px 12px; border:1px solid #d2d2d7; border-radius:8px; font-size:14px; background:#fff; }}
+  input:focus, select:focus {{ outline:none; border-color:#0071e3; }}
+  .model-card {{ border:1px solid #e5e5ea; border-radius:10px; padding:14px; margin:10px 0; background:#fafafa; position:relative; }}
+  .model-card .mc-head {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }}
+  .model-card .mc-idx {{ font-size:13px; font-weight:600; color:#1d1d1f; }}
+  .model-card .mc-del {{ width:auto; margin:0; padding:4px 10px; background:#fff; color:#c53030;
+                         border:1px solid #f0c0c0; border-radius:7px; font-size:12px; cursor:pointer; }}
+  .model-card .mc-del:hover {{ background:#fde8e8; }}
+  .model-card input, .model-card select {{ margin-bottom:8px; }}
   .row2 {{ display:flex; gap:12px; }}
   .row2 > div {{ flex:1; }}
-  button {{ width:100%; padding:12px; background:#0071e3; color:#fff; border:0; border-radius:10px;
+  .row2 label {{ margin-top:0; }}
+  .chk {{ display:flex; align-items:center; gap:8px; font-size:13px; color:#424245; margin:4px 0 0; }}
+  .chk input {{ width:auto; margin:0; }}
+  .add-btn {{ width:100%; padding:10px; background:#fff; color:#0071e3; border:1px dashed #0071e3;
+             border-radius:10px; font-size:14px; cursor:pointer; margin-top:6px; }}
+  .add-btn:hover {{ background:#f0f7ff; }}
+  button.submit {{ width:100%; padding:12px; background:#0071e3; color:#fff; border:0; border-radius:10px;
            font-size:15px; cursor:pointer; margin-top:8px; }}
-  button:hover {{ background:#0077ed; }}
+  button.submit:hover {{ background:#0077ed; }}
   .err {{ background:#fde8e8; color:#c53030; padding:10px 14px; border-radius:8px; font-size:13px; margin-bottom:16px; }}
   .optional {{ color:#86868b; font-weight:normal; font-size:12px; }}
 </style>
@@ -111,7 +124,7 @@ def _render_form(error: str = "") -> str:
   <h1>欢迎使用小筑</h1>
   <p class="sub">首次启动，请创建管理员并填写运营配置。完成后本页自动关闭。</p>
   {err_html}
-  <form method="POST" action="/setup" autocomplete="off">
+  <form method="POST" action="/setup" autocomplete="off" id="setup-form">
 
     <div class="card">
       <h2>管理员账号</h2>
@@ -124,10 +137,9 @@ def _render_form(error: str = "") -> str:
 
     <div class="card">
       <h2>模型接入</h2>
-      <p class="hint">中转站地址所有模型共用；每个模型填各自的 API Key。之后可在后台增删改。</p>
-      <label>中转 Base URL</label>
-      <input name="base_url" type="text" placeholder="https://your-proxy.example.com/v1" required>
-      {model_rows}
+      <p class="hint">手动添加模型，<b>至少一个</b>。每个模型填全部字段；之后都能在后台增删改。</p>
+      <div id="model-list"></div>
+      <button type="button" class="add-btn" id="add-model">+ 添加模型</button>
     </div>
 
     <div class="card">
@@ -144,9 +156,64 @@ def _render_form(error: str = "") -> str:
       <input name="smtp_from_name" placeholder="小筑">
     </div>
 
-    <button type="submit">完成初始化并进入后台</button>
+    <!-- 模型行由 JS 序列化进这里 -->
+    <input type="hidden" name="models" id="models-json">
+    <button type="submit" class="submit">完成初始化并进入后台</button>
   </form>
 </div>
+
+<datalist id="icon-list">{icon_options}</datalist>
+
+<script>
+(function() {{
+  var list = document.getElementById('model-list');
+  var addBtn = document.getElementById('add-model');
+  var form = document.getElementById('setup-form');
+
+  // 渲染一张模型卡。字段用 data-k 标记，提交时据此收集成 JSON。
+  function addRow() {{
+    var card = document.createElement('div');
+    card.className = 'model-card';
+    card.innerHTML =
+      '<div class="mc-head"><span class="mc-idx">模型</span>' +
+      '<button type="button" class="mc-del">删除</button></div>' +
+      '<div class="row2">' +
+        '<div><label>模型 ID</label><input data-k="id" placeholder="如 qwen3-coder-next"></div>' +
+        '<div><label>显示名</label><input data-k="name" placeholder="如 Qwen3 Coder"></div>' +
+      '</div>' +
+      '<label>Base URL</label>' +
+      '<input data-k="base_url" placeholder="https://your-proxy.example.com/v1">' +
+      '<label>API Key</label>' +
+      '<input data-k="api_key" placeholder="sk-...">' +
+      '<div class="row2">' +
+        '<div><label>Logo 标识</label><input data-k="logo" list="icon-list" placeholder="如 Qwen.Color"></div>' +
+        '<div><label>倍率</label><input data-k="cost" type="number" min="1" value="1"></div>' +
+      '</div>' +
+      '<label class="chk"><input data-k="vision" type="checkbox"> 支持识图（多模态图片输入）</label>';
+    card.querySelector('.mc-del').onclick = function() {{
+      if (list.children.length > 1) card.remove();
+    }};
+    list.appendChild(card);
+  }}
+
+  addBtn.onclick = addRow;
+  addRow(); // 默认给一行
+
+  // 提交前把所有卡片收集成 JSON 塞进隐藏字段
+  form.addEventListener('submit', function() {{
+    var models = [];
+    list.querySelectorAll('.model-card').forEach(function(card) {{
+      var m = {{}};
+      card.querySelectorAll('[data-k]').forEach(function(el) {{
+        var k = el.getAttribute('data-k');
+        m[k] = el.type === 'checkbox' ? el.checked : el.value.trim();
+      }});
+      models.push(m);
+    }});
+    document.getElementById('models-json').value = JSON.stringify(models);
+  }});
+}})();
+</script>
 </body>
 </html>"""
 
@@ -159,12 +226,22 @@ async def setup_page(db: AsyncSession = Depends(get_db)):
     return HTMLResponse(_render_form())
 
 
+@router.get("/api/setup-status")
+async def setup_status(db: AsyncSession = Depends(get_db)) -> dict:
+    """公开的初始化状态查询。前端首屏调它：未初始化就把用户导去 /setup。
+
+    为什么前端也要查：开发环境下前台 SPA 由 Vite 直接服务、不经过后端的初始化闸门中间件，
+    所以后端闸门拦不到前台首页。前端主动查一次、未初始化就跳 /setup —— dev / 生产都稳。
+    无需鉴权（此时可能连管理员都还没有）。
+    """
+    return {"initialized": await is_initialized(db)}
+
+
 @router.post("/setup")
 async def setup_submit(
-    request: Request,
     admin_email: str = Form(...),
     admin_password: str = Form(...),
-    base_url: str = Form(...),
+    models: str = Form("[]"),
     smtp_host: str = Form(""),
     smtp_port: str = Form(""),
     smtp_user: str = Form(""),
@@ -172,8 +249,11 @@ async def setup_submit(
     smtp_from_name: str = Form(""),
     db: AsyncSession = Depends(get_db),
 ):
-    """处理初始化提交：建首个管理员 + 写模型 key/base_url + 写 SMTP。全部在一个事务里。
+    """处理初始化提交：建首个管理员 + 手动创建模型 + 写 SMTP。全部在一个事务里。
 
+    models 是前端序列化的 JSON 数组，每个元素含
+    {{id, name, base_url, api_key, logo, cost, vision}}。逐条 upsert 进 llm_models，
+    全部启用、sort_order 按顺序。要求至少一条、且每条 id/name/base_url/api_key 齐全。
     再次校验「未初始化」——不只信缓存，防止已初始化后有人重复 POST 抢建管理员。
     """
     # 防重复：已初始化直接回登录页（自锁）
@@ -185,13 +265,46 @@ async def setup_submit(
     if len(admin_password) < 6:
         return HTMLResponse(_render_form("密码至少 6 位"), status_code=400)
 
-    # 各模型的 api_key 从 apikey__<模型id> 字段取（见 _render_form）
-    form = await request.form()
-    model_keys = {m["id"]: str(form.get(f"apikey__{m['id']}", "")).strip() for m in SEED_MODELS}
-    if any(not k for k in model_keys.values()):
-        return HTMLResponse(_render_form("请为每个模型填写 API Key"), status_code=400)
-    if not base_url.strip():
-        return HTMLResponse(_render_form("请填写中转 Base URL"), status_code=400)
+    # 解析并校验模型列表
+    try:
+        rows = json.loads(models)
+    except json.JSONDecodeError:
+        return HTMLResponse(_render_form("模型数据格式错误，请重试"), status_code=400)
+    if not isinstance(rows, list):
+        return HTMLResponse(_render_form("模型数据格式错误，请重试"), status_code=400)
+
+    parsed: list[dict] = []
+    seen_ids: set[str] = set()
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        mid = str(r.get("id", "")).strip()
+        name = str(r.get("name", "")).strip()
+        b = str(r.get("base_url", "")).strip()
+        k = str(r.get("api_key", "")).strip()
+        # 每条必须四要素齐全，否则整体退回让用户补
+        if not (mid and name and b and k):
+            return HTMLResponse(
+                _render_form("每个模型的 ID / 显示名 / Base URL / API Key 都要填"),
+                status_code=400,
+            )
+        if mid in seen_ids:
+            return HTMLResponse(_render_form(f"模型 ID「{mid}」重复了"), status_code=400)
+        seen_ids.add(mid)
+        # cost 容错：非法/缺省当 1
+        try:
+            cost = max(1, int(r.get("cost", 1)))
+        except (TypeError, ValueError):
+            cost = 1
+        parsed.append({
+            "id": mid, "name": name, "base_url": b, "api_key": k,
+            "logo": str(r.get("logo", "")).strip(),
+            "vision": bool(r.get("vision", False)),
+            "cost": cost,
+        })
+
+    if not parsed:
+        return HTMLResponse(_render_form("请至少添加一个模型"), status_code=400)
 
     # ── 一个事务里落库 ──
     # 1) 首个管理员
@@ -204,12 +317,25 @@ async def setup_submit(
             is_admin=True,
         )
     )
-    # 2) 模型：写 base_url + api_key（模型行本身由 llm.ensure_seeded 已在启动时建好）
-    for mid, key in model_keys.items():
-        m = (await db.execute(select(LlmModel).where(LlmModel.id == mid))).scalar_one_or_none()
-        if m is not None:
-            m.base_url = base_url.strip()
-            m.api_key = key
+    # 2) 模型：逐条 upsert（全新库通常都是新建；老库若已有同 id 则覆盖），全部启用
+    for i, m in enumerate(parsed):
+        existing = (
+            await db.execute(select(LlmModel).where(LlmModel.id == m["id"]))
+        ).scalar_one_or_none()
+        if existing is not None:
+            existing.name = m["name"]
+            existing.base_url = m["base_url"]
+            existing.api_key = m["api_key"]
+            existing.logo = m["logo"]
+            existing.vision = m["vision"]
+            existing.cost = m["cost"]
+            existing.enabled = True
+            existing.sort_order = i
+        else:
+            db.add(LlmModel(
+                id=m["id"], name=m["name"], base_url=m["base_url"], api_key=m["api_key"],
+                logo=m["logo"], vision=m["vision"], cost=m["cost"], enabled=True, sort_order=i,
+            ))
     # 3) SMTP（选填）：只写非空项，复用 runtime_config 的 upsert 语义
     smtp_values = {
         "smtp_host": smtp_host.strip(),

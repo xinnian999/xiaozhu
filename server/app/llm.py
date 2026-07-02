@@ -133,16 +133,23 @@ def build_llm(model: str) -> ChatOpenAI:
 
 
 async def ensure_seeded(session: AsyncSession) -> None:
-    """首次建库把模型灌进去。幂等：表里已有数据就不动（不覆盖后台改动）。
+    """老部署迁移用：把 .env 里的模型 key 灌进库。仅当 .env 还配着 API_KEY_* 时才做。
 
-    api_key 取自 .env 的 API_KEY_*（settings.api_keys），base_url 取 .env 的 OPENAI_BASE_URL。
-    这样老 .env 部署第一次启动后，模型与 key 自动迁进库，行为和以前完全一致。
+    - 老部署（.env 还有 API_KEY_QWEN 等）：首次启动把 SEED_MODELS 连同对应 key 迁进库，
+      行为和「配置搬库」之前完全一致，无缝过渡。
+    - 全新部署（.env 已精简到只剩 JWT_SECRET，没有任何 API_KEY_*）：**不预建任何模型**，
+      让模型完全由「系统初始化向导」手动创建 —— 否则会残留一堆空 key 的坏模型。
+    幂等：表里已有模型就不动（不覆盖后台 / 向导的改动）。
     """
     has_model = (await session.execute(select(LlmModel.id).limit(1))).first() is not None
     if has_model:
         return
 
     env_keys = settings.api_keys  # {分组名: api_key}，从 .env 的 API_KEY_* 扫出来
+    # 全新部署没有任何 env key → 不 seed，交给初始化向导手填
+    if not env_keys:
+        return
+
     base_url = settings.openai_base_url  # 全局中转地址，作为每个模型 base_url 的初始值
 
     for i, m in enumerate(SEED_MODELS):

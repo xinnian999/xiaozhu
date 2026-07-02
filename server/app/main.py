@@ -73,16 +73,17 @@ class CrossOriginIsolationMiddleware:
 # 破坏 /api/chat 流式。这里只在「未初始化」时才拦，且对放行的请求一个字节都不碰响应体。
 #
 # 放行清单（未初始化时仍可访问）：
-#   /setup           —— 初始化向导本身（否则死循环）
-#   /admin           —— 后台入口，它的 authenticate 会自己再跳 /setup
-#   /health          —— 健康检查，探活用
-#   /deps-snapshot   —— 大文件，无所谓
+#   /setup            —— 初始化向导本身（否则死循环）
+#   /api/setup-status —— 前端首屏查初始化状态的接口，必须放行（否则前端拿不到状态、无法自跳）
+#   /admin            —— 后台入口，它的 authenticate 会自己再跳 /setup
+#   /health           —— 健康检查，探活用
+#   /deps-snapshot    —— 大文件，无所谓
 # 其余一切（前台 SPA、/api/*、静态资源）→ 302 跳 /setup。
 #
 # 性能：已初始化后 is_initialized_cached() 命中内存缓存、直接放行，不查库、零额外开销。
 # 只有「还没初始化」这段短暂时期才会对每个请求查一次库（且很快就 mark 成 True）。
 class SetupGateMiddleware:
-    _ALLOW_PREFIXES = ("/setup", "/admin", "/health", "/deps-snapshot")
+    _ALLOW_PREFIXES = ("/setup", "/api/setup-status", "/admin", "/health", "/deps-snapshot")
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app

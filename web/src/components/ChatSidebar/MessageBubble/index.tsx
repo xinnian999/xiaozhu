@@ -205,7 +205,7 @@ function ToolCallChip({ message }: { message: Message }) {
 // AI 主动提问卡：ask_user 工具专用，支持单个问题 / 多问题 Tab 化呈现
 // ============================================
 // 数据来自通用的 tool_call 事件（message.toolArgs.questions），不是独立的 SSE 事件类型。
-// 每个问题各自单选或多选，答完一个自动切到下一个未答的问题，全部答完才一次性提交
+// 每个问题各自单选或多选，点「提交/确认」后才切到下一题，全部答完才一次性提交
 // （见 onAnswer：内部会 POST /ask-result 唤醒后端，或降级为发一条新消息）。
 type AskQuestion = { question: string; options: string[]; multi?: boolean }
 
@@ -228,6 +228,46 @@ function combineAskAnswers(questions: AskQuestion[], answers: (string | null)[])
   return questions
     .map((q, i) => `问题${i + 1}：${q.question}\n回答：${answers[i] ?? ''}`)
     .join('\n\n')
+}
+
+// 「不确定，你决定」按钮提交给后端的固定文案
+const ASK_FALLBACK_ANSWER = '不确定，你来决定最合适的方案'
+// 多选一题全不勾时的兜底文案
+const ASK_MULTI_EMPTY_ANSWER = '暂不需要，先用基础版本'
+// 自定义回答的通用选项文案（UI 专用，选中后才展开输入框）
+const ASK_CUSTOM_OPTION_LABEL = '说说其他想法'
+
+/** 从已保存的单选答案还原 UI 选中态（切 Tab 回已答题时复用） */
+function parseSingleAskAnswer(
+  question: AskQuestion,
+  answer: string | null,
+): { selectedIndex: number | null; isFallback: boolean; customText: string; isCustom: boolean } {
+  if (!answer) return { selectedIndex: null, isFallback: false, customText: '', isCustom: false }
+  if (answer === ASK_FALLBACK_ANSWER) {
+    return { selectedIndex: null, isFallback: true, customText: '', isCustom: false }
+  }
+  const idx = question.options.findIndex((opt) => opt === answer)
+  if (idx !== -1) return { selectedIndex: idx, isFallback: false, customText: '', isCustom: false }
+  return { selectedIndex: null, isFallback: false, customText: answer, isCustom: true }
+}
+
+/** 从已保存的多选答案还原勾选态与自定义补充（格式见 confirmMulti） */
+function parseMultiAskAnswer(
+  question: AskQuestion,
+  answer: string | null,
+): { checked: Set<number>; customText: string; isCustom: boolean } {
+  if (!answer || answer === ASK_MULTI_EMPTY_ANSWER) {
+    return { checked: new Set(), customText: '', isCustom: false }
+  }
+  const match = answer.match(/^已选：([\s\S]+?)(?:；补充：([\s\S]+))?$/)
+  if (!match) return { checked: new Set(), customText: answer, isCustom: true }
+  const checked = new Set<number>()
+  for (const label of match[1].split('、')) {
+    const idx = question.options.findIndex((opt) => opt === label)
+    if (idx !== -1) checked.add(idx)
+  }
+  const customText = match[2]?.trim() ?? ''
+  return { checked, customText, isCustom: customText.length > 0 }
 }
 
 // 从 activeIndex 之后开始找下一个未答的题，找不到就从头找一圈；全部答完返回 -1
@@ -275,7 +315,7 @@ function AskUserChip({
       <div className={styles.askChip}>
         <div className={styles.askChipPlaceholder}>
           <HelpCircle size={13} className={styles.askChipIcon} aria-hidden />
-          <span>AI 想确认几件事…</span>
+          <span>想确认几件事…</span>
         </div>
       </div>
     )
@@ -293,7 +333,7 @@ function AskUserChip({
     )
   }
 
-  // 某一题作答完成：记入本地答案数组，跳到下一个未答的题；全部答完才汇总提交一次。
+  // 某一题点「提交/确认」后：记入本地答案数组，再切到下一个未答的题；全部答完才汇总提交一次。
   const finalizeQuestion = async (index: number, answer: string) => {
     const next = [...answers]
     next[index] = answer
@@ -340,31 +380,50 @@ function AskUserChip({
         </div>
       )}
 
-      <AskQuestionBody
-        // 切题时重建这一题的本地交互态（勾选 / 自定义输入），不跨题共享
-        key={activeIndex}
-        question={questions[activeIndex]}
-        disabled={busy}
-        onFinalize={(answer) => finalizeQuestion(activeIndex, answer)}
-      />
+      {questions.map((q, i) => (
+        <AskQuestionBody
+          // 每题各挂一份面板并常驻 DOM，切 Tab 只切换显隐，避免卸载后丢失勾选/选中态
+          key={i}
+          hidden={i !== activeIndex}
+          question={q}
+          initialAnswer={answers[i]}
+          disabled={busy}
+          onFinalize={(answer) => finalizeQuestion(i, answer)}
+        />
+      ))}
     </div>
   )
 }
 
-// 单个问题的作答区：单选走「点按钮即提交」，多选走「勾选 + 确认按钮」，
-// 两者都额外带一个自定义文字回答入口。
+// 单个问题的作答区：单选 / 多选都是先本地选好，再点「提交/确认」才记入答案并切下一题；
+// 自定义回答通过末尾通用选项「说说其他想法」展开输入框。
 function AskQuestionBody({
   question,
+  initialAnswer,
+  hidden,
   disabled,
   onFinalize,
 }: {
   question: AskQuestion
+  /** 本题已保存的答案；切 Tab 回来时用来恢复选中/勾选态 */
+  initialAnswer?: string | null
+  /** 非当前 Tab 的面板：隐藏但保留 DOM，避免切走再切回时丢失本地勾选态 */
+  hidden?: boolean
   disabled: boolean
   onFinalize: (answer: string) => void
 }) {
   const multi = !!question.multi
-  const [checked, setChecked] = useState<Set<number>>(new Set())
-  const [customText, setCustomText] = useState('')
+  const parsedMulti = parseMultiAskAnswer(question, initialAnswer ?? null)
+  const parsedSingle = parseSingleAskAnswer(question, initialAnswer ?? null)
+  const [checked, setChecked] = useState<Set<number>>(() => parsedMulti.checked)
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(() => parsedSingle.selectedIndex)
+  const [isFallbackSelected, setIsFallbackSelected] = useState(() => parsedSingle.isFallback)
+  const [isCustomSelected, setIsCustomSelected] = useState(() =>
+    multi ? parsedMulti.isCustom : parsedSingle.isCustom,
+  )
+  const [customText, setCustomText] = useState(() =>
+    multi ? parsedMulti.customText : parsedSingle.customText,
+  )
 
   const toggleOption = (i: number) => {
     setChecked((prev) => {
@@ -375,33 +434,79 @@ function AskQuestionBody({
     })
   }
 
+  const toggleCustom = () => {
+    setIsCustomSelected((prev) => {
+      if (prev) setCustomText('')
+      return !prev
+    })
+  }
+
+  const selectCustomSingle = () => {
+    setIsCustomSelected(true)
+    setSelectedIndex(null)
+    setIsFallbackSelected(false)
+  }
+
   // 多选「确认」：把已勾选项拼成「已选：a、b」；一个都没勾就是「暂不需要，先用基础版本」
-  // （这就是「不强制选择」的落点）；自定义输入框有内容则一并/单独拼进去。
+  // （这就是「不强制选择」的落点）；「说说其他想法」有内容则一并/单独拼进去。
   const confirmMulti = () => {
     const text = customText.trim()
     const picked = question.options.filter((_, i) => checked.has(i))
-    if (picked.length === 0) {
-      onFinalize(text || '暂不需要，先用基础版本')
+    if (isCustomSelected && text) {
+      if (picked.length === 0) {
+        onFinalize(text)
+        return
+      }
+      onFinalize(`已选：${picked.join('、')}；补充：${text}`)
       return
     }
-    onFinalize(text ? `已选：${picked.join('、')}；补充：${text}` : `已选：${picked.join('、')}`)
+    if (picked.length === 0) {
+      onFinalize(ASK_MULTI_EMPTY_ANSWER)
+      return
+    }
+    onFinalize(`已选：${picked.join('、')}`)
   }
 
-  // 单选的自定义回答：独立提交，和点选现成选项/ 兜底按钮地位相同
-  const submitCustom = () => {
-    const text = customText.trim()
-    if (!text) return
-    onFinalize(text)
+  // 单选「提交」：取当前选中的选项、「不确定，你决定」或「说说其他想法」输入
+  const submitSingle = () => {
+    if (isCustomSelected) {
+      const text = customText.trim()
+      if (!text) return
+      onFinalize(text)
+      return
+    }
+    if (selectedIndex !== null) {
+      onFinalize(question.options[selectedIndex])
+      return
+    }
+    if (isFallbackSelected) {
+      onFinalize(ASK_FALLBACK_ANSWER)
+    }
   }
+
+  const canSubmitSingle =
+    (isCustomSelected && !!customText.trim()) ||
+    selectedIndex !== null ||
+    isFallbackSelected
+
+  // 勾了「说说其他想法」但没填内容、也没选其他项时不可提交
+  const canSubmitMulti = checked.size > 0 || !isCustomSelected || !!customText.trim()
 
   return (
-    <div className={styles.askChipBody}>
+    <div
+      className={styles.askChipBody}
+      role="tabpanel"
+      hidden={hidden}
+    >
       <p className={styles.askChipQuestion}>{question.question}</p>
 
       {multi ? (
         <div className={styles.askChipOptions}>
           {question.options.map((opt, i) => (
-            <label key={i} className={styles.askChipCheckbox}>
+            <label
+              key={i}
+              className={`${styles.askChipCheckbox} ${checked.has(i) ? styles.askChipCheckboxSelected : ''}`}
+            >
               <input
                 type="checkbox"
                 checked={checked.has(i)}
@@ -411,6 +516,17 @@ function AskQuestionBody({
               <span>{opt}</span>
             </label>
           ))}
+          <label
+            className={`${styles.askChipCheckbox} ${isCustomSelected ? styles.askChipCheckboxSelected : ''}`}
+          >
+            <input
+              type="checkbox"
+              checked={isCustomSelected}
+              disabled={disabled}
+              onChange={toggleCustom}
+            />
+            <span>{ASK_CUSTOM_OPTION_LABEL}</span>
+          </label>
         </div>
       ) : (
         <div className={styles.askChipOptions}>
@@ -418,45 +534,67 @@ function AskQuestionBody({
             <button
               key={i}
               type="button"
-              className={styles.askChipOptionBtn}
+              className={`${styles.askChipOptionBtn} ${selectedIndex === i ? styles.askChipOptionBtnSelected : ''}`}
               disabled={disabled}
-              onClick={() => onFinalize(opt)}
+              onClick={() => {
+                setSelectedIndex(i)
+                setIsFallbackSelected(false)
+                setIsCustomSelected(false)
+              }}
             >
               {opt}
             </button>
           ))}
           <button
             type="button"
-            className={`${styles.askChipOptionBtn} ${styles.askChipFallbackBtn}`}
+            className={`${styles.askChipOptionBtn} ${styles.askChipFallbackBtn} ${isFallbackSelected ? styles.askChipOptionBtnSelected : ''}`}
             disabled={disabled}
-            onClick={() => onFinalize('不确定，你来决定最合适的方案')}
+            onClick={() => {
+              setSelectedIndex(null)
+              setIsFallbackSelected(true)
+              setIsCustomSelected(false)
+            }}
           >
             不确定，你决定
+          </button>
+          <button
+            type="button"
+            className={`${styles.askChipOptionBtn} ${isCustomSelected ? styles.askChipOptionBtnSelected : ''}`}
+            disabled={disabled}
+            onClick={selectCustomSingle}
+          >
+            {ASK_CUSTOM_OPTION_LABEL}
           </button>
         </div>
       )}
 
-      <div className={styles.askChipCustom}>
+      {isCustomSelected && (
         <input
           type="text"
           className={styles.askChipCustomInput}
-          placeholder="或者，自己说说想法…"
+          placeholder="说说你的想法…"
           value={customText}
           disabled={disabled}
           onChange={(e) => setCustomText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
               e.preventDefault()
-              if (multi) confirmMulti()
-              else submitCustom()
+              if (multi) {
+                if (canSubmitMulti) confirmMulti()
+              } else if (canSubmitSingle) {
+                submitSingle()
+              }
             }
           }}
         />
+      )}
+
+      <div className={styles.askChipSubmitRow}>
         {multi ? (
           <button
             type="button"
             className={styles.askChipConfirmBtn}
-            disabled={disabled}
+            disabled={disabled || !canSubmitMulti}
             onClick={confirmMulti}
           >
             确认
@@ -465,8 +603,8 @@ function AskQuestionBody({
           <button
             type="button"
             className={styles.askChipConfirmBtn}
-            disabled={disabled || !customText.trim()}
-            onClick={submitCustom}
+            disabled={disabled || !canSubmitSingle}
+            onClick={submitSingle}
           >
             提交
           </button>

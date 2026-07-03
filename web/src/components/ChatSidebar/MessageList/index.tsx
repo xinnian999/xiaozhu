@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { MessageSquare, RotateCcw } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
+import type { Message } from '@/types/project'
 import MessageBubble from '../MessageBubble'
 import styles from './index.module.scss'
 
@@ -11,12 +12,14 @@ const INIT_SCROLL_DELAY = 700
 type Props = {
   /** 重试最新一轮的回调（由 ChatSidebar 提供，内部走流式重生成） */
   onRetry?: () => void
+  /** ask_user 交互卡片答完的回调（由 ChatSidebar 提供），原样透传给每条消息 */
+  onAskUserAnswer?: (message: Message, answer: string) => Promise<void>
 }
 
 // ============================================
 // 对话列表：渲染当前会话消息 + 流式输出中的 AI 消息
 // ============================================
-export default function MessageList({ onRetry }: Props) {
+export default function MessageList({ onRetry, onAskUserAnswer }: Props) {
   const session = useSessionStore((s) => s.activeSession())
   const endRef = useRef<HTMLDivElement>(null)
   // 记录已经为哪个会话做过「首次定位到底部」。首次（刷新 / 切会话）延时滚，
@@ -89,6 +92,7 @@ export default function MessageList({ onRetry }: Props) {
           isLast={i === lastTextIndex}
           // 只把回调给最终回复那条 AI 消息，它据此在时间同行渲染「重新生成」
           onRetry={inlineRetry && i === lastTextIndex ? onRetry : undefined}
+          onAskUserAnswer={onAskUserAnswer}
         />
       ))}
 

@@ -395,6 +395,22 @@ export async function postBuildResult(
   }
 }
 
+// ── 回报 ask_user 的回答（唤醒后端 ask_user）──────────────────
+// AI 调 ask_user 后会无限期阻塞等待。不管这次打包了几个问题、前端渲成了几个 Tab，
+// 用户答完全部问题后只会调这个函数一次，把汇总好的回答 POST 过去。
+// 走 axios（不是 postBuildResult 那种 fire-and-forget 旁路数据）：失败要让调用方
+// 感知到（AskUserChip 据此把按钮/提交态复位，提示用户重试），不能静默吞掉。
+export async function postAskResult(
+  sessionId: string,
+  toolCallId: string,
+  answer: string,
+): Promise<void> {
+  await http.post(`/api/sessions/${sessionId}/ask-result`, {
+    tool_call_id: toolCallId,
+    answer,
+  })
+}
+
 // ── SSE 流式对话 ────────────────────────────────────────────────
 // SSE 是长连接流，axios 不支持流式消费，这里保留原生 fetch。
 // 普通 REST 请求全走 axios，SSE 单独处理，两者分工明确。

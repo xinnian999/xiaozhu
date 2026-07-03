@@ -5,6 +5,8 @@
 工具在 app.agents.tools。这里不含任何业务逻辑。
 """
 
+import asyncio
+from collections.abc import AsyncGenerator
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -27,6 +29,36 @@ from app.models.user import User
 MAX_IMAGES_PER_MESSAGE = 6
 
 router = APIRouter(prefix="/api", tags=["chat"])
+
+
+# ── SSE 心跳包装 ─────────────────────────────────────────────────
+# ask_user 引入后，agent_loop 可能因为等真人回答而无限期挂起（没有超时）——
+# 这比 check_build 最多 90s 的等待长得多，生产环境的反代（Caddy）如果配了较短的
+# idle/read timeout，可能会把这条长时间「有连接但没数据」的 SSE 中途掐断。
+#
+# 这里把 agent_loop(...) 的输出原样透传，只在长时间没有新事件时插入一帧 SSE 注释
+# 当心跳，保活这条连接；前端解析器本就按「不以 data: 开头就丢弃」处理，纯心跳、
+# 零业务影响。完全不改动 agent_loop / loop.py 内部的 astream 消费逻辑，风险局限
+# 在这一个函数里，出问题也容易单独回滚。
+async def _with_heartbeat(
+    gen: AsyncGenerator[str, None], interval: float = 20.0
+) -> AsyncGenerator[str, None]:
+    it = gen.__aiter__()
+    next_task = asyncio.ensure_future(it.__anext__())
+    try:
+        while True:
+            done, _ = await asyncio.wait({next_task}, timeout=interval)
+            if not done:
+                yield ": ping\n\n"
+                continue
+            try:
+                item = next_task.result()
+            except StopAsyncIteration:
+                return
+            yield item
+            next_task = asyncio.ensure_future(it.__anext__())
+    finally:
+        next_task.cancel()
 
 
 @router.get("/models")
@@ -97,8 +129,10 @@ async def chat(
     # 注意：StreamingResponse 拿到的是生成器，FastAPI 会保持 db 依赖存活
     # 直到生成器耗尽（即整个 SSE 流结束），所以工具里使用 db 是安全的。
     # 把 user_id 传进去：loop 跑完干净收尾时按它扣点。
+    # 外面包一层 _with_heartbeat：ask_user 可能长时间挂起等真人回答，靠它保活连接。
     return StreamingResponse(
-        agent_loop(req, db, current_user.id),
+        _with_heartbeat(agent_loop(req, db, current_user.id)),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+

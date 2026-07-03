@@ -480,3 +480,211 @@
 @keyframes version-spin {
   to { transform: rotate(360deg); }
 }
+
+// ============================================
+// AI 主动提问卡：ask_user 专用，比普通工具卡更"重"一些——
+// 带真正可交互的按钮/勾选框/输入框，不是纯展示的进度提示
+// ============================================
+.askChip {
+  display: flex;
+  flex-direction: column;
+  max-width: 100%;
+  margin-bottom: $space-3;
+  border: 1px solid var(--color-accent-fade);
+  border-radius: $radius-md;
+  background: var(--color-bg-soft);
+  overflow: hidden;
+  animation: tool-chip-in $dur-base $ease-out;
+
+  .askChipIcon {
+    flex-shrink: 0;
+    color: var(--color-accent);
+  }
+
+  // 占位态（问题还没流完）/ 已回答态：都是简单的一行
+  .askChipPlaceholder,
+  .askChipDone {
+    display: flex;
+    align-items: flex-start;
+    gap: $space-2;
+    padding: $space-2 $space-3;
+    font-size: $fs-12;
+    color: var(--color-text-mute);
+  }
+
+  .askChipDoneText {
+    color: var(--color-text-dim);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  // Tab 栏：多问题时才渲染，横向滚动避免题目一多就把卡片撑爆
+  .askChipTabs {
+    display: flex;
+    gap: 2px;
+    padding: $space-2 $space-2 0;
+    overflow-x: auto;
+    @include hide-scrollbar;
+  }
+
+  .askChipTab {
+    @include button-reset;
+    @include truncate;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+    max-width: 160px;
+    padding: $space-1 $space-2;
+    border-radius: $radius-sm $radius-sm 0 0;
+    font-size: $fs-11;
+    color: var(--color-text-mute);
+    transition: color $dur-base $ease-out, background $dur-base $ease-out;
+
+    &:hover:not(:disabled) {
+      color: var(--color-text-dim);
+    }
+
+    &:disabled {
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+  }
+
+  .askChipTabActive {
+    background: var(--color-bg);
+    color: var(--color-accent);
+  }
+
+  .askChipTabCheck {
+    flex-shrink: 0;
+    color: var(--color-accent);
+  }
+
+  .askChipTabLabel {
+    @include truncate;
+  }
+
+  .askChipBody {
+    display: flex;
+    flex-direction: column;
+    gap: $space-2;
+    padding: $space-3;
+  }
+
+  .askChipQuestion {
+    margin: 0;
+    font-size: $fs-13;
+    line-height: $lh-snug;
+    color: var(--color-text);
+  }
+
+  .askChipOptions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: $space-2;
+  }
+
+  .askChipOptionBtn {
+    @include button-reset;
+    padding: $space-1 $space-3;
+    border: 1px solid var(--color-border);
+    border-radius: $radius-full;
+    background: var(--color-bg);
+    color: var(--color-text-dim);
+    font-size: $fs-12;
+    transition: border-color $dur-base $ease-out, color $dur-base $ease-out;
+
+    &:hover:not(:disabled) {
+      border-color: var(--color-accent);
+      color: var(--color-accent);
+    }
+
+    &:disabled {
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+  }
+
+  // "不确定，你决定" 兜底按钮：虚线描边，视觉上和真正的选项分开一档
+  .askChipFallbackBtn {
+    border-style: dashed;
+    color: var(--color-text-mute);
+  }
+
+  .askChipCheckbox {
+    display: inline-flex;
+    align-items: center;
+    gap: $space-1;
+    padding: $space-1 $space-3;
+    border: 1px solid var(--color-border);
+    border-radius: $radius-full;
+    background: var(--color-bg);
+    color: var(--color-text-dim);
+    font-size: $fs-12;
+    cursor: pointer;
+
+    input {
+      accent-color: var(--color-accent);
+    }
+  }
+
+  .askChipCustom {
+    display: flex;
+    gap: $space-2;
+    margin-top: $space-1;
+  }
+
+  .askChipCustomInput {
+    flex: 1;
+    min-width: 0;
+    padding: $space-1 $space-2;
+    border: 1px solid var(--color-border);
+    border-radius: $radius-sm;
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-size: $fs-12;
+
+    &::placeholder {
+      color: var(--color-text-faint);
+    }
+
+    &:disabled {
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+  }
+
+  .askChipConfirmBtn {
+    @include button-reset;
+    flex-shrink: 0;
+    padding: $space-1 $space-3;
+    border-radius: $radius-sm;
+    background: var(--color-accent);
+    color: var(--color-bg);
+    font-size: $fs-12;
+    font-weight: $fw-medium;
+
+    &:disabled {
+      cursor: not-allowed;
+      opacity: 0.5;
+    }
+  }
+}
+
+// ── 响应式（移动端）─────────────────────────────
+@include mobile {
+  .askChip {
+    .askChipTab {
+      max-width: 120px;
+    }
+
+    .askChipCustom {
+      flex-direction: column;
+    }
+
+    .askChipConfirmBtn {
+      align-self: flex-start;
+    }
+  }
+}

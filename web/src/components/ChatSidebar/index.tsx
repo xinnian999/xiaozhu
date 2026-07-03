@@ -2,9 +2,10 @@ import { useCallback, useRef, useState } from 'react'
 import { ArrowUp, Square, Mic, Image as ImageIcon, X, Plus } from 'lucide-react'
 import { useSessionStore, makeMessage, makeVersionCard, makeErrorCard } from '@/store/session'
 import { useUIStore } from '@/store/ui'
-import { streamChat, type SSEEvent } from '@/lib/api'
+import { streamChat, postAskResult, type SSEEvent } from '@/lib/api'
 import { toast } from '@/lib/toast'
 import { useClickOutside } from '@/hooks/useClickOutside'
+import type { Message } from '@/types/project'
 import MessageList from './MessageList'
 import ModelSelector from './ModelSelector'
 import styles from './index.module.scss'
@@ -198,20 +199,26 @@ export default function ChatSidebar() {
     }
   }
 
-  const handleSend = async () => {
+  const handleSend = async (overrideText?: string) => {
+    const useOverride = overrideText !== undefined
     // 有文字或有图都可发；流式中 / 建会话中不可发
-    if ((!draft.trim() && attachments.length === 0) || isStreaming || creating) return
+    if (!useOverride && !draft.trim() && attachments.length === 0) return
+    if (isStreaming || creating) return
 
     // 带了图但当前模型不支持识图：拦下来并提示（防止用户加图后又切了非识图模型）
-    if (attachments.length > 0 && !visionSupported) {
+    if (!useOverride && attachments.length > 0 && !visionSupported) {
       toast('当前模型不支持识图，请切换到支持识图的模型，或移除图片')
       return
     }
 
-    const text = draft.trim()
-    const images = attachments
-    setDraft('')
-    setAttachments([])
+    // overrideText 用于 ask_user 卡片「降级为新消息发送」的场景（见 handleAskUserAnswer）：
+    // 那种情况没有草稿 / 附件可言，直接拿传入的文本当这一轮的用户消息。
+    const text = useOverride ? overrideText : draft.trim()
+    const images = useOverride ? [] : attachments
+    if (!useOverride) {
+      setDraft('')
+      setAttachments([])
+    }
 
     // 无激活会话：用首条消息的前缀当标题，先建一个会话再发
     // 只发图片没文字时，text 为空，用「图片对话」兜底当标题
@@ -283,6 +290,22 @@ export default function ChatSidebar() {
     abortRef.current?.abort()
   }
 
+  // ask_user 交互卡片答完（单个问题，或多问题 Tab 全部答完）后的回调：answer 是
+  // AskUserChip 内部已经汇总格式化好的一份文本，这里不关心它背后是单选/多选/自定义输入、
+  // 也不关心打包了几个问题。
+  //   - live（这条 SSE 连接还活着 + 这张卡确实还没有结果）：POST /ask-result 唤醒后端
+  //     正阻塞等待的 ask_user；失败让异常冒泡给 AskUserChip，由它复位按钮提示重试。
+  //   - 否则（含页面刷新后重新渲染的历史卡片，isStreaming 已为 false）：唤醒不了一个
+  //     早已结束的旧请求，改为把回答拼成一条新的普通消息，开启全新一轮对话。
+  const handleAskUserAnswer = async (msg: Message, answer: string) => {
+    const live = isStreaming && !!msg.toolCallId && !msg.toolResult
+    if (live && session) {
+      await postAskResult(session.id, msg.toolCallId as string, answer)
+      return
+    }
+    await handleSend(`关于以上问题，我的回答是：${answer}`)
+  }
+
   const composerDisabled = isStreaming || creating
   const placeholder = creating
     ? '正在创建会话…'
@@ -315,7 +338,7 @@ export default function ChatSidebar() {
         </button>
 
         <div className={styles.chatBody}>
-          {noSession ? <EmptyHero /> : <MessageList onRetry={handleRetry} />}
+          {noSession ? <EmptyHero /> : <MessageList onRetry={handleRetry} onAskUserAnswer={handleAskUserAnswer} />}
         </div>
 
         <footer className={styles.composer}>
@@ -436,7 +459,7 @@ export default function ChatSidebar() {
               ) : (
                 <button
                   className={`${styles.sendBtn} ${(draft.trim() || attachments.length > 0) && !composerDisabled ? styles.sendActive : ''}`}
-                  onClick={handleSend}
+                  onClick={() => handleSend()}
                   disabled={composerDisabled}
                   aria-label="发送"
                 >

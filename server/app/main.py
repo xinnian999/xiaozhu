@@ -14,6 +14,7 @@ from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.api import (
+    ask_result,
     billing,
     build_result,
     chat,
@@ -172,6 +173,7 @@ app.include_router(files.router)
 app.include_router(versions.router)
 app.include_router(messages.router)
 app.include_router(build_result.router)
+app.include_router(ask_result.router)
 app.include_router(chat.router)
 app.include_router(billing.router)
 

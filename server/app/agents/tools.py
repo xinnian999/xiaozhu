@@ -14,7 +14,7 @@
 tool_result）并发，撞同一个会话就报 "concurrent operations are not permitted" /
 "transaction is closed"。所以由 agent_loop 建一把请求级 asyncio.Lock 传进来，**工具和
 消费端共用同一把锁**，把所有碰 db 的操作串起来。check_build 不碰 db、且会长等（最多
-90s）、不能占着锁，故不纳入。
+90s）；ask_user 同理不碰 db、且会无限期等（详见 app.ask_store）——这两个工具都不纳入。
 """
 
 import asyncio
@@ -24,7 +24,7 @@ from langchain_core.tools import tool
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import build_store
+from app import ask_store, build_store
 from app.models.file import File
 
 
@@ -141,4 +141,55 @@ def build_tools(db: AsyncSession, session_id: str, db_lock: asyncio.Lock) -> lis
             return f"构建通过，但预览运行时报错，请定位并修复：\n{errors}"
         return f"预览构建失败（编译没通过），请定位并修复：\n{errors}"
 
-    return [write_file, edit_file, read_file, list_files, check_build]
+    @tool
+    async def ask_user(questions: list[dict]) -> str:
+        """向用户提一批问题并等待回答，用于这一轮动手前把关键分歧问清楚，或动手过程中
+        真正卡住时向用户求助。
+
+        调用时机分两种：
+        1) 这一轮【动手写代码前】（常规）：满足下面任一条件就该在第一次调用
+           write_file/edit_file/check_build 之前，把这一轮想问的点一次性打包进本次
+           调用问清楚，不要因为有好几个疑问就分多次调用：
+           a) 存在会显著影响这一轮走向、且没有合理默认值的关键分歧（如整体风格该走
+              极简还是国潮）；
+           b) 这是从零搭建一个新应用/新页面，且请求比较笼统（如只说"写一个博客"），
+              这种情况【即使核心方向已经清晰、能直接给出合理默认版本】，也该主动问
+              一批「有更好、没有也不影响基础版本」的锦上添花选项（如评论区、标签
+              分类、深色模式、多语言）——这条不是因为看不懂才问，是基础方案已经
+              想好了、顺手多问一句能不能加分；对已有项目做局部小改动通常不用问这条。
+        2) 这一轮【已经动手、但中途真正卡住】时（例外）：比如同一个报错反复修了 2 次
+           以上仍过不了 check_build，或写的过程中发现一个会推翻当前方案走向的关键事实。
+           这个窗口一整轮最多用一次，只能用于真正的阻塞，不能当成常规细节确认来用。
+        这一轮一旦交付（check_build 通过、给出最终回复），就不要再调用，等用户发下一轮
+        消息时再重新判断。
+
+        questions 是一个列表，最多打包 5 个问题，每个元素形如
+        {"question": "问题文案", "options": ["选项1", "选项2", ...], "multi": false}：
+        - multi=false（单选，默认）：用于单一关键分歧（如整体风格该走极简还是国潮），
+          options 需要 2~5 个具体互斥选项。
+        - multi=true（多选）：用于一批彼此独立、可以自由勾选的偏好/功能项（如是否要
+          评论区、标签分类、深色模式、国际化），options 需要 1~6 个独立选项，用户可以
+          一个都不勾，这是合法结果。
+        打包进同一次调用的问题应该彼此独立，不依赖作答顺序。前端会为每个问题额外提供
+        一个自定义文字回答的入口，你不必关心这件事——只要正常处理返回的汇总文本即可，
+        它可能是选项原文，也可能是用户自己写的话。
+
+        调用会无限期阻塞直到用户答完全部问题并提交，没有超时。
+        """
+        if not (1 <= len(questions) <= 5):
+            return f"questions 必须是 1~5 个问题，当前 {len(questions)} 个，请修正后重新调用 ask_user。"
+        problems: list[str] = []
+        for i, q in enumerate(questions, start=1):
+            options = q.get("options") or []
+            multi = bool(q.get("multi", False))
+            lo, hi = (1, 6) if multi else (2, 5)
+            if not (lo <= len(options) <= hi):
+                kind = "多选" if multi else "单选"
+                problems.append(
+                    f"第 {i} 题（{kind}）options 需要 {lo}~{hi} 个，当前 {len(options)} 个"
+                )
+        if problems:
+            return "；".join(problems) + "。请修正后重新调用 ask_user。"
+        return await ask_store.wait(session_id)
+
+    return [write_file, edit_file, read_file, list_files, check_build, ask_user]

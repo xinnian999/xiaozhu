@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import build_store
+from app import ask_store, build_store
 from app.agents.prompts import SYSTEM_PROMPT
 from app.agents.tools import build_tools
 from app.llm import build_llm, models_by_id
@@ -476,6 +476,11 @@ async def agent_loop(
                                     # 时，build_store 里一定已有等它的 Event（先架接收器再触发）。
                                     build_store.arm(req.session_id)
                                     yield sse({"type": "preview_refresh"})
+                                elif tc["name"] == "ask_user":
+                                    # 同理：ask_user 的问题内容已经通过上面这条 tool_call 事件
+                                    # 的 args 字段（questions）下发给前端了，这里只需趁早 arm
+                                    # 好会合点，保证前端答完提交 POST 回来时一定有等它的 Event。
+                                    ask_store.arm(req.session_id, tc["id"])
                                 tool_msg = await save_message(
                                     "assistant", "", kind="tool",
                                     tool_name=tc["name"], tool_args=tc["args"],

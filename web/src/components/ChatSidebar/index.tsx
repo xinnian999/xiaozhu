@@ -2,7 +2,7 @@ import { useCallback, useRef, useState } from 'react'
 import { ArrowUp, Square, Mic, Image as ImageIcon, X, Plus } from 'lucide-react'
 import { useSessionStore, makeMessage, makeVersionCard, makeErrorCard } from '@/store/session'
 import { useUIStore } from '@/store/ui'
-import { streamChat, postAskResult, type SSEEvent } from '@/lib/api'
+import { streamChat, streamAskResult, type SSEEvent } from '@/lib/api'
 import { toast } from '@/lib/toast'
 import { useClickOutside } from '@/hooks/useClickOutside'
 import type { Message } from '@/types/project'
@@ -40,6 +40,8 @@ export default function ChatSidebar() {
   const beginStreaming = useSessionStore((s) => s.beginStreaming)
   const commitStreaming = useSessionStore((s) => s.commitStreaming)
   const endStreaming = useSessionStore((s) => s.endStreaming)
+  const beginAwaitingAnswer = useSessionStore((s) => s.beginAwaitingAnswer)
+  const endAwaitingAnswer = useSessionStore((s) => s.endAwaitingAnswer)
   const applyFileWrite = useSessionStore((s) => s.applyFileWrite)
   const applyFileDelete = useSessionStore((s) => s.applyFileDelete)
   const selectedModel = useSessionStore((s) => s.selectedModel)
@@ -72,6 +74,7 @@ export default function ChatSidebar() {
   useClickOutside(toolsRef, closeTools)
 
   const isStreaming = session?.isStreaming ?? false
+  const awaitingAnswer = session?.awaitingAnswer ?? false
   // 无激活会话时，侧栏切换到"全屏空态"布局
   const noSession = activeId === null
 
@@ -195,6 +198,16 @@ export default function ChatSidebar() {
         break
       } else if (event.type === 'done') {
         break
+      } else if (event.type === 'awaiting_answer') {
+        // ask_user 触发 interrupt() 暂停本轮：这次流到此正常结束（不是真的跑完）。
+        // 先冲刷已累积的叙述（AI 提问前说的话），再进入"等待回答"态——composer
+        // 继续禁用，直到用户提交回答后的 resume 流真正推来 done/error 为止。
+        if (accumulated) {
+          commitStreaming()
+          accumulated = ''
+        }
+        beginAwaitingAnswer()
+        break
       }
     }
   }
@@ -203,7 +216,7 @@ export default function ChatSidebar() {
     const useOverride = overrideText !== undefined
     // 有文字或有图都可发；流式中 / 建会话中不可发
     if (!useOverride && !draft.trim() && attachments.length === 0) return
-    if (isStreaming || creating) return
+    if (isStreaming || creating || awaitingAnswer) return
 
     // 带了图但当前模型不支持识图：拦下来并提示（防止用户加图后又切了非识图模型）
     if (!useOverride && attachments.length > 0 && !visionSupported) {
@@ -263,7 +276,7 @@ export default function ChatSidebar() {
   // （比如最后一轮生成的是 v3，期间手动改到了 v7，重试就在 v7 之上生成 v8，不动 v3）。
   // 不新增用户气泡 —— prompt 由后端复用最后一条用户消息，旧回复 / 旧版本都保留。
   const handleRetry = async () => {
-    if (!session || isStreaming || creating) return
+    if (!session || isStreaming || creating || awaitingAnswer) return
 
     // 先把最新一轮用户消息之后的旧内容从对话里截掉 —— 看起来像把这条消息重新发出去。
     // 后端会同步删掉这些消息行（但保留版本快照），两边对「最后一条用户消息」的判定一致。
@@ -293,27 +306,42 @@ export default function ChatSidebar() {
   // ask_user 交互卡片答完（单个问题，或多问题 Tab 全部答完）后的回调：answer 是
   // AskUserChip 内部已经汇总格式化好的一份文本，这里不关心它背后是单选/多选/自定义输入、
   // 也不关心打包了几个问题。
-  //   - live（这条 SSE 连接还活着 + 这张卡确实还没有结果）：POST /ask-result 唤醒后端
-  //     正阻塞等待的 ask_user；失败让异常冒泡给 AskUserChip，由它复位按钮提示重试。
-  //   - 否则（含页面刷新后重新渲染的历史卡片，isStreaming 已为 false）：唤醒不了一个
-  //     早已结束的旧请求，改为把回答拼成一条新的普通消息，开启全新一轮对话。
+  //   - live（当前会话确实处在"等待回答"态 + 这张卡确实还没有结果）：开一条新的 SSE 流
+  //     （streamAskResult），用 Command(resume=...) 接着跑，喂给和 handleSend 一样的
+  //     consumeStream 管线；失败让异常冒泡给 AskUserChip，由它复位按钮提示重试。
+  //   - 否则（含页面刷新后重新渲染的历史卡片，awaitingAnswer 已为 false）：resume 不了
+  //     一个早已结束/被清理的旧 thread，改为把回答拼成一条新的普通消息，开启全新一轮对话。
   const handleAskUserAnswer = async (msg: Message, answer: string) => {
-    const live = isStreaming && !!msg.toolCallId && !msg.toolResult
+    const live = awaitingAnswer && !!msg.toolCallId && !msg.toolResult
     if (live && session) {
-      await postAskResult(session.id, msg.toolCallId as string, answer)
+      endAwaitingAnswer()
+      beginStreaming()
+      const controller = new AbortController()
+      abortRef.current = controller
+      try {
+        await consumeStream(
+          streamAskResult(session.id, msg.toolCallId as string, answer, selectedModel, controller.signal),
+        )
+      } finally {
+        abortRef.current = null
+        endStreaming()
+        loadBilling()
+      }
       return
     }
     await handleSend(`关于以上问题，我的回答是：${answer}`)
   }
 
-  const composerDisabled = isStreaming || creating
+  const composerDisabled = isStreaming || creating || awaitingAnswer
   const placeholder = creating
     ? '正在创建会话…'
     : isStreaming
       ? 'AI 正在回复…'
-      : noSession
-        ? '描述你想要的应用，我来为你生成…'
-        : '继续聊聊还想加点什么…'
+      : awaitingAnswer
+        ? '等待你回答上方的问题…'
+        : noSession
+          ? '描述你想要的应用，我来为你生成…'
+          : '继续聊聊还想加点什么…'
 
   return (
     <>

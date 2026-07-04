@@ -23,9 +23,10 @@ from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ask_store, build_store
+from app import build_store
 from app.agents.prompts import SYSTEM_PROMPT
 from app.agents.tools import build_tools
+from app.checkpointer import get_checkpointer
 from app.llm import build_llm, models_by_id
 from app.models.file import File
 # 起别名 DBMessage 避免和 langchain_core.messages 概念混淆
@@ -64,6 +65,33 @@ class ChatRequest(BaseModel):
 
 def sse(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+# check_build 最多等 90s，生产环境的反代（Caddy）如果配了较短的 idle/read timeout，
+# 可能会把这条长时间「有连接但没数据」的 SSE 中途掐断。/api/chat 和 /ask-result（resume）
+# 都可能触发 check_build 这段长等待，所以两边共用这一层心跳包装。
+#
+# 只在长时间没有新事件时插入一帧 SSE 注释当心跳，保活连接；前端解析器本就按
+# 「不以 data: 开头就丢弃」处理，纯心跳、零业务影响。
+async def with_heartbeat(
+    gen: AsyncGenerator[str, None], interval: float = 20.0
+) -> AsyncGenerator[str, None]:
+    it = gen.__aiter__()
+    next_task = asyncio.ensure_future(it.__anext__())
+    try:
+        while True:
+            done, _ = await asyncio.wait({next_task}, timeout=interval)
+            if not done:
+                yield ": ping\n\n"
+                continue
+            try:
+                item = next_task.result()
+            except StopAsyncIteration:
+                return
+            yield item
+            next_task = asyncio.ensure_future(it.__anext__())
+    finally:
+        next_task.cancel()
 
 
 def extract_text(response) -> str:
@@ -239,12 +267,276 @@ async def _prepare_retry(
     return last_user, file_sync_events
 
 
+async def _save_message(
+    db: AsyncSession,
+    db_lock: asyncio.Lock,
+    session_id: str,
+    role: str,
+    text: str,
+    *,
+    kind: str = "text",
+    tool_name: str | None = None,
+    tool_args: dict | None = None,
+    images: list[str] | None = None,
+) -> DBMessage:
+    """把一条消息写进 messages 表,返回刚存的 ORM 对象。
+
+    独立成模块级函数(不再是 agent_loop 内的闭包)是因为 _consume 要同时给
+    agent_loop(发新消息)和 ask_result 的 resume 端点共用,不能再靠闭包捕获 db_lock /
+    session_id —— 两边都显式传进来。
+    """
+    msg = DBMessage(
+        session_id=session_id,
+        role=role,
+        text=text,
+        kind=kind,
+        tool_name=tool_name,
+        tool_args=tool_args,
+        images=images,
+    )
+    async with db_lock:
+        db.add(msg)
+        await db.commit()
+    return msg
+
+
+async def _cleanup_thread(thread_id: str) -> None:
+    """一轮真正跑完(没有 pending interrupt)后清掉这次的 checkpoint。
+
+    messages 表才是历史的唯一真相源,checkpointer 只是"这一轮进行中"的临时状态
+    (见 app.checkpointer 顶部说明)——不清理的话 checkpoint 库会无限增长。
+
+    自己吞掉异常,理由同 _charge_user:清理失败不该污染已经成功 / 已经报错收尾的 SSE 流。
+    """
+    try:
+        await get_checkpointer().adelete_thread(thread_id)
+    except Exception as e:
+        print(f"[checkpoint 清理失败] thread_id={thread_id}: {type(e).__name__}: {e}")
+
+
+async def _consume(
+    agent,
+    graph_input,
+    thread_id: str,
+    *,
+    session_id: str,
+    summary_text: str,
+    model: str,
+    db: AsyncSession,
+    db_lock: asyncio.Lock,
+    user_id: str,
+    initial_pending: dict[str, tuple[str, dict, DBMessage]] | None = None,
+) -> AsyncGenerator[str, None]:
+    """消费 agent.astream(...) 的事件流,翻译成 SSE + 落库副作用。
+
+    agent_loop(发新消息)和 app.api.ask_result 的 resume 端点共用这一段:前者传
+    graph_input={"messages": messages},后者传 Command(resume=answer);两边各自
+    准备好输入 + thread_id 后,消费 / 收尾逻辑完全一致。
+
+    initial_pending:resume 时补种 pending 字典用。resume 是一次全新的 astream()
+    调用 —— 上一轮 ask_user 的 tool_call 是在【上一次】(被 interrupt 打断的)调用里
+    产出的,这次不会重新产出那个 "model" 节点事件,所以 pending 天然是空的;不补种的话,
+    resume 后 "tools" 节点回传的 ToolMessage 会因为按 tool_call_id 查不到而被静默丢弃
+    (答案存不进 DB、前端也收不到 tool_result)。调用方(ask_result)负责从 DB 查出那条
+    待回填的 kind='tool' 消息,连同 tool_call_id 一并传进来。
+    """
+    final_assistant_text = ""
+    wrote_files = False
+    truncated = False
+    pending: dict[str, tuple[str, dict, DBMessage]] = dict(initial_pending or {})
+
+    # ── 工具卡「流式提前亮」用的累积状态 ──
+    announced_tools: set[str] = set()
+    path_sent: set[str] = set()
+    tool_chunk_args: dict[str, str] = {}
+    tool_chunk_idx: dict[int, str] = {}
+    tool_chunk_name: dict[str, str] = {}
+
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": RECURSION_LIMIT}
+
+    try:
+        # 同时开 updates(节点边界,做副作用)+ messages(token 流,做打字效果)。
+        async for mode, chunk in agent.astream(
+            graph_input,
+            stream_mode=["updates", "messages"],
+            config=config,
+        ):
+            # ── messages 模式:LLM 的 token 增量 ──
+            if mode == "messages":
+                msg, meta = chunk
+                if meta.get("langgraph_node") == "model":
+                    delta = extract_text(msg)
+                    if delta:
+                        yield sse({"type": "message_delta", "text": delta})
+
+                    for tcc in getattr(msg, "tool_call_chunks", None) or []:
+                        idx = tcc.get("index") or 0
+                        cid = tcc.get("id")
+                        if cid:
+                            tool_chunk_idx[idx] = cid
+                            tool_chunk_args[cid] = tcc.get("args") or ""
+                            tool_chunk_name[cid] = tcc.get("name") or ""
+                        else:
+                            cid = tool_chunk_idx.get(idx)
+                            if cid is not None:
+                                tool_chunk_args[cid] += tcc.get("args") or ""
+                        if not cid:
+                            continue
+                        name = tool_chunk_name.get(cid, "")
+                        if name and cid not in announced_tools:
+                            announced_tools.add(cid)
+                            print(f"[tool_call·流式提前·出卡] name={name}")
+                            yield sse({"type": "tool_call", "name": name, "args": {}, "id": cid})
+                        if cid in announced_tools and cid not in path_sent:
+                            mt = _PATH_RE.search(tool_chunk_args.get(cid, ""))
+                            if mt:
+                                path_sent.add(cid)
+                                yield sse({
+                                    "type": "tool_call",
+                                    "name": name,
+                                    "args": {"path": mt.group(1)},
+                                    "id": cid,
+                                })
+                continue
+
+            # ── updates 模式:chunk = {节点名: 该节点 return 的 update} ──
+            for node_name, update in chunk.items():
+                if node_name == "__interrupt__":
+                    # ask_user 触发了 interrupt():图状态已经存进 checkpointer,这次
+                    # astream() 到此为止 —— 不做收尾三件套(不存最终文本、不打版本快照、
+                    # 不计费,这一轮还没真正结束),也【不】清理 thread(还等着 resume)。
+                    # 前端收到这个事件后要保持"等待回答"的禁用态,而不是当成流正常结束。
+                    yield sse({"type": "awaiting_answer"})
+                    return
+
+                node_messages = update.get("messages", []) if isinstance(update, dict) else []
+
+                if node_name == "model":
+                    for m in node_messages:
+                        finish_reason = m.response_metadata.get("finish_reason")
+                        if m.invalid_tool_calls or finish_reason == "length":
+                            print(
+                                f"[截断] finish_reason={finish_reason} "
+                                f"invalid_tool_calls={m.invalid_tool_calls}"
+                            )
+                            yield sse({
+                                "type": "error",
+                                "message": "模型输出超长被截断,文件没写完。请把需求拆小,或分多次生成。",
+                            })
+                            truncated = True
+                            break
+
+                        text = extract_text(m)
+                        if m.tool_calls:
+                            if text:
+                                print(f"[response] content={text} (同轮调用了工具)")
+                                await _save_message(db, db_lock, session_id, "assistant", text)
+                            for tc in m.tool_calls:
+                                print(f"[tool_call] name={tc['name']} args={list(tc['args'].keys())}")
+                                yield sse({"type": "tool_call", "name": tc["name"], "args": tc["args"], "id": tc["id"]})
+                                if tc["name"] == "check_build":
+                                    build_store.arm(session_id)
+                                    yield sse({"type": "preview_refresh"})
+                                # ask_user 不需要类似的"武装会合点"：它的问题内容已经通过上面
+                                # 这条 tool_call 事件的 args 字段（questions）下发给前端了，
+                                # 等待 / 恢复完全交给 interrupt() + checkpointer（见上面
+                                # __interrupt__ 分支），不需要在这里额外记录任何东西。
+                                tool_msg = await _save_message(
+                                    db, db_lock, session_id, "assistant", "", kind="tool",
+                                    tool_name=tc["name"], tool_args=tc["args"],
+                                )
+                                pending[tc["id"]] = (tc["name"], tc["args"], tool_msg)
+                        else:
+                            if text:
+                                final_assistant_text = text
+                            print(f"[最终回复] content={text}")
+                    if truncated:
+                        break
+
+                elif node_name == "tools":
+                    for tm in node_messages:
+                        name, args, tool_msg = pending.get(tm.tool_call_id, (None, None, None))
+                        if name is None:
+                            continue
+                        tool_result = str(tm.content or "")
+
+                        capped = (
+                            tool_result
+                            if len(tool_result) <= TOOL_RESULT_CAP
+                            else tool_result[:TOOL_RESULT_CAP] + "\n…（结果过长已截断）"
+                        )
+                        tool_msg.text = capped
+                        async with db_lock:
+                            await db.commit()
+                        yield sse({"type": "tool_result", "id": tm.tool_call_id, "result": capped})
+
+                        if name == "check_build":
+                            print(f"[check_build] {tool_result}")
+
+                        elif name == "write_file":
+                            wrote_files = True
+                            yield sse({
+                                "type": "file_write",
+                                "path": args["path"],
+                                "content": args["content"],
+                            })
+                        elif name == "edit_file" and tool_result == f"已编辑 {args['path']}":
+                            async with db_lock:
+                                res = await db.execute(
+                                    select(File.content).where(
+                                        File.session_id == session_id,
+                                        File.path == args["path"],
+                                    )
+                                )
+                                content = res.scalar_one_or_none()
+                            if content is not None:
+                                wrote_files = True
+                                yield sse({
+                                    "type": "file_write",
+                                    "path": args["path"],
+                                    "content": content,
+                                })
+
+            if truncated:
+                break
+
+        # ── 收尾(正常结束 / 截断 break 都会走到这里;__interrupt__ 分支已在上面 return 掉了)──
+        if final_assistant_text:
+            await _save_message(db, db_lock, session_id, "assistant", final_assistant_text)
+
+        if wrote_files:
+            version = await snapshot_current_files(
+                db, session_id, summary=summary_text[:100]
+            )
+            if version is not None:
+                yield sse({"type": "version", "version_id": version.id, "seq": version.seq})
+
+        if not truncated:
+            await _charge_user(db, user_id, model)
+
+        # 这一轮真正跑完(没有 pending interrupt),清掉这次的 checkpoint。
+        await _cleanup_thread(thread_id)
+        yield sse({"type": "done"})
+
+    except GraphRecursionError:
+        yield sse({
+            "type": "error",
+            "message": "已达最大轮次,自动停止以防死循环。",
+        })
+        await _cleanup_thread(thread_id)
+        yield sse({"type": "done"})
+    except Exception as e:
+        yield sse({"type": "error", "message": str(e)})
+        await _cleanup_thread(thread_id)
+        yield sse({"type": "done"})
+
+
 async def agent_loop(
     req: ChatRequest, db: AsyncSession, user_id: str
 ) -> AsyncGenerator[str, None]:
-    """喂入历史 → 消费图的事件流 → 映射成 SSE + 落库副作用。
+    """喂入历史 → 委托 _consume 消费图的事件流。
 
-    user_id：本轮请求者。用于「成功才扣」——干净跑完时按模型倍率给他扣点（见收尾处）。
+    user_id：本轮请求者。用于「成功才扣」——干净跑完时按模型倍率给他扣点(见 _consume 收尾处)。
     """
     # 请求级 db 锁：本请求共享一个 AsyncSession，而它**不允许被并发使用**。
     # LangGraph 是在后台任务里跑图的 —— 图里工具的 db 写入，会和本消费端 add_message /
@@ -256,6 +548,7 @@ async def agent_loop(
     # 每请求构造工具(闭包 db / session_id),llm 按本请求选的模型构造。
     # create_agent 内部会 bind_tools、注入 system_prompt,所以这里不用自己绑、
     # messages 也不必塞 SystemMessage —— 这是「每条消息可变模型」的落点。
+    # checkpointer：ask_user 的 interrupt()/resume 需要它持久化图状态(见 app.checkpointer)。
     #
     # 这一步可能失败,最常见的是 build_llm 发现「模型所属分组没在 .env 配 api_key」抛
     # HTTPException。关键在于:此处已经在 StreamingResponse 内部,HTTP 200 头早已发出 ——
@@ -265,7 +558,9 @@ async def agent_loop(
     try:
         llm = build_llm(req.model)
         tools = build_tools(db, req.session_id, db_lock)
-        agent = create_agent(llm, tools, system_prompt=SYSTEM_PROMPT)
+        agent = create_agent(
+            llm, tools, system_prompt=SYSTEM_PROMPT, checkpointer=get_checkpointer()
+        )
     except HTTPException as e:
         yield sse({"type": "error", "message": str(e.detail)})
         yield sse({"type": "done"})
@@ -274,34 +569,6 @@ async def agent_loop(
         yield sse({"type": "error", "message": str(e)})
         yield sse({"type": "done"})
         return
-
-    # 入库小助手:把一条消息写进 messages 表。闭包捕获 db / session_id,
-    # 调用处只关心"存什么"。每存一条就 commit,保证自增 id 单调递增 ——
-    # 回显时按 id 升序排,顺序就和当时直播看到的一模一样。
-    async def save_message(
-        role: str,
-        text: str,
-        *,
-        kind: str = "text",
-        tool_name: str | None = None,
-        tool_args: dict | None = None,
-        images: list[str] | None = None,
-    ) -> DBMessage:
-        # 返回刚存的 ORM 对象,方便调用方拿着它事后回填字段
-        #（如工具结果要等执行完才有,见下面 check_build 落库）。
-        msg = DBMessage(
-            session_id=req.session_id,
-            role=role,
-            text=text,
-            kind=kind,
-            tool_name=tool_name,
-            tool_args=tool_args,
-            images=images,
-        )
-        async with db_lock:
-            db.add(msg)
-            await db.commit()
-        return msg
 
     # 1. 准备本轮 prompt + 文件起点。分两条路:
     #    - 普通发送:把用户消息（连同图片）入库 —— 即便 LLM 调用失败,用户消息也已经
@@ -317,11 +584,13 @@ async def agent_loop(
             return
         # _prepare_retry 已回退好 files 表,并算好了「回退后该同步给前端的文件事件」:
         # 旧有新无的删掉、内容变了的重发,让代码视图 / 文件树 / 预览底子也回到这一轮开始前。
-        _last_user, file_sync_events = prepared
+        last_user, file_sync_events = prepared
         for ev in file_sync_events:
             yield sse(ev)
     else:
-        await save_message("user", req.message, images=req.images or None)
+        last_user = await _save_message(
+            db, db_lock, req.session_id, "user", req.message, images=req.images or None
+        )
 
     # 2. 加载历史对话作为图的初始 State。只取 kind='text'(user 输入 + assistant 说过
     #    的话),把 kind='tool' 的工具行过滤掉 —— 工具效果已体现在 files 表的现状里,
@@ -345,247 +614,22 @@ async def agent_loop(
         else:
             messages.append(AIMessage(content=m.text))
 
-    # 累积本轮 assistant 的最终文本,用于结束时入库
-    final_assistant_text = ""
-    # 本轮是否真的写过文件 —— 只有写过才在结束时打一个版本快照,
-    # 纯聊天 / 报错空转的轮次不该产生空版本。
-    wrote_files = False
-    # 是否因截断提前收尾(截断时不再入库最终文本,但已写的文件仍要快照)。
-    truncated = False
-    # tool_call_id → (工具名, 参数, 入库的工具消息对象)。图把工具信息拆散到了两类事件里:
-    #   - call_model 产出的 AIMessage 带 tool_calls(有名字 / 参数,没结果)
-    #   - tools 节点产出的 ToolMessage 带结果 / tool_call_id(没名字 / 参数)
-    # 所以这里在 call_model 阶段先把 (名字, 参数, 消息对象) 按 id 记下,等 tools 阶段拿
-    # tool_call_id 回查,才能还原出「这是哪个工具、参数是什么、结果如何」,
-    # 并把结果回填到那条工具消息上(见 check_build 落库)。
-    pending: dict[str, tuple[str, dict, DBMessage]] = {}
+    # thread_id 绑定"这一轮"而不是整个 session（关键设计取舍，见 app.checkpointer 顶部
+    # 说明）：本项目每次请求都从 DB 重新拼出全部历史喂给图，不依赖 LangGraph 原生的跨轮
+    # 记忆；若 thread_id 固定绑 session，checkpointer 里持久化的历史消息对象会和这里重新
+    # 拼出来的全新对象冲突。用触发本轮的用户消息 id 保证每轮唯一，生命周期正好对应
+    # "这一轮开始 → 可能被 interrupt → 被 resume → 真正跑完"这一个闭环。
+    thread_id = f"{req.session_id}:{last_user.id}"
 
-    # ── 工具卡「流式提前亮」用的累积状态 ──
-    # 目的：在 messages 模式里盯 tool_call_chunks（参数碎片逐 token 流过来），一旦解析出 path
-    # 就提前 yield 一张工具卡，不必等整段 content 写完。下面四个量配合完成"碎片→提前卡片"：
-    announced_tools: set[str] = set()      # 已发过卡片的 tool_call id —— updates 阶段据此不再重发，避免双卡
-    path_sent: set[str] = set()            # 已补过 path 那一帧的 tool_call id（避免重复补）
-    tool_chunk_args: dict[str, str] = {}   # tool_call id -> 已累积的参数 JSON 片段（用来匹配 path）
-    tool_chunk_idx: dict[int, str] = {}    # 流式碎片的 index -> tool_call id（续传碎片不带 id，只能靠 index 关联）
-    tool_chunk_name: dict[str, str] = {}   # tool_call id -> 工具名（只有每个调用的第一个碎片带名字，先记下备用）
-
-    try:
-        # 同时开 updates(节点边界,做副作用)+ messages(token 流,做打字效果)。
-        async for mode, chunk in agent.astream(
-            {"messages": messages},
-            stream_mode=["updates", "messages"],
-            config={"recursion_limit": RECURSION_LIMIT},
-        ):
-            # ── messages 模式:LLM 的 token 增量 ──
-            if mode == "messages":
-                msg, meta = chunk
-                # 只推 model 节点的 token(对话打字效果);tools 节点也会在这个模式里
-                # 吐 ToolMessage 内容,那是工具结果、不是对话,必须按节点名过滤掉。
-                # 注意:create_agent 的 LLM 节点名是 "model"(手搓时叫 "call_model")。
-                if meta.get("langgraph_node") == "model":
-                    delta = extract_text(msg)
-                    if delta:
-                        yield sse({"type": "message_delta", "text": delta})
-
-                    # 工具调用的参数也是逐 token 流过来的（tool_call_chunks）：每个调用的第一个
-                    # 碎片带 name+id，后续"续传碎片"只有一段 args 文本、不带 id —— 只能靠 index
-                    # 关联回同一个调用。
-                    #
-                    # 卡片要「秒出」：一旦拿到工具名（第一个碎片就带）就立刻发一张空参卡，让前端先
-                    # 显示卡片 + 转圈，不必等参数写完。原先靠正则等 path 才发卡，但模型并不保证
-                    # 按 schema 顺序吐参数（实测 write_file 会先吐一大段 content、最后才吐 path），
-                    # 那样卡片要等整个文件写完才出，等于没有提前。改成「见名出卡」就稳了。
-                    # path 流到了再补一帧（让卡片标题从「写入」变成「写入 src/App.tsx」）。
-                    for tcc in getattr(msg, "tool_call_chunks", None) or []:
-                        idx = tcc.get("index") or 0
-                        cid = tcc.get("id")
-                        if cid:
-                            # 第一个碎片：登记 id / 名字，并以本段 args 作为累积起点
-                            tool_chunk_idx[idx] = cid
-                            tool_chunk_args[cid] = tcc.get("args") or ""
-                            tool_chunk_name[cid] = tcc.get("name") or ""
-                        else:
-                            # 续传碎片：按 index 找回它属于哪个调用，接着往后拼参数
-                            cid = tool_chunk_idx.get(idx)
-                            if cid is not None:
-                                tool_chunk_args[cid] += tcc.get("args") or ""
-                        if not cid:
-                            continue
-                        name = tool_chunk_name.get(cid, "")
-                        # ① 见名出卡：拿到工具名且没发过 → 立刻发一张空参卡（卡片+转圈秒出）
-                        if name and cid not in announced_tools:
-                            announced_tools.add(cid)
-                            print(f"[tool_call·流式提前·出卡] name={name}")
-                            yield sse({"type": "tool_call", "name": name, "args": {}, "id": cid})
-                        # ② path 补帧：参数里一旦能解析出 path 且还没补过 → 再发一帧带 path 的，
-                        #    让卡片标题补上文件名。content 不在这里发（前端工具卡本就不展示文件内容）。
-                        if cid in announced_tools and cid not in path_sent:
-                            mt = _PATH_RE.search(tool_chunk_args.get(cid, ""))
-                            if mt:
-                                path_sent.add(cid)
-                                yield sse({
-                                    "type": "tool_call",
-                                    "name": name,
-                                    "args": {"path": mt.group(1)},
-                                    "id": cid,
-                                })
-                continue
-
-            # ── updates 模式:chunk = {节点名: 该节点 return 的 update} ──
-            for node_name, update in chunk.items():
-                node_messages = update.get("messages", []) if isinstance(update, dict) else []
-
-                if node_name == "model":
-                    # model 节点只 return 一条消息,但写成循环更稳妥
-                    for m in node_messages:
-                        # 截断检测:撞 max_tokens(finish_reason="length")或参数 JSON 残缺
-                        #(langchain 解析不出合法 tool_calls,丢进 invalid_tool_calls)。
-                        finish_reason = m.response_metadata.get("finish_reason")
-                        if m.invalid_tool_calls or finish_reason == "length":
-                            print(
-                                f"[截断] finish_reason={finish_reason} "
-                                f"invalid_tool_calls={m.invalid_tool_calls}"
-                            )
-                            yield sse({
-                                "type": "error",
-                                "message": "模型输出超长被截断,文件没写完。请把需求拆小,或分多次生成。",
-                            })
-                            truncated = True
-                            break
-
-                        text = extract_text(m)
-                        if m.tool_calls:
-                            # 边说边调的过场文本(如「好的,我先看看项目结构」):已通过
-                            # message_delta 实时推过,这里只入库(kind='text')供刷新还原。
-                            if text:
-                                print(f"[response] content={text} (同轮调用了工具)")
-                                await save_message("assistant", text)
-                            # 推进度提示 + 工具行入库 + 记下 (名字, 参数) 待回查
-                            for tc in m.tool_calls:
-                                print(f"[tool_call] name={tc['name']} args={list(tc['args'].keys())}")
-                                # 这里总是再发一次「完整参数」的 tool_call。前端 tool_call 是按 id 幂等的
-                                # （upsertToolCall）：流式阶段提前发的卡只带 path，到这一步用完整参数（含
-                                # write_file 的 content）把同一张卡补全，展开就能看到全部参数。没提前发过的
-                                #（无 path 的 list_files / check_build）则由这一发直接新建卡。
-                                yield sse({"type": "tool_call", "name": tc["name"], "args": tc["args"], "id": tc["id"]})
-                                # check_build 的 tool_call 一出现就推构建信号：让前端先开始
-                                # 同步文件 + vite build。这一步必须趁早（在下面 tools 节点真正
-                                # 执行 check_build 之前）—— 因为工具闭包里没法 yield 事件。
-                                if tc["name"] == "check_build":
-                                    # 先 arm 架好会合点、再发信号：保证前端 build 完 POST 回结果
-                                    # 时，build_store 里一定已有等它的 Event（先架接收器再触发）。
-                                    build_store.arm(req.session_id)
-                                    yield sse({"type": "preview_refresh"})
-                                elif tc["name"] == "ask_user":
-                                    # 同理：ask_user 的问题内容已经通过上面这条 tool_call 事件
-                                    # 的 args 字段（questions）下发给前端了，这里只需趁早 arm
-                                    # 好会合点，保证前端答完提交 POST 回来时一定有等它的 Event。
-                                    ask_store.arm(req.session_id, tc["id"])
-                                tool_msg = await save_message(
-                                    "assistant", "", kind="tool",
-                                    tool_name=tc["name"], tool_args=tc["args"],
-                                )
-                                pending[tc["id"]] = (tc["name"], tc["args"], tool_msg)
-                        else:
-                            # 没有 tool_calls = 最终回复。文本已逐字推过,这里只记下来,
-                            # 循环结束后入库(空字符串就不存)。
-                            if text:
-                                final_assistant_text = text
-                            print(f"[最终回复] content={text}")
-                    if truncated:
-                        break
-
-                elif node_name == "tools":
-                    # 工具已执行完,按 tool_call_id 回查是哪个工具,映射对应副作用
-                    for tm in node_messages:
-                        name, args, tool_msg = pending.get(tm.tool_call_id, (None, None, None))
-                        if name is None:
-                            continue
-                        tool_result = str(tm.content or "")
-
-                        # 所有工具的结果统一「落库 + 下发」:
-                        #   落库:写进这条工具消息的 text(截断防超长),刷新后还能在工具卡里看到;
-                        #   下发:推 tool_result 事件,前端按 tool_call_id 找到对应工具卡、实时填上结果。
-                        # 历史回放只取 kind='text' 的消息,工具消息(kind='tool')被过滤,所以这些结果
-                        # 不会被重放给 LLM;前端工具卡原本不渲染 text,改用 tool_result 字段单独展示。
-                        capped = (
-                            tool_result
-                            if len(tool_result) <= TOOL_RESULT_CAP
-                            else tool_result[:TOOL_RESULT_CAP] + "\n…（结果过长已截断）"
-                        )
-                        tool_msg.text = capped
-                        async with db_lock:
-                            await db.commit()
-                        yield sse({"type": "tool_result", "id": tm.tool_call_id, "result": capped})
-
-                        # ── 各工具特有的副作用 ──
-                        # check_build:构建信号已在上面 tool_call 阶段推过(preview_refresh),
-                        # 结果也已落库 / 下发,这里只补一行后端日志便于实时观察。
-                        if name == "check_build":
-                            print(f"[check_build] {tool_result}")
-
-                        # write_file 落库成功后,把整文件推给前端更新代码视图 / 文件树
-                        #（预览不会立刻同步,要等 AI 调 check_build 才揭晓 + 构建）
-                        elif name == "write_file":
-                            wrote_files = True
-                            yield sse({
-                                "type": "file_write",
-                                "path": args["path"],
-                                "content": args["content"],
-                            })
-                        # edit_file 的 args 里没有完整内容(那正是省 token 的关键),
-                        # 但前端要整文件 mount,所以改成功后从库里回读完整内容再推。
-                        # 只在「真改成功」时推:成功返回 "已编辑 {path}",失败返回别的说明文字。
-                        elif name == "edit_file" and tool_result == f"已编辑 {args['path']}":
-                            async with db_lock:
-                                res = await db.execute(
-                                    select(File.content).where(
-                                        File.session_id == req.session_id,
-                                        File.path == args["path"],
-                                    )
-                                )
-                                content = res.scalar_one_or_none()
-                            if content is not None:
-                                wrote_files = True
-                                yield sse({
-                                    "type": "file_write",
-                                    "path": args["path"],
-                                    "content": content,
-                                })
-
-            if truncated:
-                break
-
-        # ── 收尾(正常结束 / 截断 break 都会走到这里)──
-        # 最终回复入库(截断时 final_assistant_text 为空,不入库)
-        if final_assistant_text:
-            await save_message("assistant", final_assistant_text)
-
-        # 本轮若改动过文件,把当前 files 全量快照成一个新版本(单线递增)。
-        # 截断但已写过部分文件时也快照,和原先手写循环的行为保持一致。
-        if wrote_files:
-            version = await snapshot_current_files(
-                db, req.session_id, summary=req.message[:100]
-            )
-            # 推送版本事件,前端在对话流里实时插入一张「版本卡」(带回滚按钮)。
-            if version is not None:
-                yield sse({"type": "version", "version_id": version.id, "seq": version.seq})
-
-        # 「成功才扣」：走到这里且没被截断 = 这一轮干净跑完，按模型倍率扣点。
-        # 截断（truncated）虽然也流到这条收尾，但属于失败，用 not truncated 挡掉、不扣。
-        # 报错 / 用户中断更不会到这里（在 except 分支或 yield 处就被打断了）。
-        if not truncated:
-            await _charge_user(db, user_id, req.model)
-
-        yield sse({"type": "done"})
-
-    except GraphRecursionError:
-        # 撞到 recursion_limit:等价于原先「超过 MAX_TURNS」的兜底。
-        yield sse({
-            "type": "error",
-            "message": "已达最大轮次,自动停止以防死循环。",
-        })
-        yield sse({"type": "done"})
-    except Exception as e:
-        yield sse({"type": "error", "message": str(e)})
-        yield sse({"type": "done"})
+    async for event in _consume(
+        agent,
+        {"messages": messages},
+        thread_id,
+        session_id=req.session_id,
+        summary_text=req.message,
+        model=req.model,
+        db=db,
+        db_lock=db_lock,
+        user_id=user_id,
+    ):
+        yield event

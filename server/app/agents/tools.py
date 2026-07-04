@@ -14,17 +14,20 @@
 tool_result）并发，撞同一个会话就报 "concurrent operations are not permitted" /
 "transaction is closed"。所以由 agent_loop 建一把请求级 asyncio.Lock 传进来，**工具和
 消费端共用同一把锁**，把所有碰 db 的操作串起来。check_build 不碰 db、且会长等（最多
-90s）；ask_user 同理不碰 db、且会无限期等（详见 app.ask_store）——这两个工具都不纳入。
+90s）；ask_user 同理不碰 db，但等待方式不同——它用 LangGraph 的 interrupt() 把整个
+调用暂停 + 图状态存进 checkpointer，直接结束这次请求，不占着一条长连接干等（详见
+app.agents.loop 里 thread_id / checkpointer 的说明），所以这两个工具都不纳入 db_lock。
 """
 
 import asyncio
 import json
 
 from langchain_core.tools import tool
+from langgraph.types import interrupt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ask_store, build_store
+from app import build_store
 from app.models.file import File
 
 
@@ -174,7 +177,7 @@ def build_tools(db: AsyncSession, session_id: str, db_lock: asyncio.Lock) -> lis
         一个自定义文字回答的入口，你不必关心这件事——只要正常处理返回的汇总文本即可，
         它可能是选项原文，也可能是用户自己写的话。
 
-        调用会无限期阻塞直到用户答完全部问题并提交，没有超时。
+        调用会暂停当前这一轮，直到用户答完全部问题并提交，没有超时。
         """
         if not (1 <= len(questions) <= 5):
             return f"questions 必须是 1~5 个问题，当前 {len(questions)} 个，请修正后重新调用 ask_user。"
@@ -190,6 +193,12 @@ def build_tools(db: AsyncSession, session_id: str, db_lock: asyncio.Lock) -> lis
                 )
         if problems:
             return "；".join(problems) + "。请修正后重新调用 ask_user。"
-        return await ask_store.wait(session_id)
+        # interrupt()：把图状态存进 checkpointer 后暂停，这次 astream() 调用到此结束
+        # （HTTP 请求随之正常关闭）。resume 时从这里接着往下走，返回值就是
+        # Command(resume=answer) 传入的 answer——见 app.agents.loop 的 __interrupt__
+        # 处理分支 + app.api.ask_result 的恢复逻辑。注意：resume 会导致本工具函数
+        # 从头重新执行一遍（LangGraph 的既定语义），上面的校验逻辑本身是幂等的纯校验，
+        # 重跑一遍没问题。
+        return interrupt({"questions": questions})
 
     return [write_file, edit_file, read_file, list_files, check_build, ask_user]

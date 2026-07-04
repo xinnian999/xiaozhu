@@ -65,6 +65,21 @@ class Settings(BaseSettings):
     # 本地想开就在 server/.env 里加一行 DB_ECHO=true。
     db_echo: bool = False
 
+    @property
+    def checkpoint_db_path(self) -> str:
+        """ask_user 用的 LangGraph checkpoint 库文件路径（纯文件路径，非 SQLAlchemy URL）。
+
+        取 DATABASE_URL 同目录下的 checkpoints.db —— 复用同一个持久化目录（生产是
+        docker-compose 挂载的 /app/data），不用再单独配一个环境变量。用独立文件
+        （不与 xiaozhu.db 同库）是为了不让 checkpoint 的高频写入和主库的
+        aiosqlite 连接 / 锁抢占。
+        """
+        # database_url 形如 "sqlite+aiosqlite:///./xiaozhu.db" 或
+        # "sqlite+aiosqlite:////app/data/xiaozhu.db"，"///" 后面就是纯文件路径。
+        path_part = self.database_url.split("///", 1)[-1]
+        directory = os.path.dirname(path_part) or "."
+        return os.path.join(directory, "checkpoints.db")
+
     # ── JWT 鉴权 ──────────────────────────────────────────────
     # jwt_secret：签名密钥，token 防伪造的根本。必须在 .env 里配置，
     #   且要够随机（用 secrets.token_urlsafe 生成）。泄露 = 任何人都能伪造身份。

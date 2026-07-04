@@ -35,6 +35,10 @@ export type ChatSession = {
   // 流式输出时，AI 正在打的那条消息（不在 messages 里，渲染时单独展示）
   streamingText: string
   isStreaming: boolean
+  // ask_user 触发 interrupt() 暂停本轮、SSE 流已正常结束、但用户还没提交回答的中间态。
+  // 和 isStreaming 是两个独立的锁：迁移到 interrupt() 后这段等待期间没有任何请求挂着，
+  // 但发送框依然要保持禁用，直到 resume 流真正推来 done/error。
+  awaitingAnswer: boolean
   // 当前 session 的文件快照：path -> content（已保存/已生成的内容）
   files: Record<string, string>
   // 编辑器里暂存但还没保存的改动：path -> 新内容。
@@ -90,6 +94,10 @@ type SessionState = {
   commitStreaming: () => void
   /** 结束一轮流式：冲刷剩余文本并把 isStreaming 置 false（正常结束 / 出错 / 用户中断都走这里） */
   endStreaming: () => void
+  /** ask_user 触发 interrupt() 暂停本轮：进入"等待回答"态，继续禁用发送框 */
+  beginAwaitingAnswer: () => void
+  /** 提交回答、发起 resume 流之前调用：退出"等待回答"态（随即由 beginStreaming 接管禁用状态） */
+  endAwaitingAnswer: () => void
 
   /** SSE 收到 file_write：增量写入当前会话的 files */
   applyFileWrite: (path: string, content: string) => void
@@ -128,6 +136,7 @@ function fromApi(api: ApiSession): ChatSession {
     messages: [],
     streamingText: '',
     isStreaming: false,
+    awaitingAnswer: false,
     files: {},
     drafts: {},
     versionId: 0,
@@ -505,6 +514,26 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           : sess.messages
         return { ...sess, messages, streamingText: '', isStreaming: false }
       }),
+    }))
+  },
+
+  beginAwaitingAnswer: () => {
+    const id = get().activeId
+    if (!id) return
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === id ? { ...sess, awaitingAnswer: true } : sess,
+      ),
+    }))
+  },
+
+  endAwaitingAnswer: () => {
+    const id = get().activeId
+    if (!id) return
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === id ? { ...sess, awaitingAnswer: false } : sess,
+      ),
     }))
   },
 

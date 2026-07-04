@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -27,6 +28,7 @@ from app.api import (
 )
 from app import llm, runtime_config, setup
 from app.admin import setup_admin
+from app.checkpointer import set_checkpointer
 from app.config import settings
 from app.db import AsyncSessionLocal, engine
 from app.setup import is_initialized, is_initialized_cached
@@ -145,7 +147,13 @@ async def lifespan(app: FastAPI):
         await llm.ensure_seeded(session)
         await runtime_config.load(session)
         await llm.reload_registry(session)
-    yield
+
+    # ask_user 的 interrupt()/resume 需要一个 checkpointer（见 app.checkpointer 顶部说明）。
+    # 独立 sqlite 文件，和主库分开；setup() 建表是幂等的，每次启动跑一次没问题。
+    async with AsyncSqliteSaver.from_conn_string(settings.checkpoint_db_path) as checkpointer:
+        await checkpointer.setup()
+        set_checkpointer(checkpointer)
+        yield
     # shutdown 时：关闭连接池（FastAPI 进程退出时自动触发）
     await engine.dispose()
 

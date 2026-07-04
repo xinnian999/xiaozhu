@@ -89,6 +89,9 @@ export type SSEEvent =
   | { type: 'version'; version_id: number; seq: number }
   | { type: 'error'; message: string }
   | { type: 'done' }
+  // ask_user 触发 interrupt() 暂停本轮：这次 SSE 流到此正常结束（不是真的跑完），
+  // 前端要据此进入「等待回答」态，见 app.agents.loop 的 __interrupt__ 分支
+  | { type: 'awaiting_answer' }
 
 export type ApiSession = {
   id: string
@@ -395,25 +398,50 @@ export async function postBuildResult(
   }
 }
 
-// ── 回报 ask_user 的回答（唤醒后端 ask_user）──────────────────
-// AI 调 ask_user 后会无限期阻塞等待。不管这次打包了几个问题、前端渲成了几个 Tab，
-// 用户答完全部问题后只会调这个函数一次，把汇总好的回答 POST 过去。
-// 走 axios（不是 postBuildResult 那种 fire-and-forget 旁路数据）：失败要让调用方
-// 感知到（AskUserChip 据此把按钮/提交态复位，提示用户重试），不能静默吞掉。
-export async function postAskResult(
-  sessionId: string,
-  toolCallId: string,
-  answer: string,
-): Promise<void> {
-  await http.post(`/api/sessions/${sessionId}/ask-result`, {
-    tool_call_id: toolCallId,
-    answer,
-  })
-}
-
 // ── SSE 流式对话 ────────────────────────────────────────────────
 // SSE 是长连接流，axios 不支持流式消费，这里保留原生 fetch。
 // 普通 REST 请求全走 axios，SSE 单独处理，两者分工明确。
+
+/** 把一个已建立的 SSE 响应体解析成 SSEEvent 流。streamChat / streamAskResult
+ *  共用这段「按 \n\n 拆帧、解析 data: 行」的逻辑，两者各自只负责 fetch + 错误处理。 */
+async function* consumeSSE(res: Response, signal?: AbortSignal): AsyncGenerator<SSEEvent> {
+  const isAbort = (e: unknown) =>
+    signal?.aborted || (e instanceof DOMException && e.name === 'AbortError')
+
+  const reader = res.body!.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+
+      // SSE 每帧以 \n\n 结尾，按此拆分
+      const frames = buffer.split('\n\n')
+      // 最后一段可能不完整，留到下次拼接
+      buffer = frames.pop() ?? ''
+
+      for (const frame of frames) {
+        const line = frame.trim()
+        if (!line.startsWith('data:')) continue
+        const json = line.slice('data:'.length).trim()
+        try {
+          yield JSON.parse(json) as SSEEvent
+        } catch {
+          // 忽略格式错误的帧
+        }
+      }
+    }
+  } catch (e: unknown) {
+    if (!isAbort(e)) throw e // 中断以外的读取错误才上抛
+  } finally {
+    // 中断时主动取消底层流，释放连接，避免悬挂
+    reader.cancel().catch(() => {})
+  }
+}
 
 export async function* streamChat(
   message: string,
@@ -425,7 +453,7 @@ export async function* streamChat(
   // 改用「最新一轮的用户消息」重新生成，结尾追加一个新版本（详见后端 ChatRequest.retry）。
   retry = false,
 ): AsyncGenerator<SSEEvent> {
-  // 用户主动中断时 fetch / reader 会抛 AbortError，这里统一识别后静默收尾，不弹错误
+  // 用户主动中断时 fetch 会抛 AbortError，这里统一识别后静默收尾，不弹错误
   const isAbort = (e: unknown) =>
     signal?.aborted || (e instanceof DOMException && e.name === 'AbortError')
 
@@ -469,38 +497,55 @@ export async function* streamChat(
     return
   }
 
-  // ReadableStream → 按行拆分 → 解析 SSE 帧
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
+  yield* consumeSSE(res, signal)
+}
 
+// ── 提交 ask_user 的回答（恢复被 interrupt() 暂停的那一轮）────
+// 迁移到 LangGraph interrupt() 方案后，ask_user 触发时原来那条 /api/chat 流已经
+// 正常结束了，这个接口自己开一条新的 SSE 流续接，形状和 streamChat 完全对齐——
+// 调用方（ChatSidebar 的 consumeStream）可以像消费 streamChat 一样直接消费它。
+export async function* streamAskResult(
+  sessionId: string,
+  toolCallId: string,
+  answer: string,
+  model: string | null,
+  signal?: AbortSignal,
+): AsyncGenerator<SSEEvent> {
+  const isAbort = (e: unknown) =>
+    signal?.aborted || (e instanceof DOMException && e.name === 'AbortError')
+
+  let res: Response
   try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-
-      buffer += decoder.decode(value, { stream: true })
-
-      // SSE 每帧以 \n\n 结尾，按此拆分
-      const frames = buffer.split('\n\n')
-      // 最后一段可能不完整，留到下次拼接
-      buffer = frames.pop() ?? ''
-
-      for (const frame of frames) {
-        const line = frame.trim()
-        if (!line.startsWith('data:')) continue
-        const json = line.slice('data:'.length).trim()
-        try {
-          yield JSON.parse(json) as SSEEvent
-        } catch {
-          // 忽略格式错误的帧
-        }
-      }
-    }
+    res = await fetch(`/api/sessions/${sessionId}/ask-result`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({
+        tool_call_id: toolCallId,
+        answer,
+        ...(model ? { model } : {}),
+      }),
+      signal,
+    })
   } catch (e: unknown) {
-    if (!isAbort(e)) throw e // 中断以外的读取错误才上抛
-  } finally {
-    // 中断时主动取消底层流，释放连接，避免悬挂
-    reader.cancel().catch(() => {})
+    if (isAbort(e)) return
+    const msg = e instanceof Error ? e.message : '网络错误'
+    toast(`提交失败：${msg}`)
+    throw e
   }
+
+  if (!res.ok || !res.body) {
+    let detail = `HTTP ${res.status}`
+    try {
+      const data = await res.json()
+      if (data?.detail) detail = data.detail
+    } catch {
+      // 不是 JSON 就用状态码兜底
+    }
+    toast(`提交失败：${detail}`)
+    yield { type: 'error', message: detail }
+    yield { type: 'done' }
+    return
+  }
+
+  yield* consumeSSE(res, signal)
 }

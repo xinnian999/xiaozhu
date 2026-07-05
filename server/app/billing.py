@@ -11,7 +11,7 @@
 没跑完一律不扣，所以也不存在「中断了要不要返还」的问题。
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 # 各付费档的价格（元，字符串形式，和爱发电商品定价一致，避免浮点）。
 # free 不在表里 —— 免费档不需要下单。
@@ -19,6 +19,9 @@ TIER_PRICE: dict[str, str] = {
     "pro": "9.90",
     "max": "19.90",
 }
+
+# 月卡时长（天）。付费履约（爱发电）和后台管理员手动授予/续期共用这一个值。
+SUBSCRIPTION_DAYS = 30
 
 
 def price_of(tier: str) -> str | None:
@@ -47,6 +50,21 @@ def effective_tier(user, now: datetime) -> str:
     if exp is None or exp < now:
         return DEFAULT_TIER
     return user.tier
+
+
+def grant_tier(user, tier: str, now: datetime, days: int = SUBSCRIPTION_DAYS) -> None:
+    """给用户授予/续期某档位，写 user.tier / user.tier_expires_at 两个字段。
+
+    规则和真实支付履约一致：同档且未过期 → 在原到期时间上叠加 days 天；
+    换档 / 已过期 / 没买过 → 从 now 起算 days 天。只改内存对象，不 commit、不碰 Order ——
+    调用方（支付履约 / 后台管理员授予）各自决定何时提交事务。
+    """
+    if user.tier == tier and user.tier_expires_at and user.tier_expires_at > now:
+        new_exp = user.tier_expires_at + timedelta(days=days)
+    else:
+        new_exp = now + timedelta(days=days)
+    user.tier = tier
+    user.tier_expires_at = new_exp
 
 
 def allowance_for(user, now: datetime) -> int:

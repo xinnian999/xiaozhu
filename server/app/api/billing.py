@@ -12,7 +12,7 @@ dev/set-tier 已删除，避免任何人白嫖高档。
 """
 
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -25,6 +25,7 @@ from app.billing import (
     TIER_DAILY,
     daily_allowance,
     effective_tier,
+    grant_tier,
     price_of,
     tier_rank,
     used_today,
@@ -33,9 +34,6 @@ from app.db import AsyncSessionLocal, get_db
 from app.deps import get_current_user
 from app.models.order import Order
 from app.models.user import User
-
-# 月卡时长（天）。一笔支付让用户的付费档延长这么久。
-SUBSCRIPTION_DAYS = 30
 
 
 async def _fulfill_order(db: AsyncSession, order: Order) -> None:
@@ -53,12 +51,7 @@ async def _fulfill_order(db: AsyncSession, order: Order) -> None:
 
     user = await db.get(User, order.user_id)
     if user is not None:
-        if user.tier == order.tier and user.tier_expires_at and user.tier_expires_at > now:
-            new_exp = user.tier_expires_at + timedelta(days=SUBSCRIPTION_DAYS)
-        else:
-            new_exp = now + timedelta(days=SUBSCRIPTION_DAYS)
-        user.tier = order.tier
-        user.tier_expires_at = new_exp
+        grant_tier(user, order.tier, now)
 
     await db.commit()
 

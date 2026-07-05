@@ -9,6 +9,7 @@
 改动「配置 / 模型 / 分组」后，对应视图的钩子会刷新内存缓存，让改动即时生效。
 """
 
+from datetime import datetime
 from pathlib import Path
 
 from sqladmin import Admin, ModelView, action
@@ -18,6 +19,7 @@ from starlette.requests import Request
 from starlette.responses import RedirectResponse
 
 from app import llm, runtime_config
+from app.billing import SUBSCRIPTION_DAYS, grant_tier
 from app.config import settings
 from app.db import AsyncSessionLocal, engine
 from app.models.app_setting import AppSetting
@@ -113,6 +115,54 @@ class UserAdmin(ModelView, model=User):
         User.daily_used: "今日已用", User.daily_date: "用量日期",
         User.tier_expires_at: "到期时间", User.is_admin: "管理员", User.created_at: "注册时间",
     }
+
+    async def on_model_change(self, data: dict, model: User, is_created: bool, request: Request) -> None:
+        """手动编辑表单的最后一道保险：tier 改成付费档，必须同时给未来的到期时间。
+
+        日常续费/升级请优先用列表页的「续费」按钮（下面的 grant_pro_30/grant_max_30，
+        自动同步 tier + tier_expires_at 两个字段）；这里的手动编辑仅用于降档、修正到期
+        时间等续费按钮覆盖不到的场景。
+        """
+        tier = data.get("tier")
+        exp = data.get("tier_expires_at")
+        if tier and tier != "free" and (not exp or exp <= datetime.now()):
+            raise ValueError(
+                "改成付费档位时必须同时把「到期时间」设成未来的时间，否则会被自动按 free 计算额度。"
+                "日常续费请优先用列表页的续费按钮。"
+            )
+
+    # ── 续费/升级档位（批量操作）──────────────────────────────────────────────
+    # 和 LlmModelAdmin 的启用/禁用不同：新到期时间依赖每个用户自己当前的 tier/到期时间
+    # （同档未过期要叠加、否则从现在起算），不能用一条 UPDATE 语句对所有选中行套同一个值，
+    # 必须逐个加载 User 调 grant_tier 再统一 commit。
+    async def _grant_tier(self, request: Request, tier: str, days: int = SUBSCRIPTION_DAYS) -> RedirectResponse:
+        pks = request.query_params.get("pks", "")
+        ids = [p for p in pks.split(",") if p]
+        if ids:
+            now = datetime.now()
+            async with AsyncSessionLocal() as db:
+                users = (await db.execute(select(User).where(User.id.in_(ids)))).scalars().all()
+                for user in users:
+                    grant_tier(user, tier, now, days)
+                await db.commit()
+        referer = request.headers.get("referer")
+        return RedirectResponse(referer or request.url_for("admin:list", identity=self.identity))
+
+    @action(
+        name="grant_pro_30",
+        label="续费/升级到 Pro（30天）",
+        confirmation_message="确认把所选用户设为 Pro 档并续期 30 天？（同档未过期会叠加到期日，否则从现在起算）",
+    )
+    async def grant_pro_30(self, request: Request) -> RedirectResponse:
+        return await self._grant_tier(request, "pro")
+
+    @action(
+        name="grant_max_30",
+        label="续费/升级到 Max（30天）",
+        confirmation_message="确认把所选用户设为 Max 档并续期 30 天？（同档未过期会叠加到期日，否则从现在起算）",
+    )
+    async def grant_max_30(self, request: Request) -> RedirectResponse:
+        return await self._grant_tier(request, "max")
 
 
 class OrderAdmin(ModelView, model=Order):

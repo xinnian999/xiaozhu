@@ -5,22 +5,15 @@ import path from "node:path";
 // 后端 dev server 地址。前台经 vite(9000) 代理到它，做到「开发期只用一个端口」。
 const BACKEND = "http://localhost:8000";
 
-// 代理响应里若带绝对地址的重定向（SQLAdmin 登录成功用 request.url_for 生成 http://localhost:8000/...），
-// 浏览器会跟着跳出 9000、回到 8000。这个钩子把 Location 头里的后端地址改写回 vite 自身，
-// 让整个后台流程始终停在 9000 一个端口上。
-const rewriteRedirect = (proxy: { on: (e: string, cb: (proxyRes: { headers: Record<string, string | string[] | undefined> }) => void) => void }) => {
-  proxy.on("proxyRes", (proxyRes) => {
-    const loc = proxyRes.headers["location"];
-    if (typeof loc === "string" && loc.startsWith(BACKEND)) {
-      proxyRes.headers["location"] = loc.slice(BACKEND.length) || "/";
-    }
-  });
-};
-
+// changeOrigin 不能开：一旦开启，代理转发给后端的 Host 头会被改成 localhost:8000，
+// 后端（SQLAdmin 的 request.url_for / base_url）就会按这个 Host 生成 http://localhost:8000/...
+// 的绝对地址（重定向 Location、静态资源 <link>/<script>）。这些资源实际由浏览器直接请求 8000，
+// 而 vite 又给页面开了 COEP: require-corp（WebContainer 需要），8000 的响应没有对应的
+// Cross-Origin-Resource-Policy 头，于是被浏览器整体拦掉 —— 后台页面直接裸奔、没有样式。
+// 保持 Host 头为浏览器原始的 localhost:9000，后端生成的地址就都落在 9000 上，天然同源。
 const backendProxy = {
   target: BACKEND,
-  changeOrigin: true,
-  configure: rewriteRedirect,
+  changeOrigin: false,
 };
 
 // https://vite.dev/config/

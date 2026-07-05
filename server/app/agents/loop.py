@@ -378,20 +378,31 @@ async def _consume(
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": RECURSION_LIMIT}
 
     try:
-        # 同时开 updates(节点边界,做副作用)+ messages(token 流,做打字效果)。
+        # 同时开 updates(节点边界,做副作用)+ messages(token 流)。
+        #
+        # 【为什么文字增量不在这里直接下发】messages 模式是"模型正在吐这条消息"时的
+        # 实时 token 流,这时候还不知道这条消息最终会不会被 NoBluffMiddleware 判定为
+        # 嘴炮而打回重来（见 app.agents.middleware 顶部说明）——判定发生在这条消息
+        # 【完整生成之后】。真事故:曾经这里 token 一来就立刻 yield message_delta,
+        # 于是嘴炮文案原样打字机式地展示给了用户,等它被打回重新生成、真正调用了
+        # 工具,用户看到的就是"AI 先吹了一遍牛、又开始干活"（工具卡出现在嘴炮文字
+        # 之后）——即便后端从没把这段嘴炮文字存过库,呈现层已经把假象喂给用户了。
+        #
+        # 现在改成:文字只在下面 updates 模式里、确认这条消息"不会再被打回"的两个
+        # 时机才整段一次性下发 ——①这条消息带了 tool_calls（tool_calls 存在本身就是
+        # NoBluffMiddleware 判定"不算嘴炮"的充分条件，见 middleware.aafter_model 的
+        # 第一行判断，可以立刻放行）；②真正跑到收尾阶段（本轮不会再回 model 节点了）。
+        # messages 模式这里只留 tool_call_chunks 的早出卡逻辑（和嘴炮风险无关,write_file
+        # 的参数早到早展示,不用等文字/整轮结束）。
         async for mode, chunk in agent.astream(
             graph_input,
             stream_mode=["updates", "messages"],
             config=config,
         ):
-            # ── messages 模式:LLM 的 token 增量 ──
+            # ── messages 模式:LLM 的 token 增量,只用来做工具卡早出卡 ──
             if mode == "messages":
                 msg, meta = chunk
                 if meta.get("langgraph_node") == "model":
-                    delta = extract_text(msg)
-                    if delta:
-                        yield sse({"type": "message_delta", "text": delta})
-
                     for tcc in getattr(msg, "tool_call_chunks", None) or []:
                         idx = tcc.get("index") or 0
                         cid = tcc.get("id")
@@ -451,8 +462,16 @@ async def _consume(
 
                         text = extract_text(m)
                         if m.tool_calls:
+                            # 这一轮又调了工具,说明之前(若有)攒着没发的
+                            # final_assistant_text 只是嘴炮重试前的半成品候选——
+                            # 真调用工具证明它不是"这一轮的最终回复",作废丢弃,
+                            # 避免收尾时把这段旧文字和这次真实工作的回复一起冒出来。
+                            final_assistant_text = ""
                             if text:
                                 print(f"[response] content={text} (同轮调用了工具)")
+                                # 带 tool_calls 的消息不可能被 NoBluffMiddleware 判定为嘴炮
+                                # （见 middleware.aafter_model 第一行判断),此刻就能放心下发。
+                                yield sse({"type": "message_delta", "text": text})
                                 await _save_message(db, db_lock, session_id, "assistant", text)
                             for tc in m.tool_calls:
                                 print(f"[tool_call] name={tc['name']} args={list(tc['args'].keys())}")
@@ -470,9 +489,16 @@ async def _consume(
                                 )
                                 pending[tc["id"]] = (tc["name"], tc["args"], tool_msg)
                         else:
+                            # 零 tool_calls 的话是 NoBluffMiddleware 唯一可能打回重来的对象
+                            # （见 middleware.aafter_model)：这里先只存进变量、不下发 SSE、
+                            # 不落库。若真被判定嘴炮,图会跳回 model 节点重新生成,这里会被
+                            # 下一次的赋值直接覆盖掉,这段话就当没出现过;若没被打回,下面
+                            # astream() 循环会自然走完(图到 END,不会再有新的 model 节点
+                            # 更新了)——只有到那时候(见收尾处)才是"确认不会再被打回"的
+                            # 唯一时机,才第一次把它下发给前端 + 存库。
                             if text:
                                 final_assistant_text = text
-                            print(f"[最终回复] content={text}")
+                            print(f"[最终回复候选] content={text}")
                     if truncated:
                         break
 
@@ -524,7 +550,11 @@ async def _consume(
                 break
 
         # ── 收尾(正常结束 / 截断 break 都会走到这里;__interrupt__ 分支已在上面 return 掉了)──
+        # 到这里 astream() 已经自然走完、图不会再跳回 model 节点重新生成了 ——
+        # 也就是说如果 final_assistant_text 有值,它已经【确认】不是嘴炮(没被
+        # NoBluffMiddleware 打回),现在才是第一次把这段话下发给前端的时机。
         if final_assistant_text:
+            yield sse({"type": "message_delta", "text": final_assistant_text})
             await _save_message(db, db_lock, session_id, "assistant", final_assistant_text)
 
         if wrote_files:

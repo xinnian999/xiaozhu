@@ -501,9 +501,8 @@
     color: var(--color-accent);
   }
 
-  // 占位态（问题还没流完）/ 已回答态：都是简单的一行
-  .askChipPlaceholder,
-  .askChipDone {
+  // 占位态（问题还没流完）：简单一行
+  .askChipPlaceholder {
     display: flex;
     align-items: flex-start;
     gap: $space-2;
@@ -512,6 +511,55 @@
     color: var(--color-text-mute);
   }
 
+  // 已回答态：顶部一行「已回答」标题 + 下方逐题列表
+  .askChipDone {
+    display: flex;
+    flex-direction: column;
+    gap: $space-2;
+    padding: $space-2 $space-3;
+    font-size: $fs-12;
+    color: var(--color-text-mute);
+  }
+
+  .askChipDoneHeader {
+    display: flex;
+    align-items: center;
+    gap: $space-2;
+    font-weight: $fw-medium;
+  }
+
+  .askChipDoneList {
+    display: flex;
+    flex-direction: column;
+    gap: $space-3;
+  }
+
+  // 单题一块，左侧留一道细色条把「问」「答」和其他题目在视觉上分开
+  // （accent-fade 透明度太低看不出线条，这里用中性的 border 色）
+  .askChipDoneItem {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding-left: $space-2;
+    border-left: 2px solid var(--color-border);
+  }
+
+  .askChipDoneQ {
+    color: var(--color-text-mute);
+    font-size: $fs-11;
+    line-height: $lh-snug;
+    word-break: break-word;
+  }
+
+  .askChipDoneA {
+    color: var(--color-text-dim);
+    font-size: $fs-12;
+    line-height: $lh-snug;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  // 拆不出逐题结构时的兜底：整段原样展示（老数据格式 / 自由文本）
   .askChipDoneText {
     color: var(--color-text-dim);
     white-space: pre-wrap;

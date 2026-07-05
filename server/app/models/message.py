@@ -44,7 +44,7 @@ class Message(Base):
     # server_default='text' 让旧数据 / 迁移时自动补成普通文本，向后兼容
     kind: Mapped[str] = mapped_column(String, nullable=False, server_default="text")
 
-    # 仅 kind='tool' 时有值：工具名（write_file / read_file / ...）
+    # 仅 kind='tool' 时有值：工具名（write_file / read_files / ...）
     tool_name: Mapped[str | None] = mapped_column(String, nullable=True)
 
     # kind='tool' 时存工具参数；kind='version' 时存版本卡负载 {version_id, seq}。

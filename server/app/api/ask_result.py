@@ -17,7 +17,8 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.loop import _consume, sse, with_heartbeat
+from app.agents.loop import _consume, _file_tree_note, sse, with_heartbeat
+from app.agents.middleware import NoBluffMiddleware
 from app.agents.prompts import SYSTEM_PROMPT
 from app.agents.tools import build_tools
 from app.checkpointer import get_checkpointer
@@ -84,8 +85,13 @@ async def _resume_stream(session_id: str, body: AskResult, db: AsyncSession, use
         db_lock = asyncio.Lock()
         llm = build_llm(model)
         tools = build_tools(db, session_id, db_lock)
+        tree_note = await _file_tree_note(db, session_id)
         agent = create_agent(
-            llm, tools, system_prompt=SYSTEM_PROMPT, checkpointer=get_checkpointer()
+            llm,
+            tools,
+            system_prompt=SYSTEM_PROMPT + tree_note,
+            checkpointer=get_checkpointer(),
+            middleware=[NoBluffMiddleware(llm)],
         )
 
         config = {"configurable": {"thread_id": thread_id}}

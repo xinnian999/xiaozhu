@@ -55,10 +55,11 @@ type SessionState = {
   loading: boolean
 
   // 可选模型清单（从后端 /api/models 拉，全局共享，不分会话）+ 当前选中的模型 id。
-  // 模型选择是「每条消息可变」的：选了哪个，下次发消息就用哪个，不绑定到会话。
+  // 模型选择是「每条消息可变」的：选了哪个，下次发消息就用哪个，不绑定到会话；
+  // 但选择本身记到 localStorage，刷新页面 / 重开标签页仍保持上次选的模型。
   models: ApiModel[]
   selectedModel: string | null
-  /** 拉取模型清单；首个模型作为默认选中 */
+  /** 拉取模型清单；已选过模型（含刷新后从 localStorage 恢复）就保留，否则默认选第一个 */
   loadModels: () => Promise<void>
   /** 切换当前选中的模型 */
   setSelectedModel: (id: string) => void
@@ -207,6 +208,15 @@ export function makeErrorCard(message: string): Message {
   return makeMessage('assistant', message, { kind: 'error' })
 }
 
+// 选中的模型 id 存 localStorage，刷新页面 / 重开标签页都能记住上次选的模型
+// （做法参考 store/theme.ts 的 STORAGE_KEY 模式）
+const MODEL_STORAGE_KEY = 'xiaozhu:selectedModel'
+
+function getInitialModel(): string | null {
+  if (typeof window === 'undefined') return null
+  return window.localStorage.getItem(MODEL_STORAGE_KEY)
+}
+
 // EMPTY_VERSION 仅在没有激活 session 时返回，必须是常量 —— 否则 zustand selector
 // 每次返回新对象引用都不等，触发无限重渲染。
 const EMPTY_VERSION = {
@@ -245,22 +255,30 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   loading: false,
 
   models: [],
-  selectedModel: null,
+  selectedModel: getInitialModel(),
 
   loadModels: async () => {
     try {
       const models = await listModels()
-      set((s) => ({
-        models,
-        // 还没选过模型时，默认选第一个；已经选过就保持用户的选择
-        selectedModel: s.selectedModel ?? models[0]?.id ?? null,
-      }))
+      set((s) => {
+        // 优先保留已选中的模型（含刷新后从 localStorage 恢复的那个）；
+        // 它已经不在最新清单里了（后端下线/改名过）才退回第一个
+        const saved = s.selectedModel
+        const stillValid = saved != null && models.some((m) => m.id === saved)
+        return {
+          models,
+          selectedModel: stillValid ? saved : (models[0]?.id ?? null),
+        }
+      })
     } catch (e) {
       console.error('加载模型清单失败', e)
     }
   },
 
-  setSelectedModel: (id) => set({ selectedModel: id }),
+  setSelectedModel: (id) => {
+    window.localStorage.setItem(MODEL_STORAGE_KEY, id)
+    set({ selectedModel: id })
+  },
 
   billing: null,
 

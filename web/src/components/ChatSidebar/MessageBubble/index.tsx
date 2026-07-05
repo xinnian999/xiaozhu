@@ -230,6 +230,18 @@ function combineAskAnswers(questions: AskQuestion[], answers: (string | null)[])
     .join('\n\n')
 }
 
+// 把「已回答」汇总文本按题拆开，用于分题展示；拆不出结构（老数据格式等）时返回 null，
+// 调用方退回整段展示，不强行拆错。
+function parseDoneAnswer(done: string): { question: string; answer: string }[] | null {
+  const items = done.split('\n\n').map((block) => {
+    const match = block.match(/^问题\d+：([\s\S]*?)\n回答：([\s\S]*)$/)
+    return match ? { question: match[1], answer: match[2] } : null
+  })
+  return items.every((item): item is { question: string; answer: string } => item !== null)
+    ? items
+    : null
+}
+
 // 「不确定，你决定」按钮提交给后端的固定文案
 const ASK_FALLBACK_ANSWER = '不确定，你来决定最合适的方案'
 // 多选一题全不勾时的兜底文案
@@ -323,11 +335,28 @@ function AskUserChip({
 
   const done = submitted ?? message.toolResult
   if (done) {
+    const parsed = parseDoneAnswer(done)
     return (
       <div className={styles.askChip}>
         <div className={styles.askChipDone}>
-          <HelpCircle size={13} className={styles.askChipIcon} aria-hidden />
-          <span className={styles.askChipDoneText}>已回答：{done}</span>
+          <div className={styles.askChipDoneHeader}>
+            <HelpCircle size={13} className={styles.askChipIcon} aria-hidden />
+            <span>已回答</span>
+          </div>
+          {parsed ? (
+            <div className={styles.askChipDoneList}>
+              {parsed.map((qa, i) => (
+                <div className={styles.askChipDoneItem} key={i}>
+                  <div className={styles.askChipDoneQ}>
+                    {parsed.length > 1 ? `${i + 1}. ${qa.question}` : qa.question}
+                  </div>
+                  <div className={styles.askChipDoneA}>{qa.answer}</div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <span className={styles.askChipDoneText}>{done}</span>
+          )}
         </div>
       </div>
     )
@@ -721,8 +750,20 @@ function describeToolCall(
     case 'edit_file':
       // 局部编辑：只改文件里的一小段（差分编辑），区别于 write_file 的整文件写入
       return { icon: <FilePen size={12} />, label: `编辑 ${path}` }
-    case 'read_file':
-      return { icon: <FileText size={12} />, label: `读取 ${path}` }
+    case 'read_files': {
+      // paths 是字符串数组；工具调用刚出现时 args 可能还是空对象（流式提前亮卡阶段），
+      // 这时 paths 拿不到，退回一个通用文案，等完整参数到达后会自动刷新成真实文件名。
+      const paths = Array.isArray(args?.paths)
+        ? (args.paths as unknown[]).filter((p): p is string => typeof p === 'string')
+        : []
+      const label =
+        paths.length === 0
+          ? '读取文件'
+          : paths.length === 1
+            ? `读取 ${paths[0]}`
+            : `批量读取 ${paths.length} 个文件`
+      return { icon: <FileText size={12} />, label }
+    }
     case 'list_files':
       return { icon: <FolderOpen size={12} />, label: '查看项目结构' }
     case 'check_build':

@@ -318,6 +318,25 @@ async def _cleanup_thread(thread_id: str) -> None:
         print(f"[checkpoint 清理失败] thread_id={thread_id}: {type(e).__name__}: {e}")
 
 
+async def _file_tree_note(db: AsyncSession, session_id: str) -> str:
+    """现查 files 表拼出当前项目文件树，作为 system prompt 的动态附加段。
+
+    files 表才是文件现状的唯一真相源，但从没喂给过 LLM——模型每轮/每次 ask_user
+    恢复后都只能靠 list_files/read_files 盲探，哪怕是刚写过的文件也要重新问一遍
+    才知道存在（kind='tool' 的历史行不重放，见 agent_loop 里加载历史那段注释）。
+    只给路径不给内容：内容仍按需用 read_files 批量取，避免项目变大后每次都要把
+    全部文件内容重发一遍。调用方（agent_loop / ask_result 的 resume）都要在自己
+    那次真正的文件状态确定之后才查这个，保证拿到的是当下的准确状态。
+    """
+    result = await db.execute(select(File.path).where(File.session_id == session_id))
+    file_paths = sorted(result.scalars().all())
+    return (
+        "\n\n【当前项目文件】(以下路径在 files 表里真实存在,无需 list_files 确认;"
+        "要看某个文件具体写了什么用 read_files 批量读取)\n"
+        + ("\n".join(f"- {p}" for p in file_paths) if file_paths else "(项目为空,还没有任何文件)")
+    )
+
+
 async def _consume(
     agent,
     graph_input,
@@ -552,7 +571,6 @@ async def agent_loop(
     # 每请求构造工具(闭包 db / session_id),llm 按本请求选的模型构造。
     # create_agent 内部会 bind_tools、注入 system_prompt,所以这里不用自己绑、
     # messages 也不必塞 SystemMessage —— 这是「每条消息可变模型」的落点。
-    # checkpointer：ask_user 的 interrupt()/resume 需要它持久化图状态(见 app.checkpointer)。
     #
     # 这一步可能失败,最常见的是 build_llm 发现「模型所属分组没在 .env 配 api_key」抛
     # HTTPException。关键在于:此处已经在 StreamingResponse 内部,HTTP 200 头早已发出 ——
@@ -562,13 +580,6 @@ async def agent_loop(
     try:
         llm = build_llm(req.model)
         tools = build_tools(db, req.session_id, db_lock)
-        agent = create_agent(
-            llm,
-            tools,
-            system_prompt=SYSTEM_PROMPT,
-            checkpointer=get_checkpointer(),
-            middleware=[NoBluffMiddleware()],
-        )
     except HTTPException as e:
         yield sse({"type": "error", "message": str(e.detail)})
         yield sse({"type": "done"})
@@ -611,7 +622,7 @@ async def agent_loop(
     )
     history = result.scalars().all()
 
-    # system prompt 已由 create_agent 注入(见上面构造处),这里只装对话历史。
+    # system prompt 已由下面 create_agent 注入,这里只装对话历史。
     # 用户消息若带图片,用 build_human_content 拼成多模态 content 回放给 LLM ——
     # 这样不止当前这轮,过去几轮发过的图也会重新带上,模型能持续「看到」它们。
     # 代价是历史里的图每轮都重发,token 偏贵;练手项目图少,可接受(要省可改成只带最后一条)。
@@ -621,6 +632,30 @@ async def agent_loop(
             messages.append(HumanMessage(content=build_human_content(m.text, m.images)))
         else:
             messages.append(AIMessage(content=m.text))
+
+    # 2.5 当前项目文件树，见 _file_tree_note 说明。必须放在上面「重试回退」之后查，
+    # 才能保证拿到的是这一轮真正开始时的准确状态。
+    tree_note = await _file_tree_note(db, req.session_id)
+
+    # checkpointer：ask_user 的 interrupt()/resume 需要它持久化图状态(见 app.checkpointer)。
+    # 这一步理论上不太会失败,但和上面构造 llm/tools 一样做同款 error+done 兜底,
+    # 避免任何异常在 StreamingResponse 内部裸抛,把前端卡在「思考中」出不来。
+    try:
+        agent = create_agent(
+            llm,
+            tools,
+            system_prompt=SYSTEM_PROMPT + tree_note,
+            checkpointer=get_checkpointer(),
+            middleware=[NoBluffMiddleware(llm)],
+        )
+    except HTTPException as e:
+        yield sse({"type": "error", "message": str(e.detail)})
+        yield sse({"type": "done"})
+        return
+    except Exception as e:
+        yield sse({"type": "error", "message": str(e)})
+        yield sse({"type": "done"})
+        return
 
     # thread_id 绑定"这一轮"而不是整个 session（关键设计取舍，见 app.checkpointer 顶部
     # 说明）：本项目每次请求都从 DB 重新拼出全部历史喂给图，不依赖 LangGraph 原生的跨轮

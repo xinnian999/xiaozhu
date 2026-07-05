@@ -76,7 +76,7 @@ def build_tools(db: AsyncSession, session_id: str, db_lock: asyncio.Lock) -> lis
             if count == 0:
                 return (
                     f"未找到要替换的内容：old_string 在 {path} 里不存在。"
-                    "请先用 read_file 读出原文，按原文逐字提供 old_string。"
+                    "请先用 read_files 读出原文，按原文逐字提供 old_string。"
                 )
             if count > 1:
                 return (
@@ -90,17 +90,27 @@ def build_tools(db: AsyncSession, session_id: str, db_lock: asyncio.Lock) -> lis
         return f"已编辑 {path}"
 
     @tool
-    async def read_file(path: str) -> str:
-        """读取文件内容。修改已有文件前必须先调此工具，否则会覆盖原有代码。"""
+    async def read_files(paths: list[str]) -> str:
+        """批量读取一个或多个文件的内容。修改已有文件前必须先用它读出原文，否则会覆盖原有代码。
+
+        需要看多个文件时，把路径一次性都传进来，不要为每个文件分别调一次——工具调用之间
+        隔着一次完整的模型往返，一个个读会白白多等好几轮；一次传够，一轮就能拿到全部内容。
+        只看一个文件也用这个，传长度为 1 的列表即可。
+        """
         async with db_lock:
             result = await db.execute(
-                select(File).where(File.session_id == session_id, File.path == path)
+                select(File.path, File.content).where(
+                    File.session_id == session_id, File.path.in_(paths)
+                )
             )
-            f = result.scalar_one_or_none()
-        if f is None:
-            # 不抛异常 —— 返回字符串让 LLM 自己处理「文件不存在」的语义
-            return f"文件 {path} 不存在"
-        return f.content
+            found = dict(result.all())
+        # 按传入顺序逐个拼结果，不存在的文件给出说明性文字而不是直接漏掉——
+        # 让 LLM 知道「这个路径不对/还没建」，而不是误以为读取失败了。
+        parts = [
+            f"=== {path} ===\n{found[path] if path in found else f'文件 {path} 不存在'}"
+            for path in paths
+        ]
+        return "\n\n".join(parts)
 
     @tool
     async def list_files() -> str:
@@ -201,4 +211,4 @@ def build_tools(db: AsyncSession, session_id: str, db_lock: asyncio.Lock) -> lis
         # 重跑一遍没问题。
         return interrupt({"questions": questions})
 
-    return [write_file, edit_file, read_file, list_files, check_build, ask_user]
+    return [write_file, edit_file, read_files, list_files, check_build, ask_user]

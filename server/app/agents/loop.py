@@ -24,6 +24,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import build_store
+from app.agents.middleware import NoBluffMiddleware
 from app.agents.prompts import SYSTEM_PROMPT
 from app.agents.tools import build_tools
 from app.checkpointer import get_checkpointer
@@ -132,8 +133,11 @@ def build_human_content(text: str, images: list[str] | None) -> str | list[dict]
 # ── Agentic Loop（消费图的事件流）─────────────────────────────────────────────────
 
 # 轮次上限:图用 recursion_limit(super-step 数)兜底死循环。call_model 与 tools
-# 交替推进,一轮约 2 步,50 ≈ 原先手写的「25 轮 LLM 调用」。超限抛 GraphRecursionError。
-RECURSION_LIMIT = 50
+# 交替推进本来一轮约 2 步；接入 NoBluffMiddleware 后它的 after_model 钩子会在图里
+# 多插一个节点（model → NoBluffMiddleware.after_model → tools），一轮变成约 3 步，
+# 75 ≈ 原先手写的「25 轮 LLM 调用」（50 是没接中间件时的旧值，接入后同样的 25 轮
+# 预算会被提前耗尽，导致改动没做完就被当成死循环打断）。超限抛 GraphRecursionError。
+RECURSION_LIMIT = 75
 
 # 工具结果落库 / 下发前的截断上限。多数工具结果很短（"已写入 X"、报错列表），
 # 但 read_file 会返回整文件，可能上万字 —— 截断防止把消息行和 SSE 帧撑爆。
@@ -559,7 +563,11 @@ async def agent_loop(
         llm = build_llm(req.model)
         tools = build_tools(db, req.session_id, db_lock)
         agent = create_agent(
-            llm, tools, system_prompt=SYSTEM_PROMPT, checkpointer=get_checkpointer()
+            llm,
+            tools,
+            system_prompt=SYSTEM_PROMPT,
+            checkpointer=get_checkpointer(),
+            middleware=[NoBluffMiddleware()],
         )
     except HTTPException as e:
         yield sse({"type": "error", "message": str(e.detail)})

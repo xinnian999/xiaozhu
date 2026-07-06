@@ -3,7 +3,7 @@
 为什么用「键值表」而不是给每个配置开一列：
   - 这些配置（SMTP_*、AFDIAN_* 等）数量会变、彼此无关，用一张 key/value 表最灵活：
     以后加一个新配置 = 插一行，不用再写迁移加列。
-  - SQLAdmin 对一张 KV 表能直接生成「列表 + 编辑」界面，零额外代码。
+  - 管理后台（web-admin）对一张 KV 表能直接渲染「列表 + 编辑」界面，前端也几乎零额外代码。
 
 读取方：app/runtime_config.py。它启动时把本表全部读进内存缓存，
 业务代码通过 cfg.smtp_host 这种属性访问；后台改了值会刷新缓存。
@@ -39,3 +39,25 @@ class AppSetting(Base):
 
     # 人类可读的说明，后台展示，提醒「这项填什么、去哪拿」。
     description: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+
+
+# ── Pydantic Schemas ───────────────────────────────────────────────────────────
+
+from pydantic import BaseModel  # noqa: E402
+
+
+class AppSettingAdminRead(BaseModel):
+    """管理后台配置列表响应。value 敏感项会在路由层脱敏后再放进这个字段，不在此处理。"""
+    model_config = {"from_attributes": True}
+
+    key: str
+    value: str
+    category: str
+    is_secret: bool
+    description: str
+
+
+class AppSettingAdminUpdate(BaseModel):
+    """PATCH /api/admin/settings/{key} 的请求体：只能改 value（对齐 admin.py 的 form_columns）。"""
+    value: str
+

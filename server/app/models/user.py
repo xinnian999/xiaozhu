@@ -115,6 +115,46 @@ class UserUpdate(BaseModel):
     avatar: str | None = None
 
 
+class UserAdminRead(BaseModel):
+    """管理后台用户列表/详情响应 —— 比 UserRead 多出档位/额度/管理员等运营字段。
+
+    仍然不含 password_hash：管理员也不需要看到密码哈希。
+    """
+    model_config = {"from_attributes": True}
+
+    id: str
+    email: str
+    nickname: str
+    avatar: str
+    created_at: datetime
+    is_admin: bool
+    tier: str
+    daily_used: int
+    daily_date: date | None
+    tier_expires_at: datetime | None
+
+
+class UserAdminUpdate(BaseModel):
+    """PATCH /api/admin/users/{id} 的请求体：管理员手动编辑用户。
+
+    对齐 SQLAdmin 的 UserAdmin.form_columns；字段都可选（partial update）。
+    tier 改为付费档时必须同时给未来的 tier_expires_at（业务规则在路由里校验，
+    与 admin.py 的 UserAdmin.on_model_change 保持一致）。
+    """
+    nickname: str | None = Field(default=None, min_length=1, max_length=20)
+    tier: str | None = None
+    daily_used: int | None = Field(default=None, ge=0)
+    daily_date: date | None = None
+    tier_expires_at: datetime | None = None
+    is_admin: bool | None = None
+
+
+class GrantTierRequest(BaseModel):
+    """POST /api/admin/users/grant-tier 的请求体：批量续费/升级档位。"""
+    user_ids: list[str] = Field(min_length=1)
+    tier: str
+
+
 class UserLogin(BaseModel):
     """POST /api/users/login 的请求体。
 

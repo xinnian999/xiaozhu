@@ -101,3 +101,15 @@ class SessionRead(BaseModel):
 class ShareInfo(BaseModel):
     """分享接口（生成/查询）返回：当前会话的分享 token。"""
     share_token: str
+
+
+class SessionAdminRead(BaseModel):
+    """管理后台会话列表响应，比 SessionRead 多出 user_id，只读展示用。"""
+    model_config = {"from_attributes": True}
+
+    id: str
+    user_id: str
+    title: str | None
+    created_at: datetime
+    updated_at: datetime
+

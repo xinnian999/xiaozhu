@@ -26,8 +26,8 @@ from app.api import (
     users,
     versions,
 )
+from app.api import admin as admin_api
 from app import llm, runtime_config, setup
-from app.admin import setup_admin
 from app.checkpointer import set_checkpointer
 from app.config import settings
 from app.db import AsyncSessionLocal, engine
@@ -78,15 +78,16 @@ class CrossOriginIsolationMiddleware:
 # 放行清单（未初始化时仍可访问）：
 #   /setup            —— 初始化向导本身（否则死循环）
 #   /api/setup-status —— 前端首屏查初始化状态的接口，必须放行（否则前端拿不到状态、无法自跳）
-#   /admin            —— 后台入口，它的 authenticate 会自己再跳 /setup
 #   /health           —— 健康检查，探活用
 #   /deps-snapshot    —— 大文件，无所谓
-# 其余一切（前台 SPA、/api/*、静态资源）→ 302 跳 /setup。
+# 其余一切（前台 SPA、管理后台 /admin-app、/api/*、静态资源）→ 302 跳 /setup。
+# 管理后台无需在此放行：未初始化时库里根本没有管理员、登不进去，引导去 /setup 建首个管理员
+# 才是正确路径；建成后 is_initialized 即为 True，/admin-app 与 /api/admin/* 全部照常放行。
 #
 # 性能：已初始化后 is_initialized_cached() 命中内存缓存、直接放行，不查库、零额外开销。
 # 只有「还没初始化」这段短暂时期才会对每个请求查一次库（且很快就 mark 成 True）。
 class SetupGateMiddleware:
-    _ALLOW_PREFIXES = ("/setup", "/api/setup-status", "/admin", "/health", "/deps-snapshot")
+    _ALLOW_PREFIXES = ("/setup", "/api/setup-status", "/health", "/deps-snapshot")
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -172,6 +173,9 @@ app.add_middleware(SetupGateMiddleware)
 # dev 期 static/ 不存在；生产期有 dist 拷进来。
 # 提前声明让下方路由函数可以引用，不依赖定义顺序。
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+# 新管理后台（web-admin，vite+react+antd）的构建产物目录，同进程挂载在 /admin-app。
+# 与主前端 STATIC_DIR 同理：dev 期不存在则跳过，生产期由 Dockerfile 拷进来。
+ADMIN_STATIC_DIR = Path(__file__).resolve().parent.parent / "static-admin"
 
 # ── 路由注册 ─────────────────────────────────────────────────
 app.include_router(sessions.router)
@@ -184,16 +188,20 @@ app.include_router(build_result.router)
 app.include_router(ask_result.router)
 app.include_router(chat.router)
 app.include_router(billing.router)
+app.include_router(admin_api.router)
 
 # ── 系统初始化向导（/setup）────────────────────────────────
 # 首次部署（库里还没有管理员）时引导「建首个管理员 + 填运营配置」。
-# 放在 admin 与静态挂载之前注册，确保 /setup 能命中。
+# 放在静态挂载之前注册，确保 /setup 能命中。
 app.include_router(setup.router)
 
-# ── 管理后台（SQLAdmin）─────────────────────────────────────
-# 必须在下方「/ 静态挂载」之前装配：Starlette 按注册顺序匹配路由，
-# 静态挂载是吞掉一切剩余路径的 catch-all，挂在它后面 /admin 永远命中不了。
-setup_admin(app)
+# ── 管理后台（web-admin，独立 vite+react+antd 前端）───────────
+# 必须在下方主前端 catch-all 静态挂载之前：Starlette 按注册顺序匹配路由，
+# 主前端静态挂载是吞掉一切剩余路径的 catch-all，挂在它后面 /admin-app 永远命中不了。
+# dev 期该目录不存在，跳过（管理后台走独立的 vite:9100）；生产由 Dockerfile 的
+# web-admin 构建阶段拷进来。鉴权走 /api/admin/* 的 get_current_admin（JWT），无需在此另设。
+if ADMIN_STATIC_DIR.is_dir():
+    app.mount("/admin-app", StaticFiles(directory=ADMIN_STATIC_DIR, html=True), name="static-admin")
 
 
 @app.get("/health")

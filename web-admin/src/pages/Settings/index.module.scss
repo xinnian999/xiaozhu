@@ -1,0 +1,19 @@
+// ============================================
+// 应用配置页
+// ============================================
+.secret {
+  font-family: monospace;
+  color: var(--color-text-dim);
+}
+
+.desc {
+  margin: 0 0 12px;
+  color: var(--color-text-dim);
+  font-size: 13px;
+}
+
+// 抽屉底部操作区：按钮靠右
+.drawerFooter {
+  width: 100%;
+  justify-content: flex-end;
+}

@@ -1,0 +1,110 @@
+// ============================================
+// 整体布局样式
+// ============================================
+.layout {
+  min-height: 100vh;
+}
+
+.sider {
+  :global(.ant-layout-sider-children) {
+    display: flex;
+    flex-direction: column;
+  }
+}
+
+.brand {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+// 菜单占据剩余高度，把底部用户区顶到最下方
+.menu {
+  flex: 1;
+  border-inline-end: none !important;
+}
+
+// ============================================
+// 侧边栏底部：用户信息 + 主题切换 + 退出
+// ============================================
+.siderFooter {
+  border-top: 1px solid var(--color-border);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.userInfo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.userName {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--color-text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.footerActions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+// 展开态：三个按钮均分宽度，收窄内边距和图标间距，避免挤出侧栏
+.footerBtn {
+  flex: 1;
+  min-width: 0;
+  gap: 4px;
+  padding-inline: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+
+  // 覆盖 antd 图标与文字之间的默认外边距，改用上面的 gap 控制
+  :global(.ant-btn-icon) {
+    margin-inline-end: 0 !important;
+  }
+}
+
+// 收起态：头像和按钮居中竖排，仅显示图标
+.footerCollapsed {
+  align-items: center;
+
+  .userInfo {
+    flex-direction: column;
+  }
+
+  .footerActions {
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .footerBtn {
+    flex: none;
+  }
+}
+
+.content {
+  margin: 16px;
+  padding: 16px;
+  background: var(--color-bg-soft);
+  border-radius: 8px;
+  overflow: auto;
+
+  @media (max-width: 767px) {
+    margin: 8px;
+    padding: 8px;
+  }
+}

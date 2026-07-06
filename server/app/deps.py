@@ -61,6 +61,18 @@ async def get_current_user(
     return user
 
 
+async def get_current_admin(current_user: User = Depends(get_current_user)) -> User:
+    """在「已登录」基础上再加一道「必须是管理员」的门槛。
+
+    管理员本质是 is_admin=True 的普通用户，复用同一套 /api/users/login 登录、
+    同一个 token 和 get_current_user 的 JWT 校验，这里只多判一个字段。
+    /api/admin/* 全量挂这个依赖，非管理员统一 403（区别于未登录的 401）。
+    """
+    if not current_user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
+    return current_user
+
+
 async def get_owned_session(
     session_id: str,
     db: AsyncSession = Depends(get_db),

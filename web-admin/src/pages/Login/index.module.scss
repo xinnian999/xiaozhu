@@ -1,0 +1,24 @@
+// ============================================
+// 登录页样式
+// ============================================
+.page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: var(--color-bg);
+}
+
+.card {
+  width: 360px;
+
+  // 移动端：卡片宽度改为撑满，留出左右安全边距
+  @media (max-width: 767px) {
+    width: calc(100vw - 32px);
+  }
+}
+
+.title {
+  text-align: center;
+  margin-bottom: 24px !important;
+}

@@ -16,6 +16,10 @@ WORKDIR /app
 # （这是 Dockerfile 提速的核心技巧：把"变得慢的"放前面，"变得快的"放后面）
 COPY package.json bun.lock ./
 COPY web/package.json ./web/package.json
+# web-admin 也是根 workspace 成员，bun.lock 里有它的条目；--frozen-lockfile 会校验
+# 所有 workspace 的 package.json 都在，缺了会报错。这里只拷它的清单（不拷源码），
+# 让 frozen 校验通过，同时不触发 web-admin 依赖安装（它在阶段2独立装）。
+COPY web-admin/package.json ./web-admin/package.json
 RUN bun install --frozen-lockfile
 
 # 再拷前端源码并构建。根脚本 build = 进 web 跑 `tsc -b && vite build`。
@@ -25,11 +29,27 @@ RUN bun run build
 # -k 保留原始 .bin（StaticFiles fallback 用），-9 最大压缩比
 RUN [ -f /app/web/dist/deps-snapshot.bin ] && \
     gzip -k9 /app/web/dist/deps-snapshot.bin || true
-# 产物落在 /app/web/dist，交给阶段 2 取用
+# 产物落在 /app/web/dist，交给阶段 3 取用
 
 
 # ─────────────────────────────────────────────────────────────
-# 阶段 2：运行后端（python + uvicorn，并托管阶段1的前端产物）
+# 阶段 2：构建管理后台（web-admin，独立 vite+react+antd 项目）
+# ─────────────────────────────────────────────────────────────
+# 单独一个阶段（而不是塞进阶段1）：web-admin 是独立 package.json，
+# 依赖装在自己的 node_modules，不与主前端混装，互不干扰、层缓存也独立生效。
+FROM crpi-a7p27yxlrmekg1a3.cn-beijing.personal.cr.aliyuncs.com/elin-common/bun:1 AS admin-builder
+WORKDIR /app/web-admin
+
+COPY web-admin/package.json ./
+RUN bun install
+
+COPY web-admin/ ./
+RUN bun run build
+# 产物落在 /app/web-admin/dist，交给阶段 3 取用
+
+
+# ─────────────────────────────────────────────────────────────
+# 阶段 3：运行后端（python + uvicorn，并托管阶段1/2 的前端产物）
 # ─────────────────────────────────────────────────────────────
 FROM crpi-a7p27yxlrmekg1a3.cn-beijing.personal.cr.aliyuncs.com/elin-common/python:3.12-slim AS runtime
 
@@ -60,6 +80,8 @@ COPY server/scripts ./scripts
 # 把阶段1构建好的前端产物放到 /app/static
 # main.py 用 Path(__file__).parent.parent / "static" 定位，正好命中这里。
 COPY --from=web-builder /app/web/dist ./static
+# 把阶段2构建好的管理后台产物放到 /app/static-admin，main.py 挂载在 /admin-app。
+COPY --from=admin-builder /app/web-admin/dist ./static-admin
 
 # 容器内监听 8000。OPENAI_API_KEY、DATABASE_URL 等敏感/环境相关配置
 # 不写进镜像，运行时由 docker 用环境变量注入（见 docker-compose）。
@@ -72,8 +94,7 @@ EXPOSE 8000
 # --host 0.0.0.0 让容器外能访问（默认只听 127.0.0.1，在容器里等于谁都连不上）。
 # --proxy-headers + --forwarded-allow-ips=*：信任反代(Caddy)传来的 X-Forwarded-Proto/Host。
 #   Caddy 终结 TLS、以 http 转发给容器，默认 uvicorn 只信任 127.0.0.1 的转发头，而 Caddy
-#   来自 docker 网关网段(非 127.0.0.1)，于是 uvicorn 按 http 生成绝对 URL —— 导致 SQLAdmin
-#   登录表单 action / 跳转 / 静态资源都成了 http://，在 https 页面下被浏览器当混合内容拦掉、
-#   POST 被重定向丢数据，登录进不去。开启后 uvicorn 按 https 生成 URL，后台正常。
+#   来自 docker 网关网段(非 127.0.0.1)，于是 uvicorn 会按 http 生成绝对 URL / 重定向 Location，
+#   在 https 页面下被浏览器当混合内容拦掉。开启后 uvicorn 按 https 生成 URL，反代下一切正常。
 #   容器只经 Caddy 暴露，用 * 信任所有转发来源即可（内网单反代场景）。
 CMD ["sh", "-c", "/app/.venv/bin/alembic upgrade head && exec /app/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=*"]

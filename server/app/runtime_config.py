@@ -3,7 +3,7 @@
 设计：
   - 启动时 load() 把整张 app_settings 表读进内存 _cache（一个 dict）。
   - 业务代码通过模块单例 cfg 访问，如 cfg.smtp_host —— 读的是内存缓存，不打数据库。
-  - 后台（SQLAdmin）改了配置后调用 refresh() 重新 load，缓存即时更新。
+  - 后台（web-admin 的 /api/admin/settings）改了配置后调用 refresh() 重新 load，缓存即时更新。
   - 缓存里没有某个 key 时回退到 .env（settings.*）—— 这让「还没把配置写进库」的
     老部署无缝过渡：第一次启动 ensure_seeded() 会把 .env 现值灌进库，之后以库为准。
 

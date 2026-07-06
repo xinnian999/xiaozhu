@@ -36,3 +36,23 @@ class EmailCode(Base):
     sent_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )
+
+
+# ── Pydantic Schemas ───────────────────────────────────────────────────────────
+
+from pydantic import BaseModel  # noqa: E402
+
+
+class EmailCodeAdminRead(BaseModel):
+    """管理后台验证码列表响应，只读展示 + 可删（排障用），不返回明文 code 之外的敏感信息。
+
+    code 本身按 admin.py 原有行为原样展示（验证码短时有效、用完即删，非长期凭证）。
+    """
+    model_config = {"from_attributes": True}
+
+    email: str
+    code: str
+    attempts: int
+    expires_at: datetime
+    sent_at: datetime
+

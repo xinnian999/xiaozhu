@@ -1,0 +1,49 @@
+@use '@/styles/common' as *;
+
+// ============================================
+// 用户管理页
+// ============================================
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.search {
+  width: 280px;
+  max-width: 100%;
+}
+
+.fullWidth {
+  width: 100%;
+}
+
+.editForm {
+  margin-top: 8px;
+}
+
+// 抽屉底部操作区：按钮靠右
+.drawerFooter {
+  width: 100%;
+  justify-content: flex-end;
+}
+
+// —— 移动端：工具栏纵向堆叠 ——
+@include mobile {
+  .toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .search {
+    width: 100%;
+  }
+}

@@ -42,3 +42,22 @@ class Order(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     # 支付到账时间。未支付为 None；确认到账时回填。
     paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+# ── Pydantic Schemas ───────────────────────────────────────────────────────────
+
+from pydantic import BaseModel  # noqa: E402
+
+
+class OrderAdminRead(BaseModel):
+    """管理后台订单列表响应，只读展示，字段与表结构一一对应。"""
+    model_config = {"from_attributes": True}
+
+    id: str
+    user_id: str
+    tier: str
+    amount: str
+    status: str
+    created_at: datetime
+    paid_at: datetime | None
+

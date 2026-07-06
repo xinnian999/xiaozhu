@@ -1,0 +1,15 @@
+@use './_theme.scss';
+
+// ============================================
+// 全局基础样式
+// ============================================
+html, body, #root {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: system-ui, -apple-system, 'PingFang SC', sans-serif;
+}

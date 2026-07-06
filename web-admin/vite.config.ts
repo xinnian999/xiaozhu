@@ -8,9 +8,9 @@ const BACKEND = "http://localhost:8000";
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
-  // 生产构建产物挂在后端的 /admin-app 路径下（同进程同源），
+  // 生产构建产物挂在后端的 /admin 路径下（同进程同源），
   // base 必须对应，否则构建出的资源引用路径会指向根路径而 404。
-  base: "/admin-app/",
+  base: "/admin/",
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "src"),

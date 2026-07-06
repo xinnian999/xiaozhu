@@ -51,6 +51,6 @@ export const useAuthStore = create<AuthState>((set) => ({
   logout: () => {
     setToken(null)
     set({ user: null })
-    window.location.href = '/admin-app/login'
+    window.location.href = '/admin/login'
   },
 }))

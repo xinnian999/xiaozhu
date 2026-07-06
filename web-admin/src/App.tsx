@@ -42,7 +42,7 @@ export default function App() {
       }}
     >
       <AntdApp>
-        <BrowserRouter basename="/admin-app">
+        <BrowserRouter basename="/admin">
           <Routes>
             <Route path="/login" element={user ? <Navigate to="/" replace /> : <Login />} />
             <Route

@@ -44,7 +44,7 @@ http.interceptors.response.use(
     if ((status === 401 || status === 403) && !isSilent) {
       setToken(null)
       message.error(status === 403 ? '无管理员权限' : '登录已过期，请重新登录')
-      window.location.href = '/admin-app/login'
+      window.location.href = '/admin/login'
       return Promise.reject(new Error('未授权'))
     }
 

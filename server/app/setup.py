@@ -128,7 +128,7 @@ def _render_form(error: str = "") -> str:
 
     <div class="card">
       <h2>管理员账号</h2>
-      <p class="hint">用于登录管理后台 /admin-app。请牢记密码。</p>
+      <p class="hint">用于登录管理后台 /admin。请牢记密码。</p>
       <label>邮箱</label>
       <input name="admin_email" type="email" placeholder="you@example.com" required>
       <label>密码</label>
@@ -222,7 +222,7 @@ def _render_form(error: str = "") -> str:
 async def setup_page(db: AsyncSession = Depends(get_db)):
     """向导页。已初始化则不再展示，直接跳登录（自锁）。"""
     if await is_initialized(db):
-        return RedirectResponse("/admin-app/login", status_code=302)
+        return RedirectResponse("/admin/login", status_code=302)
     return HTMLResponse(_render_form())
 
 
@@ -258,7 +258,7 @@ async def setup_submit(
     """
     # 防重复：已初始化直接回登录页（自锁）
     if await is_initialized(db):
-        return RedirectResponse("/admin-app/login", status_code=302)
+        return RedirectResponse("/admin/login", status_code=302)
 
     # 基本校验
     email = admin_email.strip().lower()
@@ -353,7 +353,7 @@ async def setup_submit(
     await llm.refresh()
     await runtime_config.refresh()
 
-    return RedirectResponse("/admin-app/login", status_code=302)
+    return RedirectResponse("/admin/login", status_code=302)
 
 
 async def _upsert_settings(db: AsyncSession, values: dict[str, str]) -> None:

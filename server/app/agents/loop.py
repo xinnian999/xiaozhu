@@ -304,6 +304,54 @@ async def _save_message(
     return msg
 
 
+async def _early_file_write(
+    db: AsyncSession, db_lock: asyncio.Lock, session_id: str, tc: dict
+) -> dict | None:
+    """把一个「写文件类」tool_call 提前折算成 file_write 事件（供竞态防护抢发）。
+
+    背景：模型可能无视 parallel_tool_calls，把若干 write_file/edit_file 和 check_build
+    塞进同一批 tool_calls。LangGraph 的 tools 节点是**屏障**——它那一批的 ToolMessage
+    要等批内所有工具（含会阻塞最长 90s 的 check_build）都跑完才一次性产出。也就是说，
+    真正携带文件内容的 file_write 事件（在 tools 节点分支里发，见 _consume）会被 check_build
+    死死拖在后面；而 check_build 的 arm+preview_refresh 却在 model 节点就发了出去 ——
+    于是前端「先收到 preview_refresh 去构建、后才收到 file_write」，构建到的是改动前的旧
+    文件，误报「构建通过」。
+
+    对策：一旦发现某批 tool_calls 里带 check_build，就在 arm+preview_refresh 之前，用各写
+    文件工具**自己的 args** 把 file_write 抢先折算出来发给前端，确保预览构建到的是这一批的
+    新内容。返回可直接 yield 的事件 dict；拿不到可靠内容（参数缺失 / edit 命中不唯一）时返回
+    None，那一个文件退回 tools 节点的原路径（这类「批量 + edit + check_build 同现」本就罕见）。
+
+    仅在「同批含 check_build」时才调用。正常分轮调用（先 write 再单独 check_build）走不到
+    这里，行为完全不变，也不会有重复的 file_write。
+    """
+    name = tc.get("name")
+    args = tc.get("args") or {}
+    if name == "write_file":
+        # write_file 的完整内容就在 args 里，直接用，最可靠。
+        path, content = args.get("path"), args.get("content")
+        if isinstance(path, str) and isinstance(content, str):
+            return {"type": "file_write", "path": path, "content": content}
+        return None
+    if name == "edit_file":
+        # edit_file 只给了 old/new 片段，得读当前库内容算出替换后的结果。
+        path, old, new = args.get("path"), args.get("old_string"), args.get("new_string")
+        if not (isinstance(path, str) and isinstance(old, str) and isinstance(new, str)):
+            return None
+        async with db_lock:
+            res = await db.execute(
+                select(File.content).where(
+                    File.session_id == session_id, File.path == path
+                )
+            )
+            content = res.scalar_one_or_none()
+        # 只有唯一命中才敢提前折算，和 edit_file 工具本身同款守卫；含糊 / 找不到就不抢发。
+        if content is None or content.count(old) != 1:
+            return None
+        return {"type": "file_write", "path": path, "content": content.replace(old, new, 1)}
+    return None
+
+
 async def _cleanup_thread(thread_id: str) -> None:
     """一轮真正跑完(没有 pending interrupt)后清掉这次的 checkpoint。
 
@@ -367,6 +415,9 @@ async def _consume(
     wrote_files = False
     truncated = False
     pending: dict[str, tuple[str, dict, DBMessage]] = dict(initial_pending or {})
+    # 「同批含 check_build」时被抢先补发过 file_write 的 tool_call_id 集合 ——
+    # tools 节点回收结果时据此跳过重发，避免同一文件的 file_write 发两遍（见 _early_file_write）。
+    early_written: set[str] = set()
 
     # ── 工具卡「流式提前亮」用的累积状态 ──
     announced_tools: set[str] = set()
@@ -477,6 +528,22 @@ async def _consume(
                                 print(f"[tool_call] name={tc['name']} args={list(tc['args'].keys())}")
                                 yield sse({"type": "tool_call", "name": tc["name"], "args": tc["args"], "id": tc["id"]})
                                 if tc["name"] == "check_build":
+                                    # ── 竞态防护：同批若还有 write_file/edit_file，它们真正的 file_write
+                                    # 事件会被 tools 节点屏障拖到 check_build 之后才发（见 _early_file_write
+                                    # 的详细说明）。这里在 arm+preview_refresh 之前，用这些工具自己的 args
+                                    # 把 file_write 抢先补发出去，保证前端预览构建到的是这一批的新内容，
+                                    # 而不是改动前的旧文件（否则 check_build 会误报「构建通过」）。
+                                    # early_written 记下已抢发过的 tool_call_id，tools 节点分支据此跳过重发。
+                                    for other in m.tool_calls:
+                                        if other["id"] == tc["id"] or other["id"] in early_written:
+                                            continue
+                                        if other["name"] not in ("write_file", "edit_file"):
+                                            continue
+                                        ev = await _early_file_write(db, db_lock, session_id, other)
+                                        if ev is not None:
+                                            wrote_files = True
+                                            early_written.add(other["id"])
+                                            yield sse(ev)
                                     build_store.arm(session_id)
                                     yield sse({"type": "preview_refresh"})
                                 # ask_user 不需要类似的"武装会合点"：它的问题内容已经通过上面
@@ -522,29 +589,36 @@ async def _consume(
                         if name == "check_build":
                             print(f"[check_build] {tool_result}")
 
+                        # write_file / edit_file：若这条已在 check_build 同批里被 _early_file_write
+                        # 抢先补发过（id 在 early_written 里），这里就只落 tool_result、不再重发
+                        # file_write，避免前端收到同一文件两遍。
                         elif name == "write_file":
                             wrote_files = True
-                            yield sse({
-                                "type": "file_write",
-                                "path": args["path"],
-                                "content": args["content"],
-                            })
-                        elif name == "edit_file" and tool_result == f"已编辑 {args['path']}":
-                            async with db_lock:
-                                res = await db.execute(
-                                    select(File.content).where(
-                                        File.session_id == session_id,
-                                        File.path == args["path"],
-                                    )
-                                )
-                                content = res.scalar_one_or_none()
-                            if content is not None:
-                                wrote_files = True
+                            if tm.tool_call_id not in early_written:
                                 yield sse({
                                     "type": "file_write",
                                     "path": args["path"],
-                                    "content": content,
+                                    "content": args["content"],
                                 })
+                        elif name == "edit_file" and tool_result == f"已编辑 {args['path']}":
+                            if tm.tool_call_id in early_written:
+                                wrote_files = True
+                            else:
+                                async with db_lock:
+                                    res = await db.execute(
+                                        select(File.content).where(
+                                            File.session_id == session_id,
+                                            File.path == args["path"],
+                                        )
+                                    )
+                                    content = res.scalar_one_or_none()
+                                if content is not None:
+                                    wrote_files = True
+                                    yield sse({
+                                        "type": "file_write",
+                                        "path": args["path"],
+                                        "content": content,
+                                    })
 
             if truncated:
                 break

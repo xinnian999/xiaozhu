@@ -12,6 +12,7 @@ import Sessions from '@/pages/Sessions'
 import EmailCodes from '@/pages/EmailCodes'
 import Settings from '@/pages/Settings'
 import Models from '@/pages/Models'
+import BootFailures from '@/pages/BootFailures'
 
 // ============================================
 // 应用根组件：主题联动 + 登录态恢复 + 路由
@@ -53,6 +54,7 @@ export default function App() {
               <Route path="users" element={<Users />} />
               <Route path="orders" element={<Orders />} />
               <Route path="sessions" element={<Sessions />} />
+              <Route path="boot-failures" element={<BootFailures />} />
               <Route path="email-codes" element={<EmailCodes />} />
               <Route path="settings" element={<Settings />} />
               <Route path="models" element={<Models />} />

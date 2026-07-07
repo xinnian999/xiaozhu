@@ -42,9 +42,16 @@
   }
 }
 
+// 生成中的「正在生成」+ 可选的慢提示，竖排一组
+.thinkingWrap {
+  margin-bottom: $space-4;
+  display: flex;
+  flex-direction: column;
+  gap: $space-1;
+}
+
 // 生成中的「正在生成」：渐变光在文字上连续流动（shimmer）
 .thinking {
-  margin-bottom: $space-4;
   font-size: $fs-13;
   font-weight: $fw-medium;
   // 周期性渐变（暗-亮-暗-亮-暗，首尾同色），裁进文字后单向匀速平移：
@@ -63,6 +70,12 @@
   color: transparent;
   -webkit-text-fill-color: transparent;
   animation: thinking-shimmer 2.2s linear infinite;
+}
+
+// 久等未出字时的耐心提示（含计时），比主文案更弱、更小
+.thinkingHint {
+  font-size: $fs-12;
+  color: var(--color-text-mute);
 }
 
 @keyframes thinking-shimmer {

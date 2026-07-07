@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends
 
 from app.deps import get_current_admin
 
-from . import email_codes, models, orders, sessions, settings, users
+from . import boot_failures, email_codes, models, orders, sessions, settings, users
 
 router = APIRouter(
     prefix="/api/admin",
@@ -23,3 +23,4 @@ router.include_router(sessions.router)
 router.include_router(email_codes.router)
 router.include_router(settings.router)
 router.include_router(models.router)
+router.include_router(boot_failures.router)

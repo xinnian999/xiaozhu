@@ -130,6 +130,39 @@ export async function deleteSession(id: string) {
   await http.delete(`/api/admin/sessions/${id}`)
 }
 
+// ── 预览 boot 失败监控（只读） ────────────────────────────────
+// WebContainer 运行环境从境外 boot，国内偶发失败。C 端前端上报到 boot_failures 表，
+// 这里拉出来做监控。
+export type AdminBootFailure = {
+  id: number
+  session_id: string | null
+  user_id: string | null
+  stage: string
+  kind: string
+  message: string
+  cross_origin_isolated: boolean | null
+  elapsed_ms: number | null
+  user_agent: string | null
+  created_at: string
+}
+
+export async function listBootFailures(params: { offset?: number; limit?: number }) {
+  const res = await http.get<AdminBootFailure[]>('/api/admin/boot-failures', { params })
+  return res.data
+}
+
+export async function countBootFailures() {
+  const res = await http.get<number>('/api/admin/boot-failures/count')
+  return res.data
+}
+
+export async function recentBootFailures(hours = 24) {
+  const res = await http.get<number>('/api/admin/boot-failures/recent-count', {
+    params: { hours },
+  })
+  return res.data
+}
+
 // ── 邮箱验证码（只读 + 删） ───────────────────────────────────
 export type AdminEmailCode = {
   email: string

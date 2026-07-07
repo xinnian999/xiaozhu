@@ -31,6 +31,26 @@ let containerPromise: Promise<WebContainer> | null = null
 let previewStarted = false  // vite preview 静态服务是否已起来
 let lastFiles: FileMap | null = null  // 上次 mount 的文件快照，用于增量 diff
 
+// WebContainer.boot() 的超时兜底（ms）。boot 要从境外（StackBlitz）下载 ~3MB 运行时并握手，
+// 国内网络偶发卡死/超时。没有超时的话会永远停在 booting、进度条卡 16%，用户以为死机。
+// 到点就以「超时」失败，让上层进错误态 + 上报后端，而不是无限等待。
+const BOOT_TIMEOUT_MS = 40000
+
+/** boot 失败时抛出的专用错误：带上「卡了多久」与「是否超时」，供上层上报后端定位。 */
+export class BootError extends Error {
+  // 显式字段声明（不用构造函数参数属性）——项目开了 erasableSyntaxOnly，禁止参数属性写法。
+  readonly kind: 'timeout' | 'error'
+  readonly elapsedMs: number
+
+  constructor(message: string, kind: 'timeout' | 'error', elapsedMs: number) {
+    super(message)
+    this.name = 'BootError'
+    this.kind = kind
+    this.elapsedMs = elapsedMs
+  }
+}
+
+
 // ── dist 产物缓存（内容寻址）─────────────────────────────────────
 // 痛点：切版本 / 回滚是瞬时的，但预览每次都重新跑一遍 `vite build`（几秒），切完要干等。
 // 而 dist 其实是「源文件」的纯函数（toolchain 固定在模板里），同一份源文件 → 同一份 dist。
@@ -135,10 +155,44 @@ function stripAnsi(s: string): string {
     .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '')
 }
 
-/** 启动（首次调用真正 boot，之后返回同一个实例） */
+/** 启动（首次调用真正 boot，之后返回同一个实例）。
+ *  给 boot 套一层超时：境外运行时下载卡死时，到点抛 BootError('timeout')，
+ *  而不是让 booting 无限挂起。boot 失败会清掉 containerPromise，允许用户刷新重试。 */
 export function getContainer(): Promise<WebContainer> {
   if (!containerPromise) {
-    containerPromise = WebContainer.boot()
+    const startedAt = Date.now()
+    containerPromise = new Promise<WebContainer>((resolve, reject) => {
+      let settled = false
+      const timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        reject(new BootError(
+          '运行环境启动超时：可能是网络无法稳定访问境外 CDN（StackBlitz）。请刷新重试，或切换网络。',
+          'timeout',
+          Date.now() - startedAt,
+        ))
+      }, BOOT_TIMEOUT_MS)
+      WebContainer.boot().then(
+        (wc) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          resolve(wc)
+        },
+        (e) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          const msg = e instanceof Error ? e.message : String(e)
+          reject(new BootError(msg, 'error', Date.now() - startedAt))
+        },
+      )
+    })
+    // boot 失败要把单例清空，否则这个 rejected promise 会被永久缓存，
+    // 用户刷新（不重建模块）后再 boot 也拿到同一个失败结果、再也起不来。
+    containerPromise.catch(() => {
+      containerPromise = null
+    })
   }
   return containerPromise
 }
@@ -436,12 +490,23 @@ export async function bootAndRun(
     onUrl: (url: string) => void
     onLog: (line: string) => void
     onError: (msg: string) => void
+    // boot / 启动流程失败时回调，带上诊断信息供上层上报后端监控（best-effort）。
+    // stage：卡在哪一步；kind：超时还是异常；elapsedMs：boot 阶段耗时（仅 boot 失败时有）。
+    onBootFail?: (info: {
+      stage: string
+      kind: 'timeout' | 'error'
+      message: string
+      elapsedMs?: number
+    }) => void
   },
 ): Promise<void> {
+  // 记录当前阶段：失败上报时要知道卡在 booting 还是后续哪一步。
+  let stage = 'booting'
   try {
     hooks.onStatus('booting')
     const wc = await getContainer()
 
+    stage = 'mounting'
     hooks.onStatus('mounting')
     // 把 console bridge 脚本注入到 index.html，让 iframe 里的业务代码 console
     // 都能被父页面收到
@@ -457,6 +522,7 @@ export async function bootAndRun(
     })
 
     // 依赖安装：先尝试从 IndexedDB 缓存恢复 node_modules，命中则跳过 npm install
+    stage = 'installing'
     hooks.onStatus('installing')
     // 依赖哈希作为缓存 key —— 模板固定 → 哈希恒定 → 跨项目/刷新共享同一份依赖
     const depsKey = await computeDepsKey(filesWithBridge['package.json'])
@@ -556,6 +622,7 @@ export async function bootAndRun(
     // 先查缓存（含 IndexedDB L2）：刷新 / 重开浏览器后若这份内容之前构建过，直接还原 dist、
     // 跳过这次 `vite build`（首屏最耗时的一步），boot 明显更快。命中不了才真正构建。
     hooks.onStatus('building')
+    stage = 'building'
     const bootKey = await computeFilesKey(filesWithBridge)
     let restoredDist = false
     if (bootKey) {
@@ -584,6 +651,7 @@ export async function bootAndRun(
     // vite preview 是常驻静态服务，serve dist。它开端口后会触发上面注册的
     // 统一 server-ready 处理器（onUrl + ready），iframe 照常加载，无需额外接线。
     hooks.onStatus('starting')
+    stage = 'starting'
     hooks.onLog('vite preview')
     const preview = await wc.spawn('npx', ['vite', 'preview', '--port', '4173'])
     previewStarted = true
@@ -593,6 +661,15 @@ export async function bootAndRun(
     const msg = e instanceof Error ? e.message : String(e)
     hooks.onError(msg)
     hooks.onStatus('error')
+    // 上报失败供后台监控。BootError 带 kind/elapsedMs（boot 阶段专有）；其余阶段的异常
+    // 归为 kind='error'。stage 标明卡在哪一步，绝大多数境外依赖问题会是 stage='booting'。
+    const isBootErr = e instanceof BootError
+    hooks.onBootFail?.({
+      stage,
+      kind: isBootErr ? e.kind : 'error',
+      message: msg,
+      elapsedMs: isBootErr ? e.elapsedMs : undefined,
+    })
   }
 }
 

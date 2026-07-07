@@ -425,6 +425,29 @@ export async function postBuildResult(
   }
 }
 
+// ── boot 失败上报（best-effort 旁路监控）───────────────────────
+// 预览运行环境（WebContainer）从境外 boot，国内偶发失败/超时。失败时把原因 + 环境信息
+// 上报后端，管理后台据此监控失败率、定位偶发原因。同 postBuildResult：走原生 fetch、
+// 静默失败，绝不打扰用户（上报本身失败无所谓）。
+export async function reportBootFailure(payload: {
+  session_id?: string | null
+  stage?: string
+  kind?: 'timeout' | 'error'
+  message?: string
+  cross_origin_isolated?: boolean
+  elapsed_ms?: number
+}): Promise<void> {
+  try {
+    await fetch('/api/boot-failure', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify(payload),
+    })
+  } catch {
+    // 旁路监控，报不上去就算了
+  }
+}
+
 // ── SSE 流式对话 ────────────────────────────────────────────────
 // SSE 是长连接流，axios 不支持流式消费，这里保留原生 fetch。
 // 普通 REST 请求全走 axios，SSE 单独处理，两者分工明确。

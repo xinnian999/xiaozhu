@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { MessageSquare, RotateCcw } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
 import type { Message } from '@/types/project'
@@ -8,6 +8,11 @@ import styles from './index.module.scss'
 // 首次进入会话时，等右侧预览区的 fade-up 展开动画（0.6s）放完、布局稳定后再滚到底。
 // 否则在动画/布局还没稳的时候滚，会滚不到最底。留一点余量取 700ms。
 const INIT_SCROLL_DELAY = 700
+
+// 「正在生成」等了这么多秒还没出内容，就补一句耐心提示 + 亮出计时。
+// 部分模型（如推理型 Gemini）会先思考几十秒才吐第一个字，且中转不回传思维链 ——
+// 期间界面只有 shimmer 容易被当成卡死，这里用「秒数在走」证明它还在干活。
+const SLOW_GEN_HINT_AFTER = 6
 
 type Props = {
   /** 重试最新一轮的回调（由 ChatSidebar 提供，内部走流式重生成） */
@@ -29,6 +34,24 @@ export default function MessageList({ onRetry, onAskUserAnswer }: Props) {
   const messages = session?.messages ?? []
   const isStreaming = session?.isStreaming ?? false
   const sessionId = session?.id ?? null
+  // 本轮流式已累积的文本：非空 = 已经在吐字了，就不再显示「思考中」计时提示。
+  const streamingText = session?.streamingText ?? ''
+
+  // 「正在生成」持续了多少秒。isStreaming 期间每秒 +1，用来判断要不要亮慢提示、显示计时。
+  // 一旦开始吐字（streamingText 非空）或退出流式就停表复位。
+  const [genSeconds, setGenSeconds] = useState(0)
+  useEffect(() => {
+    if (!isStreaming || streamingText) {
+      setGenSeconds(0)
+      return
+    }
+    setGenSeconds(0)
+    const started = Date.now()
+    const timer = setInterval(() => {
+      setGenSeconds(Math.floor((Date.now() - started) / 1000))
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [isStreaming, streamingText, sessionId])
 
   // 新消息到来 / 进入思考态时滚动到底部
   useEffect(() => {
@@ -111,10 +134,17 @@ export default function MessageList({ onRetry, onAskUserAnswer }: Props) {
 
       {/* 生成中：不再逐字显示打字，改成带扫光动画的「正在生成」。
           但当对话末尾正好是一张运行中的工具卡（自带 loading 转圈）时就不再显示，
-          免得底部又冒一个 loading、和工具卡的转圈重复。空窗期 / 纯对话轮仍然显示。 */}
+          免得底部又冒一个 loading、和工具卡的转圈重复。空窗期 / 纯对话轮仍然显示。
+          若久久没出字（推理型模型思考中、中转又不回传思维链），补一句耐心提示 + 计时，
+          让「秒数在走」证明它还在干活，避免被当成卡死。 */}
       {isStreaming && !tailToolRunning && (
-        <div className={styles.thinking} aria-live="polite">
-          正在生成
+        <div className={styles.thinkingWrap} aria-live="polite">
+          <span className={styles.thinking}>正在生成</span>
+          {genSeconds >= SLOW_GEN_HINT_AFTER && (
+            <span className={styles.thinkingHint}>
+              模型正在思考，已等待 {genSeconds}s…
+            </span>
+          )}
         </div>
       )}
 

@@ -31,10 +31,17 @@ let containerPromise: Promise<WebContainer> | null = null
 let previewStarted = false  // vite preview 静态服务是否已起来
 let lastFiles: FileMap | null = null  // 上次 mount 的文件快照，用于增量 diff
 
-// WebContainer.boot() 的超时兜底（ms）。boot 要从境外（StackBlitz）下载 ~3MB 运行时并握手，
-// 国内网络偶发卡死/超时。没有超时的话会永远停在 booting、进度条卡 16%，用户以为死机。
-// 到点就以「超时」失败，让上层进错误态 + 上报后端，而不是无限等待。
-const BOOT_TIMEOUT_MS = 40000
+// WebContainer.boot() 的超时兜底（ms）。boot 要从境外（StackBlitz）下载 ~470KB 运行时并握手。
+// 没有超时的话，连接彻底卡死时会永远停在 booting、进度条卡 16%，用户以为死机。
+//
+// 关于快慢：实测同一台机器、同样开着梯子，boot 有时 1.7s 就成、有时要 1.3 分钟才下完（但仍会成）。
+// 变量不在本地网络，而是 StackBlitz 那端 / 到它的链路本身在波动。所以阈值放宽到 180s，
+// 只兜「彻底连不上的死连接」，不误杀「慢但能成」的下载——宁可极慢的用户多等，也别掐掉本会成功的 boot。
+const BOOT_TIMEOUT_MS = 180000
+
+// boot 失败后自动重试次数。boot 失败多是 StackBlitz 端偶发抽风，下一次往往很快就成，
+// 所以失败先自动重试，别一上来就把错误甩给用户。总尝试次数 = 1 + BOOT_MAX_RETRIES。
+const BOOT_MAX_RETRIES = 1
 
 /** boot 失败时抛出的专用错误：带上「卡了多久」与「是否超时」，供上层上报后端定位。 */
 export class BootError extends Error {
@@ -155,39 +162,63 @@ function stripAnsi(s: string): string {
     .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '')
 }
 
-/** 启动（首次调用真正 boot，之后返回同一个实例）。
- *  给 boot 套一层超时：境外运行时下载卡死时，到点抛 BootError('timeout')，
- *  而不是让 booting 无限挂起。boot 失败会清掉 containerPromise，允许用户刷新重试。 */
-export function getContainer(): Promise<WebContainer> {
-  if (!containerPromise) {
-    const startedAt = Date.now()
-    containerPromise = new Promise<WebContainer>((resolve, reject) => {
-      let settled = false
-      const timer = setTimeout(() => {
+/** 给一次底层 boot 套超时：boot 成功/失败正常透传；到点没结果就抛 timeout BootError。
+ *  注意：超时只是"我们不再等了"，底层 WebContainer.boot() 仍在跑——所以超时后【不能】再调
+ *  一次 boot()（WebContainer 限定一个页面只能 boot 一次，重复调会报"单实例"错）。 */
+function bootWithTimeout(): Promise<WebContainer> {
+  const startedAt = Date.now()
+  return new Promise<WebContainer>((resolve, reject) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      reject(new BootError(
+        '运行环境启动超时：可能是网络无法稳定访问境外 CDN（StackBlitz）。请刷新重试，或切换网络。',
+        'timeout',
+        Date.now() - startedAt,
+      ))
+    }, BOOT_TIMEOUT_MS)
+    WebContainer.boot().then(
+      (wc) => {
         if (settled) return
         settled = true
-        reject(new BootError(
-          '运行环境启动超时：可能是网络无法稳定访问境外 CDN（StackBlitz）。请刷新重试，或切换网络。',
-          'timeout',
-          Date.now() - startedAt,
-        ))
-      }, BOOT_TIMEOUT_MS)
-      WebContainer.boot().then(
-        (wc) => {
-          if (settled) return
-          settled = true
-          clearTimeout(timer)
-          resolve(wc)
-        },
-        (e) => {
-          if (settled) return
-          settled = true
-          clearTimeout(timer)
-          const msg = e instanceof Error ? e.message : String(e)
-          reject(new BootError(msg, 'error', Date.now() - startedAt))
-        },
-      )
-    })
+        clearTimeout(timer)
+        resolve(wc)
+      },
+      (e) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        const msg = e instanceof Error ? e.message : String(e)
+        reject(new BootError(msg, 'error', Date.now() - startedAt))
+      },
+    )
+  })
+}
+
+/** 启动（首次调用真正 boot，之后返回同一个实例）。
+ *  boot 失败多是 StackBlitz 端偶发抽风、下一次往往很快就成，所以对【报错型】失败自动重试。
+ *  超时型失败不重试（底层 boot 还挂着，重复调 boot() 会触发"单实例"错）——直接抛给上层报错+上报。
+ *  任一情况最终失败都清空单例，允许用户刷新后重来。 */
+export function getContainer(): Promise<WebContainer> {
+  if (!containerPromise) {
+    containerPromise = (async () => {
+      let lastErr: unknown
+      for (let attempt = 0; attempt <= BOOT_MAX_RETRIES; attempt++) {
+        try {
+          return await bootWithTimeout()
+        } catch (e) {
+          lastErr = e
+          // 超时：底层 boot 仍在进行，不能再 boot()，直接放弃、抛给上层。
+          if (e instanceof BootError && e.kind === 'timeout') break
+          // 报错：底层 boot 已 settle（失败），可以安全地再试一次新 boot。
+          if (attempt < BOOT_MAX_RETRIES) {
+            broadcast('\x1b[33m\r\n[diag] 运行环境启动失败，正在自动重试…\x1b[0m\r\n')
+          }
+        }
+      }
+      throw lastErr
+    })()
     // boot 失败要把单例清空，否则这个 rejected promise 会被永久缓存，
     // 用户刷新（不重建模块）后再 boot 也拿到同一个失败结果、再也起不来。
     containerPromise.catch(() => {

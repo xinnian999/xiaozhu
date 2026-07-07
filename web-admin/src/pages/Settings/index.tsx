@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Table, Button, Drawer, Input, Space, Tag, Upload, App as AntdApp } from 'antd'
 import { Upload as UploadIcon } from 'lucide-react'
 import type { ColumnsType } from 'antd/es/table'
-import type { UploadFile } from 'antd'
+import type { UploadProps } from 'antd'
 import { listSettings, updateSetting, type AdminSetting } from '@/lib/api'
 import styles from './index.module.scss'
 
@@ -60,7 +60,7 @@ export default function Settings() {
   }
 
   // 图片上传：转 data URI 存进 value，拦截默认上传行为
-  const handleUpload = async (file: File) => {
+  const handleUpload: UploadProps['beforeUpload'] = async (file) => {
     if (!file.type.startsWith('image/')) {
       message.error('请上传图片文件')
       return Upload.LIST_IGNORE
@@ -156,7 +156,7 @@ export default function Settings() {
               accept="image/*"
               maxCount={1}
               showUploadList={false}
-              beforeUpload={handleUpload as (file: UploadFile) => boolean | typeof Upload.LIST_IGNORE}
+              beforeUpload={handleUpload}
             >
               <Button icon={<UploadIcon size={14} />}>选择收款码图片</Button>
             </Upload>

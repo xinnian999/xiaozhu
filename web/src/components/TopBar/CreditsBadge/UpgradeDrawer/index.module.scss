@@ -166,7 +166,7 @@
     }
   }
 
-  // ── 支付视图：二维码 + 等待 ──
+  // ── 支付视图：收款码 + 我已支付 ──
   .pay {
     display: flex;
     flex-direction: column;
@@ -185,8 +185,96 @@
       }
     }
 
-    // 前往支付：主色按钮（其实是个新开标签的链接）
-    .payLink {
+    // 支付方式切换（微信 / 支付宝）
+    .methodTabs {
+      display: flex;
+      gap: $space-2;
+      width: 100%;
+
+      .methodTab {
+        @include button-reset;
+        flex: 1;
+        padding: $space-2;
+        border: 1px solid var(--color-border);
+        border-radius: $radius-md;
+        color: var(--color-text-mute);
+        font-size: $fs-13;
+        transition: color $dur-base $ease-out, border-color $dur-base $ease-out,
+          background $dur-base $ease-out;
+
+        &:hover {
+          color: var(--color-text);
+        }
+
+        &.methodTabActive {
+          border-color: var(--color-accent);
+          color: var(--color-accent);
+          background: var(--color-bg-soft);
+        }
+      }
+    }
+
+    // 收款码图片容器
+    .qrBox {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 200px;
+      height: 200px;
+      padding: $space-2;
+      border: 1px solid var(--color-border);
+      border-radius: $radius-lg;
+      background: #fff; // 二维码统一白底，深浅主题都能扫
+
+      .qrImg {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+      }
+
+      .qrEmpty {
+        color: var(--color-text-mute);
+        font-size: $fs-12;
+        text-align: center;
+      }
+    }
+
+    .payee {
+      margin: 0;
+      color: var(--color-text-dim);
+      font-size: $fs-13;
+    }
+
+    .payHint {
+      margin: 0;
+      color: var(--color-text-mute);
+      font-size: $fs-12;
+      text-align: center;
+    }
+
+    // 付款备注输入
+    .noteInput {
+      width: 100%;
+      padding: $space-2 $space-3;
+      border: 1px solid var(--color-border);
+      border-radius: $radius-md;
+      background: var(--color-bg-soft);
+      color: var(--color-text);
+      font-size: $fs-13;
+
+      &::placeholder {
+        color: var(--color-text-faint);
+      }
+
+      &:focus {
+        outline: none;
+        border-color: var(--color-accent);
+      }
+    }
+
+    // 「我已支付」主按钮
+    .claimBtn {
+      @include button-reset;
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -198,20 +286,57 @@
       color: #fff;
       font-size: $fs-14;
       font-weight: $fw-medium;
-      text-decoration: none;
       transition: opacity $dur-base $ease-out;
 
-      &:hover {
+      &:hover:not(:disabled) {
         opacity: 0.9;
+      }
+
+      &:disabled {
+        opacity: 0.6;
+        cursor: default;
+      }
+    }
+  }
+
+  // ── 已支付·待审核视图 ──
+  .review {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: $space-3;
+    margin-top: $space-6;
+    text-align: center;
+
+    .reviewIcon {
+      color: var(--color-accent);
+    }
+
+    .reviewTitle {
+      margin: 0;
+      color: var(--color-text);
+      font-size: $fs-15;
+      font-weight: $fw-semibold;
+    }
+
+    .reviewDesc {
+      margin: 0;
+      color: var(--color-text-mute);
+      font-size: $fs-13;
+      line-height: $lh-relaxed;
+
+      b {
+        color: var(--color-text);
+        font-weight: $fw-semibold;
       }
     }
 
-    .payHint {
-      display: inline-flex;
-      align-items: center;
-      gap: $space-1;
-      margin: 0;
-      color: var(--color-text-mute);
+    .reviewContact {
+      margin: $space-2 0 0;
+      padding: $space-2 $space-3;
+      border-radius: $radius-md;
+      background: var(--color-bg-soft);
+      color: var(--color-text-dim);
       font-size: $fs-12;
     }
   }

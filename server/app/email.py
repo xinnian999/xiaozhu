@@ -52,3 +52,36 @@ async def send_verify_code(to: str, code: str) -> None:
         "10 分钟内有效。如果不是你本人操作，请忽略此邮件。"
     )
     await run_in_threadpool(_send_sync, to, subject, body)
+
+
+async def send_order_notify(
+    to: str,
+    *,
+    order_id: str,
+    user_email: str,
+    tier: str,
+    amount: str,
+    payment_method: str | None,
+    pay_note: str | None,
+    created_at,
+) -> None:
+    """用户点「我已支付」后，给运营邮箱发一封「新的待审核订单」通知。
+
+    在线程池里跑（同 send_verify_code）。收款是手动核对模式：收到这封邮件后，
+    去管理后台核对到账、点「通过」放行升档。发送失败由调用方兜底（订单已入库）。
+    """
+    subject = "小筑 新的待审核订单"
+    method_label = {"wechat": "微信", "alipay": "支付宝"}.get(payment_method or "", payment_method or "未填")
+    body = (
+        "有一笔新订单等待你核对到账后放行：\n\n"
+        f"订单号：{order_id}\n"
+        f"用户邮箱：{user_email}\n"
+        f"购买档位：{tier}\n"
+        f"金额：¥{amount}\n"
+        f"支付方式：{method_label}\n"
+        f"付款备注：{pay_note or '（无）'}\n"
+        f"下单时间：{created_at}\n\n"
+        "请登录管理后台「订单」页核对到账后点「通过」升档，或「驳回」。"
+    )
+    await run_in_threadpool(_send_sync, to, subject, body)
+

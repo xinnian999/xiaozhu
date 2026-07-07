@@ -95,19 +95,16 @@ class Settings(BaseSettings):
     # pydantic-settings 会自动解析成列表。
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
-    # ── 爱发电（afdian / ifdian.net）收款 ──────────────────────
-    # 本项目唯一支付渠道。接入模型：在爱发电建「商品(售卖)」，下单链接带上
-    # custom_order_id（= 我们的订单号）透传 → 用户付款 → 爱发电 webhook 通知我们 →
-    # 后端调 query-order API 核单 → 复用 _fulfill_order 升档。值都在 .env 的 AFDIAN_* 里。
-    afdian_user_id: str = ""    # 开发者后台的 user_id（创作者身份，调 API 要用）
-    afdian_token: str = ""      # 开发者后台生成的 API Token（密钥！只进 .env 不进仓库）
-    # 两个会员商品的 plan_id（= 商品 item_id）和各自的 sku_id（型号 id），拼下单链接用。
-    afdian_pro_plan_id: str = ""
-    afdian_pro_sku_id: str = ""
-    afdian_max_plan_id: str = ""
-    afdian_max_sku_id: str = ""
-    # 线上公网域名（不带末尾斜杠），目前没直接用到，留作记录 / 将来生成回跳地址备用。
-    afdian_public_base: str = ""
+    # ── 个人收款码（微信/支付宝）+ 订单通知 ────────────────────
+    # 本项目支付走「手动核对」：用户扫收款码付款 → 点「我已支付」→ 订单转待审核 →
+    # 管理员在后台人工核对到账后放行升档（_fulfill_order）。没有第三方支付渠道 / webhook。
+    # 收款码是图片（data URI），一般在 /admin →「配置」页上传，故这里默认空串。值可进 .env 也可入库。
+    pay_qr_wechat: str = ""    # 微信收款码图片（data URI，如 data:image/png;base64,...）
+    pay_qr_alipay: str = ""    # 支付宝收款码图片（data URI）
+    pay_payee_name: str = ""   # 收款人显示名（展示用，可选）
+    pay_contact: str = ""      # 联系方式（微信号/QQ/邮箱）：展示在「待审核」页，供用户主动联系
+    # 新订单通知收件邮箱；留空则回退到 smtp_user（见 runtime_config 的 accessor）。
+    order_notify_email: str = ""
 
     # ── 邮件 SMTP（发注册验证码用）────────────────────────────
     # 走标准 SMTP 协议发信。smtp_password 填邮箱的「授权码」(QQ/163 在邮箱设置里单独生成的

@@ -1,26 +1,26 @@
-"""Billing API —— 额度查询 + 套餐购买（爱发电）。
+"""Billing API —— 额度查询 + 套餐购买（个人收款码 + 手动审核）。
 
 接口：
-  - GET  /api/billing/me            查当前用户的档位 / 每日额度 / 今日已用 / 今日剩余。
-  - GET  /api/billing/plans         套餐列表（每日额度 + 价格）。
-  - POST /api/billing/orders        为某档下单，返回爱发电下单页链接。
-  - GET  /api/billing/orders/{id}   查订单状态（前端轮询；后端兜底查爱发电订单）。
-  - POST /api/billing/notify/afdian 爱发电 webhook（用户付款后通知，主动核单后升档）。
+  - GET  /api/billing/me              查当前用户的档位 / 每日额度 / 今日已用 / 今日剩余。
+  - GET  /api/billing/plans           套餐列表（每日额度 + 价格）。
+  - POST /api/billing/orders          为某档下单，返回收款码信息（微信/支付宝图片 + 联系方式）。
+  - POST /api/billing/orders/{id}/claim  用户「我已支付」：订单转待审核 + 邮件通知运营。
+  - GET  /api/billing/orders/{id}     查订单状态（前端慢轮询，纯读库）。
 
-唯一支付渠道是**爱发电**。升档只能靠「支付成功」触发（_fulfill_order）。早期那个让用户免费改档的
-dev/set-tier 已删除，避免任何人白嫖高档。
+支付是**手动核对**模式：用户扫收款码付款 → 点「我已支付」→ 订单转 pending_review →
+管理员在后台人工核对到账后放行（_fulfill_order）才升档。没有第三方渠道 / webhook，
+用户点「我已支付」不会自动升档（防白嫖）。
 """
 
 import uuid
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import afdian
+from app import email
 from app.billing import (
     TIER_DAILY,
     daily_allowance,
@@ -30,24 +30,26 @@ from app.billing import (
     tier_rank,
     used_today,
 )
-from app.db import AsyncSessionLocal, get_db
+from app.db import get_db
 from app.deps import get_current_user
 from app.models.order import Order
 from app.models.user import User
+from app.runtime_config import cfg
 
 
 async def _fulfill_order(db: AsyncSession, order: Order) -> None:
     """履约一笔订单：标记已付 + 升档 + 续期。**幂等** —— 已 paid 直接返回。
 
-    webhook（付款即推）和前端轮询的兜底查单都可能对同一笔订单触发，所以必须幂等，
-    否则重复触发会把到期时间一加再加。续期规则：同档且还没过期 → 在原到期日上叠加；
-    换档 / 已过期 / 没买过 → 从现在起算。
+    只由管理员审核通过触发（admin/orders.py 的 approve）。续期规则：同档且还没过期 →
+    在原到期日上叠加；换档 / 已过期 / 没买过 → 从现在起算。幂等保证重复点「通过」不会
+    把到期时间一加再加。
     """
     if order.status == "paid":
         return
     now = datetime.now()
     order.status = "paid"
     order.paid_at = now
+    order.reviewed_at = now
 
     user = await db.get(User, order.user_id)
     if user is not None:
@@ -56,21 +58,8 @@ async def _fulfill_order(db: AsyncSession, order: Order) -> None:
     await db.commit()
 
 
-def _amount_eq(a: str | None, b: str | None) -> bool:
-    """按数值比较两个金额字符串（"9.90" == "9.9"），任一非法/为空都判不等。
-
-    核单防篡改用：爱发电回传的金额必须和我们下单时存的一致。用 Decimal 比数值，
-    免得被 "9.9"/"9.90" 这种等价但字面不同的写法误伤。
-    """
-    if not a or not b:
-        return False
-    try:
-        return Decimal(a) == Decimal(b)
-    except (InvalidOperation, ValueError):
-        return False
-
-
 router = APIRouter(prefix="/api/billing", tags=["billing"])
+
 
 
 class BillingStatus(BaseModel):
@@ -125,16 +114,19 @@ async def list_plans() -> list[Plan]:
     ]
 
 
-# ── 下单（爱发电）─────────────────────────────────────────────────────────────
+# ── 下单（返回收款码信息）───────────────────────────────────────────────────────
 class CreateOrderRequest(BaseModel):
     tier: str  # 要购买的档位（pro / max；free 不可购买）
 
 
 class CreateOrderResponse(BaseModel):
-    order_id: str  # 我们的订单号（爱发电下单页的 custom_order_id），前端拿它去轮询状态
+    order_id: str      # 我们的订单号，前端拿它去 claim / 轮询状态
     tier: str
-    amount: str    # 金额（元）
-    pay_url: str   # 爱发电下单页链接，前端新开标签页让用户付款
+    amount: str        # 金额（元）
+    qr_wechat: str     # 微信收款码图片（data URI；未配置为空串）
+    qr_alipay: str     # 支付宝收款码图片（data URI；未配置为空串）
+    payee_name: str    # 收款人显示名（可选）
+    contact: str       # 联系方式（展示在待审核页，供用户联系）
 
 
 @router.post("/orders", response_model=CreateOrderResponse)
@@ -143,10 +135,10 @@ async def create_order(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> CreateOrderResponse:
-    """创建一笔升级订单，返回爱发电下单页链接。
+    """创建一笔升级订单（pending），返回收款码信息让前端展示给用户扫码。
 
-    生成链接是**纯本地拼串、不联网**：把我们的 UUID 订单号塞进爱发电下单页的 custom_order_id，
-    用户付款后爱发电会把它原样回传到 webhook，用来把这笔爱发电订单对回我们系统的用户。
+    此时**还没产生待审核订单/邮件通知** —— 只有用户扫码付款后点「我已支付」（claim）
+    才把订单转 pending_review 并通知运营。
     """
     price = price_of(body.tier)
     if price is None:
@@ -157,12 +149,7 @@ async def create_order(
     if tier_rank(body.tier) <= tier_rank(effective_tier(current_user, datetime.now())):
         raise HTTPException(status_code=400, detail="只能升级到更高档位")
 
-    # 自己生成订单号，作爱发电下单页的 custom_order_id 透传（幂等键）
     order_id = str(uuid.uuid4())
-    # 拼带 custom_order_id 的爱发电下单页链接（未配置商品会抛 HTTPException(500)）
-    pay_url = afdian.build_pay_url(body.tier, order_id)
-
-    # 落库订单（pending）；等用户付款后由 webhook / 兜底查单转 paid。
     order = Order(
         id=order_id,
         user_id=current_user.id,
@@ -174,80 +161,134 @@ async def create_order(
     await db.commit()
 
     return CreateOrderResponse(
-        order_id=order_id, tier=body.tier, amount=price, pay_url=pay_url
+        order_id=order_id,
+        tier=body.tier,
+        amount=price,
+        qr_wechat=cfg.pay_qr_wechat,
+        qr_alipay=cfg.pay_qr_alipay,
+        payee_name=cfg.pay_payee_name,
+        contact=cfg.pay_contact,
     )
 
 
-# ── 查单（前端轮询：webhook 的兜底，后端主动查爱发电订单）────────────────────────
+# ── 我已支付（用户声明支付 → 转待审核 + 邮件通知运营）──────────────────────────────
+class ClaimOrderRequest(BaseModel):
+    payment_method: str        # 用户选的支付方式：wechat / alipay
+    pay_note: str | None = None  # 付款备注（如尾号），可选
+
+
+# 查单/claim 共用的响应体：订单状态。
 class OrderStatusResponse(BaseModel):
     order_id: str
     tier: str
     amount: str
-    status: str  # pending / paid
+    status: str  # pending / pending_review / paid / rejected
 
 
+@router.post("/orders/{order_id}/claim", response_model=OrderStatusResponse)
+async def claim_order(
+    order_id: str,
+    body: ClaimOrderRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> OrderStatusResponse:
+    """用户点「我已支付」：把订单转 pending_review，并给运营发邮件通知。
+
+    只有 pending 的订单能 claim（幂等：已是 pending_review 直接返回当前状态，不重复发邮件）。
+    邮件发送失败**不阻断**：订单已入库转待审核，运营在后台仍看得到。
+    """
+    order = await db.get(Order, order_id)
+    if order is None or order.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="订单不存在")
+
+    if order.status == "pending":
+        if body.payment_method not in ("wechat", "alipay"):
+            raise HTTPException(status_code=400, detail="支付方式不合法")
+        order.status = "pending_review"
+        order.payment_method = body.payment_method
+        order.pay_note = (body.pay_note or "").strip() or None
+        await db.commit()
+        await db.refresh(order)
+
+        # 发邮件通知运营；失败不影响订单已入库（后台仍可审）。
+        try:
+            await email.send_order_notify(
+                cfg.order_notify_email,
+                order_id=order.id,
+                user_email=current_user.email,
+                tier=order.tier,
+                amount=order.amount,
+                payment_method=order.payment_method,
+                pay_note=order.pay_note,
+                created_at=order.created_at,
+            )
+        except Exception:
+            # 邮件是「锦上添花」，订单已在后台可见，吞掉异常不打断用户流程。
+            pass
+
+    return OrderStatusResponse(
+        order_id=order.id,
+        tier=order.tier,
+        amount=order.amount,
+        status=order.status,
+    )
+
+
+# ── 我的未结订单（抽屉打开时查：有未审核订单就直接进待审核态）──────────────────────
+class MyPendingOrderResponse(BaseModel):
+    order_id: str
+    tier: str
+    amount: str
+    status: str   # pending / pending_review
+    contact: str  # 联系方式（待审核态展示）
+
+
+@router.get("/my-order", response_model=MyPendingOrderResponse | None)
+async def my_pending_order(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> MyPendingOrderResponse | None:
+    """查当前用户「最新一笔未结订单」（pending / pending_review）。
+
+    给前端抽屉打开时用：有 pending_review 订单就直接展示「待审核」态、并把对应档位的
+    升级按钮置为待审核，避免关掉抽屉再打开又看到「升级」按钮、重复下单。
+    没有未结订单返回 null。
+    """
+    stmt = (
+        select(Order)
+        .where(
+            Order.user_id == current_user.id,
+            Order.status.in_(("pending", "pending_review")),
+        )
+        .order_by(Order.created_at.desc())
+        .limit(1)
+    )
+    order = (await db.execute(stmt)).scalar_one_or_none()
+    if order is None:
+        return None
+    return MyPendingOrderResponse(
+        order_id=order.id,
+        tier=order.tier,
+        amount=order.amount,
+        status=order.status,
+        contact=cfg.pay_contact,
+    )
+
+
+# ── 查单（前端慢轮询：纯读库，无第三方核单）──────────────────────────────────────
 @router.get("/orders/{order_id}", response_model=OrderStatusResponse)
 async def get_order(
     order_id: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> OrderStatusResponse:
-    """查一笔订单的状态，给前端轮询。
-
-    若订单还 pending，就按 custom_order_id 翻爱发电最近订单**兜底查单**。webhook 是主路（付款即推），
-    这里是补漏 —— 万一 webhook 漏推，前端轮询也能把订单转 paid。
-    """
+    """查一笔订单的状态，给前端轮询。纯读库 —— 升档由管理员后台审核触发。"""
     order = await db.get(Order, order_id)
     # 不存在 / 不是本人的，统一 404（不泄露别人订单是否存在）
     if order is None or order.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="订单不存在")
 
-    if order.status == "pending":
-        try:
-            af = await afdian.find_order_by_custom_id(order.id)
-        except Exception:
-            af = None
-        # status == 2 为成功；核对金额防篡改（兑换码/改价会对不上，按未付处理）
-        if af and af.get("status") == 2 and _amount_eq(af.get("total_amount"), order.amount):
-            await _fulfill_order(db, order)
-
     return OrderStatusResponse(
         order_id=order.id, tier=order.tier, amount=order.amount, status=order.status
     )
 
-
-# ── 爱发电异步回调（webhook：用户付款后爱发电 POST 通知到这里）────────────────────
-@router.post("/notify/afdian")
-async def afdian_notify(request: Request) -> JSONResponse:
-    """爱发电 webhook。**无鉴权**（爱发电服务器来调），靠「主动核单」保证可信。
-
-    安全要点：**绝不轻信 webhook 报文里的金额/状态**。只从报文里取两个 id（custom_order_id =
-    我们的订单号、out_trade_no = 爱发电订单号），再用我们的 token 签名去调 query-order
-    **重新拉这笔订单**，金额、状态都以接口返回为准 —— 这样伪造的 webhook 无法白嫖升档。
-
-    幂等：_fulfill_order 已保证重复推送无害。爱发电只看响应里的 ec 是否为 200，所以无论是否命中
-    订单都回 {"ec":200}，避免它反复重推；偶发漏处理由前端轮询的兜底查单（get_order）补上。
-    """
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    order_data = (((body or {}).get("data") or {}).get("order")) or {}
-    custom_order_id = order_data.get("custom_order_id")
-    out_trade_no = order_data.get("out_trade_no")
-
-    if custom_order_id and out_trade_no:
-        # 主动核单：以接口返回为准，不信 webhook 报文
-        try:
-            af = await afdian.query_order(out_trade_no)
-        except Exception:
-            af = None
-        # 三重校验：接口查得到 + 状态成功(2) + custom_order_id 对得上
-        if af and af.get("status") == 2 and af.get("custom_order_id") == custom_order_id:
-            async with AsyncSessionLocal() as db:
-                order = await db.get(Order, custom_order_id)
-                # 金额一致才升档（防篡改 / 防张冠李戴）
-                if order is not None and _amount_eq(af.get("total_amount"), order.amount):
-                    await _fulfill_order(db, order)
-
-    return JSONResponse({"ec": 200, "em": ""})

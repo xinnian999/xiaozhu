@@ -271,31 +271,58 @@ export async function getPlans(): Promise<ApiPlan[]> {
   return data
 }
 
-// 下单返回：订单号 + 爱发电下单页链接（前端新开标签页让用户付款）。
+// 下单返回：订单号 + 收款码信息（前端展示收款码让用户扫码付款）。
 export type ApiOrder = {
   order_id: string
   tier: string
   amount: string
-  pay_url: string
+  qr_wechat: string // 微信收款码图片（data URI；未配置为空串）
+  qr_alipay: string // 支付宝收款码图片（data URI；未配置为空串）
+  payee_name: string // 收款人显示名（可选）
+  contact: string // 联系方式（展示在待审核态，供用户联系）
 }
 
-/** 为某档套餐下单，返回爱发电下单页链接。 */
+/** 为某档套餐下单，返回收款码信息。 */
 export async function createOrder(tier: string): Promise<ApiOrder> {
   const { data } = await http.post<ApiOrder>('/api/billing/orders', { tier })
   return data
 }
 
-// 查单返回：订单状态（pending / paid）。
+// 查单返回：订单状态。
 export type ApiOrderStatus = {
   order_id: string
   tier: string
   amount: string
-  status: string // pending / paid
+  status: string // pending / pending_review / paid / rejected
 }
 
-/** 查一笔订单的支付状态（前端轮询用；后端会兜底查爱发电订单）。 */
+/** 用户「我已支付」：把订单转待审核，后端会给运营发邮件通知。返回最新订单状态。 */
+export async function claimOrder(
+  orderId: string,
+  body: { payment_method: 'wechat' | 'alipay'; pay_note?: string },
+): Promise<ApiOrderStatus> {
+  const { data } = await http.post<ApiOrderStatus>(`/api/billing/orders/${orderId}/claim`, body)
+  return data
+}
+
+/** 查一笔订单的支付状态（前端慢轮询用；纯读库，升档由管理员后台审核触发）。 */
 export async function getOrderStatus(orderId: string): Promise<ApiOrderStatus> {
   const { data } = await http.get<ApiOrderStatus>(`/api/billing/orders/${orderId}`)
+  return data
+}
+
+// 我的最新未结订单（pending / pending_review）。用于抽屉打开时恢复「待审核」态。
+export type ApiMyOrder = {
+  order_id: string
+  tier: string
+  amount: string
+  status: string // pending / pending_review
+  contact: string
+}
+
+/** 查当前用户最新一笔未结订单；没有则返回 null。 */
+export async function getMyPendingOrder(): Promise<ApiMyOrder | null> {
+  const { data } = await http.get<ApiMyOrder | null>('/api/billing/my-order')
   return data
 }
 

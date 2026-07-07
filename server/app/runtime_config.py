@@ -32,13 +32,11 @@ SETTING_DEFS: list[tuple[str, str, bool, str]] = [
     ("smtp_user", "邮件", False, "发信邮箱账号（同时作为 From 地址）"),
     ("smtp_password", "邮件", True, "邮箱「授权码」（不是登录密码！）"),
     ("smtp_from_name", "邮件", False, "发件人显示名"),
-    ("afdian_user_id", "爱发电", False, "创作者 user_id（开发者后台）"),
-    ("afdian_token", "爱发电", True, "API Token（开发者后台生成，密钥）"),
-    ("afdian_pro_plan_id", "爱发电", False, "Pro 会员商品的 plan_id"),
-    ("afdian_pro_sku_id", "爱发电", False, "Pro 会员商品的 sku_id"),
-    ("afdian_max_plan_id", "爱发电", False, "Max 会员商品的 plan_id"),
-    ("afdian_max_sku_id", "爱发电", False, "Max 会员商品的 sku_id"),
-    ("afdian_public_base", "爱发电", False, "线上公网域名（不带末尾斜杠）"),
+    ("pay_qr_wechat", "收款", False, "微信收款码图片（后台上传，存 data URI）"),
+    ("pay_qr_alipay", "收款", False, "支付宝收款码图片（后台上传，存 data URI）"),
+    ("pay_payee_name", "收款", False, "收款人显示名（展示用，可选）"),
+    ("pay_contact", "收款", False, "联系方式（微信号/QQ/邮箱），展示在「待审核」页供用户联系"),
+    ("order_notify_email", "收款", False, "新订单通知收件邮箱；留空则发到发信邮箱 smtp_user"),
 ]
 
 
@@ -84,32 +82,25 @@ class RuntimeConfig:
         return self._raw("smtp_from_name") or "小筑"
 
     @property
-    def afdian_user_id(self) -> str:
-        return self._raw("afdian_user_id") or ""
+    def pay_qr_wechat(self) -> str:
+        return self._raw("pay_qr_wechat") or ""
 
     @property
-    def afdian_token(self) -> str:
-        return self._raw("afdian_token") or ""
+    def pay_qr_alipay(self) -> str:
+        return self._raw("pay_qr_alipay") or ""
 
     @property
-    def afdian_pro_plan_id(self) -> str:
-        return self._raw("afdian_pro_plan_id") or ""
+    def pay_payee_name(self) -> str:
+        return self._raw("pay_payee_name") or ""
 
     @property
-    def afdian_pro_sku_id(self) -> str:
-        return self._raw("afdian_pro_sku_id") or ""
+    def pay_contact(self) -> str:
+        return self._raw("pay_contact") or ""
 
     @property
-    def afdian_max_plan_id(self) -> str:
-        return self._raw("afdian_max_plan_id") or ""
-
-    @property
-    def afdian_max_sku_id(self) -> str:
-        return self._raw("afdian_max_sku_id") or ""
-
-    @property
-    def afdian_public_base(self) -> str:
-        return self._raw("afdian_public_base") or ""
+    def order_notify_email(self) -> str:
+        # 留空时回退到发信邮箱（发验证码那个），保证「总有个收件人」。
+        return self._raw("order_notify_email") or self.smtp_user
 
 
 # 模块单例：业务代码 from app.runtime_config import cfg 后直接 cfg.smtp_host

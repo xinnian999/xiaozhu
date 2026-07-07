@@ -69,24 +69,41 @@ export async function grantTierBatch(userIds: string[], tier: 'pro' | 'max') {
   return res.data
 }
 
-// ── 订单（只读） ──────────────────────────────────────────────
+// ── 订单（列表只读 + 手动审核） ────────────────────────────────
 export type AdminOrder = {
   id: string
   user_id: string
+  user_nickname: string | null
   tier: string
   amount: string
   status: string
+  payment_method: string | null
+  pay_note: string | null
   created_at: string
   paid_at: string | null
+  reviewed_at: string | null
+  reject_reason: string | null
 }
 
-export async function listOrders(params: { offset?: number; limit?: number }) {
+export async function listOrders(params: { offset?: number; limit?: number; status?: string }) {
   const res = await http.get<AdminOrder[]>('/api/admin/orders', { params })
   return res.data
 }
 
-export async function countOrders() {
-  const res = await http.get<number>('/api/admin/orders/count')
+export async function countOrders(params?: { status?: string }) {
+  const res = await http.get<number>('/api/admin/orders/count', { params })
+  return res.data
+}
+
+/** 审核通过：核对到账后放行升档。 */
+export async function approveOrder(id: string) {
+  const res = await http.post<AdminOrder>(`/api/admin/orders/${id}/approve`)
+  return res.data
+}
+
+/** 驳回订单（对不上时）。 */
+export async function rejectOrder(id: string, reason?: string) {
+  const res = await http.post<AdminOrder>(`/api/admin/orders/${id}/reject`, { reason })
   return res.data
 }
 

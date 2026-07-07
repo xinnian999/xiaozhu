@@ -1,7 +1,7 @@
 """AppSetting（应用配置）—— 把原本散在 .env 里的「运行时可改配置」搬进数据库。
 
 为什么用「键值表」而不是给每个配置开一列：
-  - 这些配置（SMTP_*、AFDIAN_* 等）数量会变、彼此无关，用一张 key/value 表最灵活：
+  - 这些配置（SMTP_*、PAY_* 等）数量会变、彼此无关，用一张 key/value 表最灵活：
     以后加一个新配置 = 插一行，不用再写迁移加列。
   - 管理后台（web-admin）对一张 KV 表能直接渲染「列表 + 编辑」界面，前端也几乎零额外代码。
 
@@ -24,14 +24,14 @@ class AppSetting(Base):
 
     __tablename__ = "app_settings"
 
-    # 配置键，主键。约定用小写、与 .env 字段名对应（如 smtp_host / afdian_token）。
+    # 配置键，主键。约定用小写、与 .env 字段名对应（如 smtp_host / pay_qr_wechat）。
     key: Mapped[str] = mapped_column(String, primary_key=True)
 
     # 配置值，统一用字符串存。需要数字（如 smtp_port）的，由读取方负责转换。
     # 用 Text 而不是 String：个别值（如将来某些长配置）可能较长，Text 不限长更省心。
     value: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
 
-    # 分类，纯展示用：让后台列表能按「邮件 / 爱发电 / 模型」分组看，便于查找。
+    # 分类，纯展示用：让后台列表能按「邮件 / 收款 / 模型」分组看，便于查找。
     category: Mapped[str] = mapped_column(String, nullable=False, server_default="")
 
     # 是否敏感（密钥类）。后台列表会据此把值脱敏显示（如 sk-***123），避免肩窥泄露。

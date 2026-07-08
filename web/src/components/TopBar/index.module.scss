@@ -35,22 +35,6 @@
     align-items: center;
     gap: $space-3;
 
-    .mobileMenuBtn {
-      @include button-reset;
-      display: none;
-      align-items: center;
-      justify-content: center;
-      width: 32px;
-      height: 32px;
-      border-radius: $radius-sm;
-      color: var(--color-text-dim);
-
-      &:hover {
-        background: var(--color-bg-hover);
-        color: var(--color-text);
-      }
-    }
-
     .brand {
       display: flex;
       // 方块标志与文字按垂直居中对齐 —— baseline 对齐方块（flex 盒）会让它浮在文字上方，
@@ -137,29 +121,43 @@
 
 }
 
+// 移动端专属第二行：默认隐藏，仅移动端亮出（承载项目 / 版本菜单）
+.subbar {
+  display: none;
+}
+
 // —— 响应式：移动端 ——
 @include mobile {
   .topbar {
     padding: 0 $space-3;
 
     .left {
-      .mobileMenuBtn {
-        display: inline-flex;
-      }
-
-      .brand .brandText {
-        display: none;
-      }
+      // 品牌位占据左侧（logo + 名称都保留）
+      flex-shrink: 0;
     }
 
+    // 顶栏第一行不再放项目 / 版本（下沉到 subbar），这里直接隐藏
     .center {
-      gap: $space-1;
+      display: none;
     }
 
     .right {
+      flex-shrink: 0;
+
       .iconBtn {
         padding: 0 $space-2;
       }
     }
+  }
+
+  // 第二行：顶栏下方独立一行，左对齐放项目 / 版本菜单
+  .subbar {
+    display: flex;
+    align-items: center;
+    gap: $space-1;
+    height: 44px;
+    padding: 0 $space-3;
+    background: var(--color-bg);
+    border-bottom: 1px solid var(--color-border);
   }
 }

@@ -199,16 +199,17 @@
 }
 
 // ── 响应式（移动端）─────────────────────────────────────────────
+// 版本菜单已下沉到顶栏第二行（subbar），空间充足：保留完整「版本历史」文字。
+// 触发器在第二行偏左，面板改为右对齐向左展开，避免 320px 宽面板顶出屏幕右缘被裁切。
 @include mobile {
   .menu {
-    .trigger {
-      .label {
-        font-size: $fs-12;
-      }
+    .trigger .label {
+      font-size: $fs-12;
     }
 
     .panel {
-      left: 0;
+      left: auto;
+      right: 0;
       transform: none;
       width: min(320px, calc(100vw - 24px));
     }

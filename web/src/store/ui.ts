@@ -6,6 +6,10 @@ import { create } from 'zustand'
 
 export type WorkTab = 'preview' | 'code'
 
+/** 移动端顶层视图：一次只全屏展示「聊天」或「工作区（预览/代码）」，靠顶部分段开关切换。
+ *  桌面端两栏并排、不受它影响。 */
+export type MobileView = 'chat' | 'work'
+
 /** WebContainer 生命周期状态 */
 export type WCStatus =
   | 'idle'        // 未启动
@@ -40,9 +44,9 @@ type UIState = {
   chatCollapsed: boolean
   toggleChatCollapsed: () => void
 
-  /** 移动端 Drawer 打开状态 */
-  mobileChatOpen: boolean
-  setMobileChatOpen: (v: boolean) => void
+  /** 移动端顶层视图：全屏切换「对话 / 工作区」。桌面端两栏并排、忽略此值 */
+  mobileView: MobileView
+  setMobileView: (v: MobileView) => void
 
   /** 全局 toast */
   toast: { id: number; text: string } | null
@@ -116,8 +120,10 @@ export const useUIStore = create<UIState>((set) => ({
   chatCollapsed: false,
   toggleChatCollapsed: () => set((s) => ({ chatCollapsed: !s.chatCollapsed })),
 
-  mobileChatOpen: false,
-  setMobileChatOpen: (mobileChatOpen) => set({ mobileChatOpen }),
+  // 移动端默认停在「对话」视图 —— 首屏没有活动会话时本就只有对话，
+  // 发起会话后由 ChatSidebar 自动切到「工作区」看预览（见 App）。
+  mobileView: 'chat',
+  setMobileView: (mobileView) => set({ mobileView }),
 
   toast: null,
   pushToast: (text) => {

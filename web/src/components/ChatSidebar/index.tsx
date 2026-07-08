@@ -47,9 +47,9 @@ export default function ChatSidebar() {
   const selectedModel = useSessionStore((s) => s.selectedModel)
   const models = useSessionStore((s) => s.models)
   const loadBilling = useSessionStore((s) => s.loadBilling)
-  const mobileChatOpen = useUIStore((s) => s.mobileChatOpen)
-  const setMobileChatOpen = useUIStore((s) => s.setMobileChatOpen)
   const chatCollapsed = useUIStore((s) => s.chatCollapsed)
+  // 移动端发起对话后自动切到「工作区」视图看预览
+  const setMobileView = useUIStore((s) => s.setMobileView)
   // 把暂存的文件揭晓到预览并触发重新构建（AI 调 check_build 时触发）
   const requestPreviewApply = useUIStore((s) => s.requestPreviewApply)
   // 点缩略图放大预览
@@ -251,6 +251,10 @@ export default function ChatSidebar() {
     // 1. 把用户消息（连同图片缩略图）追加到列表
     appendMessage(makeMessage('user', text, images.length ? { images } : undefined))
 
+    // 移动端：发出消息后自动切到「工作区」视图，让用户直接看到预览生成过程
+    // （桌面端两栏并排，这个状态被 CSS 忽略，无副作用）
+    setMobileView('work')
+
     // 2. 立刻进入流式态（不等首个 token）：发送键即时变"停止"，并建好中断控制器
     beginStreaming()
     const controller = new AbortController()
@@ -344,34 +348,17 @@ export default function ChatSidebar() {
           : '继续聊聊还想加点什么…'
 
   return (
-    <>
-      {mobileChatOpen && (
-        <div
-          className={styles.scrim}
-          onClick={() => setMobileChatOpen(false)}
-          aria-hidden
-        />
-      )}
+    <aside
+      className={`${styles.sidebar} ${chatCollapsed ? styles.collapsed : ''} ${noSession ? styles.fullscreen : ''}`}
+      aria-label="对话"
+    >
+      <div className={styles.chatBody}>
+        {noSession ? <EmptyHero /> : <MessageList onRetry={handleRetry} onAskUserAnswer={handleAskUserAnswer} />}
+      </div>
 
-      <aside
-        className={`${styles.sidebar} ${mobileChatOpen ? styles.mobileOpen : ''} ${chatCollapsed ? styles.collapsed : ''} ${noSession ? styles.fullscreen : ''}`}
-        aria-label="对话"
-      >
-        <button
-          className={styles.mobileClose}
-          onClick={() => setMobileChatOpen(false)}
-          aria-label="关闭侧栏"
-        >
-          <X size={16} />
-        </button>
-
-        <div className={styles.chatBody}>
-          {noSession ? <EmptyHero /> : <MessageList onRetry={handleRetry} onAskUserAnswer={handleAskUserAnswer} />}
-        </div>
-
-        <footer className={styles.composer}>
-          <div className={styles.composerInner}>
-            {/* 隐藏的文件选择框：由「添加图片」按钮触发。accept 限图片、multiple 允许多选 */}
+      <footer className={styles.composer}>
+        <div className={styles.composerInner}>
+          {/* 隐藏的文件选择框：由「添加图片」按钮触发。accept 限图片、multiple 允许多选 */}
             <input
               ref={fileInputRef}
               type="file"
@@ -501,8 +488,7 @@ export default function ChatSidebar() {
             <span>Shift + Enter 换行</span>
           </div>
         </footer>
-      </aside>
-    </>
+    </aside>
   )
 }
 

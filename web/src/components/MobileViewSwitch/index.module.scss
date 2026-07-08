@@ -1,0 +1,76 @@
+@use '@/styles/variables' as *;
+@use '@/styles/common' as *;
+
+// 桌面端不需要这个开关（对话 / 工作区两栏并排展示）：默认隐藏，仅移动端亮出
+.switch {
+  display: none;
+}
+
+@include mobile {
+  .switch {
+    position: fixed;
+    left: 50%;
+    bottom: calc(#{$space-3} + env(safe-area-inset-bottom, 0px));
+    transform: translateX(-50%);
+    z-index: 45;
+    display: flex;
+    align-items: center;
+    // 相对定位容器：激活滑块绝对定位在内部
+    isolation: isolate;
+    padding: 4px;
+    gap: 2px;
+    background: var(--color-bg-elev);
+    border: 1px solid var(--color-border);
+    border-radius: $radius-full;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+
+    .seg {
+      @include button-reset;
+      position: relative;
+      z-index: 1;
+      display: inline-flex;
+      align-items: center;
+      gap: $space-2;
+      height: 38px;
+      padding: 0 $space-5;
+      border-radius: $radius-full;
+      color: var(--color-text-mute);
+      font-size: $fs-13;
+      font-weight: $fw-medium;
+      transition: color $dur-base $ease-out;
+
+      &.active {
+        color: white;
+      }
+    }
+
+    // 激活态滑块：铺在两枚分段之下，随 data-active 平移
+    .indicator {
+      position: absolute;
+      z-index: 0;
+      top: 4px;
+      bottom: 4px;
+      // 两段等宽：容器内边距 4px*2，段间 gap 2px
+      width: calc((100% - 8px - 2px) / 2);
+      background: var(--color-accent);
+      border-radius: $radius-full;
+      box-shadow: 0 4px 12px var(--color-accent-glow);
+      transition: transform $dur-base $ease-out;
+
+      &[data-active='chat'] {
+        transform: translateX(0);
+      }
+      &[data-active='work'] {
+        // 平移一个段宽 + 段间 gap
+        transform: translateX(calc(100% + 2px));
+      }
+    }
+  }
+
+  // 浅色主题下阴影调淡
+  @include light {
+    .switch {
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+    }
+  }
+}

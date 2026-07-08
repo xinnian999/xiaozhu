@@ -1,11 +1,13 @@
 import { lazy, Suspense, useEffect } from 'react'
 import TopBar from '@/components/TopBar'
 import ChatSidebar from '@/components/ChatSidebar'
+import MobileViewSwitch from '@/components/MobileViewSwitch'
 import Toast from '@/components/Toast'
 import ImageLightbox from '@/components/ImageLightbox'
 import AuthGate from '@/components/AuthGate'
 import { useThemeStore } from '@/store/theme'
 import { useSessionStore } from '@/store/session'
+import { useUIStore } from '@/store/ui'
 import { useAuthStore } from '@/store/auth'
 import { warmupSnapshot } from '@/lib/depsCache'
 import { getSetupStatus } from '@/lib/api'
@@ -22,6 +24,8 @@ function App() {
   const loadBilling = useSessionStore((s) => s.loadBilling)
   // 没有激活会话时进入"空态"：隐藏右侧工作区，让对话框全屏展开
   const hasActive = useSessionStore((s) => s.activeId !== null)
+  // 移动端顶层视图（对话 / 工作区）：桌面端两栏并排、忽略它。有活动会话时才需要切换
+  const mobileView = useUIStore((s) => s.mobileView)
 
   // 登录态：ready 表示首次"恢复登录态"已完成；isAuthed 表示当前已登录
   const authReady = useAuthStore((s) => s.ready)
@@ -81,7 +85,12 @@ function App() {
   return (
     <div className={styles.app}>
       <TopBar />
-      <main className={`${styles.main} ${hasActive ? '' : styles.noSession}`}>
+      {/* data-mobile-view 只在移动端由 CSS 消费：决定全屏展示对话还是工作区。
+          没有活动会话时移动端只有对话，强制回到 'chat'，避免露出空工作区。 */}
+      <main
+        className={`${styles.main} ${hasActive ? '' : styles.noSession}`}
+        data-mobile-view={hasActive ? mobileView : 'chat'}
+      >
         <ChatSidebar />
         {hasActive && (
           <Suspense fallback={<div className={styles.workLoading}>加载工作区…</div>}>
@@ -89,6 +98,8 @@ function App() {
           </Suspense>
         )}
       </main>
+      {/* 移动端底部分段开关：对话 ⇄ 预览。仅有活动会话时显示（空态无工作区可切） */}
+      {hasActive && <MobileViewSwitch />}
       <Toast />
       <ImageLightbox />
     </div>

@@ -49,25 +49,6 @@
     }
   }
 
-  .mobileClose {
-    @include button-reset;
-    display: none;
-    position: absolute;
-    top: $space-3;
-    right: $space-3;
-    width: 32px;
-    height: 32px;
-    align-items: center;
-    justify-content: center;
-    border-radius: $radius-sm;
-    color: var(--color-text-dim);
-
-    &:hover {
-      background: var(--color-bg-hover);
-      color: var(--color-text);
-    }
-  }
-
   .chatBody {
     flex: 1;
     min-height: 0;
@@ -359,31 +340,14 @@
   }
 }
 
-.scrim {
-  display: none;
-}
-
 // —— 移动端 ——
+// 对话区不再是抽屉，改由 App 的 data-mobile-view 控制「全屏切换」。
+// 这里只让 sidebar 在窄屏下铺满宽度、去掉右边框，并放大工具栏点击区。
 @include mobile {
   .sidebar {
-    position: fixed;
-    top: 0;
-    left: 0;
-    bottom: 0;
-    width: 92%;
-    max-width: 360px;
-    z-index: 50;
-    transform: translateX(-105%);
-    transition: transform $dur-slow $ease-out;
-    box-shadow: 12px 0 32px rgba(0, 0, 0, 0.4);
-
-    &.mobileOpen {
-      transform: translateX(0);
-    }
-
-    .mobileClose {
-      display: inline-flex;
-    }
+    width: 100%;
+    max-width: none;
+    border-right-width: 0;
 
     // —— 移动端：工具栏按钮 / 菜单项加大点击区，手指更好点 ——
     .composer {
@@ -408,15 +372,5 @@
         }
       }
     }
-  }
-
-  .scrim {
-    display: block;
-    position: fixed;
-    inset: 0;
-    z-index: 40;
-    background: rgba(0, 0, 0, 0.55);
-    backdrop-filter: blur(2px);
-    animation: fade-in $dur-base $ease-out;
   }
 }

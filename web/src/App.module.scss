@@ -60,3 +60,29 @@
     }
   }
 }
+
+// —— 移动端：对话 / 工作区改为「全屏切换其一」，由 data-mobile-view 决定谁可见 ——
+// 桌面端两栏并排、不进这段；这里只在窄屏生效。
+@include mobile {
+  .main {
+    // 给底部悬浮的视图开关让出空间，避免遮住内容 / 输入框。
+    // 仅在有活动会话（开关才渲染）时留位；空态没有开关，留位会显得底部凭空多一块。
+    &:not(.noSession) {
+      padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+    }
+
+    // 对话视图：显示 ChatSidebar（第 1 个子元素），隐藏工作区（第 2 个）
+    &[data-mobile-view='chat'] {
+      > :nth-child(2) {
+        display: none;
+      }
+    }
+
+    // 工作区视图：隐藏 ChatSidebar，工作区占满
+    &[data-mobile-view='work'] {
+      > :first-child {
+        display: none;
+      }
+    }
+  }
+}

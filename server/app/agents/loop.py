@@ -385,6 +385,112 @@ async def _file_tree_note(db: AsyncSession, session_id: str) -> str:
     )
 
 
+# ── resume / ask_result 共用的重建 helper ─────────────────────────────────────
+# ask_user 的 resume（app.api.ask_result）和「生成中断后续跑」（app.api.resume）都要
+# 干同一件事：用同一个 thread_id 重新把 llm/tools/agent 装回来（checkpointer 只持久化
+# 图状态，不持久化这些运行时对象），再从检查点接着跑。这三个 helper 把这套重复逻辑收口，
+# 两个路由共用，避免各写一份、日后改 create_agent 参数还要改多处。
+
+async def latest_round_thread_id(db: AsyncSession, session_id: str) -> str | None:
+    """算出「最新一轮」的 thread_id：取该 session 最后一条 role='user' kind='text' 消息 id。
+
+    thread_id 与「这一轮」绑定（见 agent_loop 里的说明），触发本轮的用户消息 id 是它的
+    确定性来源——刷新页面后 JS 上下文没了也能靠它重算，进而找回检查点。
+    一条用户消息都没有 → None（没有可恢复/续跑的轮次）。
+    """
+    result = await db.execute(
+        select(DBMessage)
+        .where(
+            DBMessage.session_id == session_id,
+            DBMessage.role == "user",
+            DBMessage.kind == "text",
+        )
+        .order_by(DBMessage.id.desc())
+        .limit(1)
+    )
+    last_user = result.scalar_one_or_none()
+    return f"{session_id}:{last_user.id}" if last_user is not None else None
+
+
+def build_round_agent(db: AsyncSession, session_id: str, model: str, db_lock: asyncio.Lock, tree_note: str):
+    """按本轮选的模型重建 llm/tools/agent（含 checkpointer + NoBluffMiddleware）。
+
+    与 agent_loop 首次创建 agent 的装配方式完全一致，供 resume / ask_result 复用。
+    调用方负责先算好 tree_note（当下真实文件状态）和 db_lock。
+    """
+    llm = build_llm(model)
+    tools = build_tools(db, session_id, db_lock)
+    agent = create_agent(
+        llm,
+        tools,
+        system_prompt=SYSTEM_PROMPT + tree_note,
+        checkpointer=get_checkpointer(),
+        middleware=[NoBluffMiddleware(llm)],
+    )
+    return agent
+
+
+async def reseed_pending_from_state(
+    db: AsyncSession, session_id: str, state
+) -> dict[str, tuple[str, dict, DBMessage]]:
+    """从检查点图状态里找出「还没有 ToolMessage 回填」的 tool_calls，补种 pending 字典。
+
+    resume / 续跑都是一次全新的 astream() 调用：那些 tool_call 是在【上一次】被打断的调用
+    里产出的，这次不会重新产出对应的 "model" 节点事件，pending 天然是空的。不补种的话，
+    续跑后 "tools" 节点回传的 ToolMessage 会因按 tool_call_id 查不到而被静默丢弃（结果存不
+    进 DB、前端也收不到 tool_result）。见 _consume 的 initial_pending 参数说明。
+
+    做法：扫描 state.values["messages"]，收集所有已出现的 ToolMessage.tool_call_id（=已完成），
+    再遍历 AIMessage.tool_calls，把「尚未完成」的那些，逐个匹配 DB 里对应的待回填工具行
+    （kind='tool' 且 text=''，按 tool_name + tool_args 精确匹配），拼成 {id: (name, args, DBMessage)}。
+
+    这是 ask_result 里单个 ask_user 补种逻辑的推广——覆盖「断连时正卡在 tools 节点
+    （check_build / write_file 尚未回传结果）」这一续跑最常见场景。
+    """
+    messages = state.values.get("messages", []) if state and state.values else []
+
+    # 已有 ToolMessage 的 tool_call_id = 该工具已执行完，不用补种
+    done_ids: set[str] = set()
+    for m in messages:
+        tcid = getattr(m, "tool_call_id", None)
+        if tcid:
+            done_ids.add(tcid)
+
+    # 收集所有「已发起但还没回结果」的 tool_call
+    open_calls: list[dict] = []
+    for m in messages:
+        for tc in getattr(m, "tool_calls", None) or []:
+            if tc["id"] not in done_ids:
+                open_calls.append(tc)
+    if not open_calls:
+        return {}
+
+    # 把这些 open_calls 匹配到 DB 里等着回填的工具行（_consume 当初为每个 tool_call 存了
+    # 一条 kind='tool' text='' 的行）。同名同参可能有多条，用 used 集合避免一行被认领两次。
+    result = await db.execute(
+        select(DBMessage)
+        .where(
+            DBMessage.session_id == session_id,
+            DBMessage.kind == "tool",
+            DBMessage.text == "",
+        )
+        .order_by(DBMessage.id.asc())
+    )
+    tool_rows = list(result.scalars().all())
+
+    pending: dict[str, tuple[str, dict, DBMessage]] = {}
+    used: set[int] = set()
+    for tc in open_calls:
+        for row in tool_rows:
+            if row.id in used:
+                continue
+            if row.tool_name == tc["name"] and (row.tool_args or {}) == (tc.get("args") or {}):
+                pending[tc["id"]] = (tc["name"], tc.get("args") or {}, row)
+                used.add(row.id)
+                break
+    return pending
+
+
 async def _consume(
     agent,
     graph_input,
@@ -675,23 +781,9 @@ async def agent_loop(
     # 每请求构造工具(闭包 db / session_id),llm 按本请求选的模型构造。
     # create_agent 内部会 bind_tools、注入 system_prompt,所以这里不用自己绑、
     # messages 也不必塞 SystemMessage —— 这是「每条消息可变模型」的落点。
-    #
-    # 这一步可能失败,最常见的是 build_llm 发现「模型所属分组没在 .env 配 api_key」抛
-    # HTTPException。关键在于:此处已经在 StreamingResponse 内部,HTTP 200 头早已发出 ——
-    # 再往外抛异常,前端只会看到 SSE 流凭空中断,既收不到 error 也收不到 done,UI 永远
-    # 卡在「思考中」。所以必须就地把异常翻译成 error + done 两帧,让前端正常收尾、把原因
-    # 展示出来。HTTPException 用它的 detail(给用户的中文说明),其它异常退回 str(e)。
-    try:
-        llm = build_llm(req.model)
-        tools = build_tools(db, req.session_id, db_lock)
-    except HTTPException as e:
-        yield sse({"type": "error", "message": str(e.detail)})
-        yield sse({"type": "done"})
-        return
-    except Exception as e:
-        yield sse({"type": "error", "message": str(e)})
-        yield sse({"type": "done"})
-        return
+    # 实际的 llm/tools/agent 构造统一收口在 build_round_agent（见下面 create_agent 处），
+    # 那里已做 error+done 兜底：此处已在 StreamingResponse 内部、HTTP 200 头早已发出，
+    # 任何裸抛的异常都会让前端只看到流凭空中断（既无 error 也无 done、UI 卡在「思考中」）。
 
     # 1. 准备本轮 prompt + 文件起点。分两条路:
     #    - 普通发送:把用户消息（连同图片）入库 —— 即便 LLM 调用失败,用户消息也已经
@@ -745,13 +837,7 @@ async def agent_loop(
     # 这一步理论上不太会失败,但和上面构造 llm/tools 一样做同款 error+done 兜底,
     # 避免任何异常在 StreamingResponse 内部裸抛,把前端卡在「思考中」出不来。
     try:
-        agent = create_agent(
-            llm,
-            tools,
-            system_prompt=SYSTEM_PROMPT + tree_note,
-            checkpointer=get_checkpointer(),
-            middleware=[NoBluffMiddleware(llm)],
-        )
+        agent = build_round_agent(db, req.session_id, req.model, db_lock, tree_note)
     except HTTPException as e:
         yield sse({"type": "error", "message": str(e.detail)})
         yield sse({"type": "done"})

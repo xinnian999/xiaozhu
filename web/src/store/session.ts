@@ -5,6 +5,7 @@ import {
   listSessions,
   listSessionFiles,
   listSessionMessages,
+  getResumeState,
   listModels,
   getBilling,
   saveVersion,
@@ -39,6 +40,10 @@ export type ChatSession = {
   // 和 isStreaming 是两个独立的锁：迁移到 interrupt() 后这段等待期间没有任何请求挂着，
   // 但发送框依然要保持禁用，直到 resume 流真正推来 done/error。
   awaitingAnswer: boolean
+  // 「最新一轮生成被中断、可从断点续跑」标记。断连（刷新 / 锁屏 / 停止 / 断网）会让
+  // 那一轮 SSE 半途而废，但后端 checkpointer 留着断点。为 true 时对话流末尾显示
+  // 「继续生成」按钮，点它调 resume 从断点接着跑。切会话拉数据时探测、同会话内断连兜底置位。
+  resumable: boolean
   // 当前 session 的文件快照：path -> content（已保存/已生成的内容）
   files: Record<string, string>
   // 编辑器里暂存但还没保存的改动：path -> 新内容。
@@ -100,6 +105,11 @@ type SessionState = {
   /** 提交回答、发起 resume 流之前调用：退出"等待回答"态（随即由 beginStreaming 接管禁用状态） */
   endAwaitingAnswer: () => void
 
+  /** 直接设置某会话的「可续跑」标记（同会话内断连兜底置位 / 续跑成功后清除） */
+  setResumable: (id: string, v: boolean) => void
+  /** 向后端探测某会话最新一轮是否可续跑，把结果写进该会话的 resumable */
+  checkResumable: (id: string) => Promise<void>
+
   /** SSE 收到 file_write：增量写入当前会话的 files */
   applyFileWrite: (path: string, content: string) => void
   /** SSE 收到 file_delete：从当前会话的 files 移除 */
@@ -138,6 +148,7 @@ function fromApi(api: ApiSession): ChatSession {
     streamingText: '',
     isStreaming: false,
     awaitingAnswer: false,
+    resumable: false,
     files: {},
     drafts: {},
     versionId: 0,
@@ -383,6 +394,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             : sess,
         ),
       }))
+      // 拉完历史后探测这一轮是否被中断、可续跑（覆盖刷新 / 锁屏后重开的场景——
+      // 那时 JS 上下文已重建，只能问服务端）。当前没在流式 / 等回答时才问，避免打断进行中的轮次。
+      // fire-and-forget：不阻塞切会话本身。
+      const cur = get().sessions.find((s) => s.id === id)
+      if (cur && !cur.isStreaming && !cur.awaitingAnswer) {
+        get().checkResumable(id)
+      }
     } catch (e) {
       console.error(`加载会话 ${id} 的内容失败`, e)
     }
@@ -551,6 +569,24 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set((s) => ({
       sessions: s.sessions.map((sess) =>
         sess.id === id ? { ...sess, awaitingAnswer: false } : sess,
+      ),
+    }))
+  },
+
+  setResumable: (id, v) => {
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === id ? { ...sess, resumable: v } : sess,
+      ),
+    }))
+  },
+
+  checkResumable: async (id) => {
+    // 探测失败一律当「不可续」（getResumeState 内部已兜底），静默写回
+    const resumable = await getResumeState(id)
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === id ? { ...sess, resumable } : sess,
       ),
     }))
   },

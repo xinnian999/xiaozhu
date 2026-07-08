@@ -11,20 +11,22 @@ import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from langchain.agents import create_agent
 from langgraph.types import Command
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.loop import _consume, _file_tree_note, sse, with_heartbeat
-from app.agents.middleware import NoBluffMiddleware
-from app.agents.prompts import SYSTEM_PROMPT
-from app.agents.tools import build_tools
-from app.checkpointer import get_checkpointer
+from app.agents.loop import (
+    _consume,
+    _file_tree_note,
+    build_round_agent,
+    latest_round_thread_id,
+    sse,
+    with_heartbeat,
+)
 from app.db import get_db
 from app.deps import get_owned_session
-from app.llm import allowed_model_ids, build_llm, default_model_id
+from app.llm import allowed_model_ids, default_model_id
 from app.models.message import Message as DBMessage
 from app.models.session import Session
 
@@ -67,32 +69,13 @@ async def _resume_stream(session_id: str, body: AskResult, db: AsyncSession, use
 
         # thread_id 与「这一轮」绑定（见 app.agents.loop 里的说明），取这个 session
         # 最新一条用户消息的 id 就能算出触发当前这轮的 thread_id。
-        result = await db.execute(
-            select(DBMessage)
-            .where(
-                DBMessage.session_id == session_id,
-                DBMessage.role == "user",
-                DBMessage.kind == "text",
-            )
-            .order_by(DBMessage.id.desc())
-            .limit(1)
-        )
-        last_user = result.scalar_one_or_none()
-        if last_user is None:
+        thread_id = await latest_round_thread_id(db, session_id)
+        if thread_id is None:
             raise HTTPException(status_code=409, detail="没有可恢复的提问")
-        thread_id = f"{session_id}:{last_user.id}"
 
         db_lock = asyncio.Lock()
-        llm = build_llm(model)
-        tools = build_tools(db, session_id, db_lock)
         tree_note = await _file_tree_note(db, session_id)
-        agent = create_agent(
-            llm,
-            tools,
-            system_prompt=SYSTEM_PROMPT + tree_note,
-            checkpointer=get_checkpointer(),
-            middleware=[NoBluffMiddleware(llm)],
-        )
+        agent = build_round_agent(db, session_id, model, db_lock, tree_note)
 
         config = {"configurable": {"thread_id": thread_id}}
         state = await agent.aget_state(config)
@@ -112,6 +95,17 @@ async def _resume_stream(session_id: str, body: AskResult, db: AsyncSession, use
                 break
         if ask_call is None:
             raise HTTPException(status_code=409, detail="这个提问已失效，请刷新页面")
+
+        # 版本快照的摘要用触发这一轮的用户消息文本（thread_id 尾部就是它的 id）。
+        summary_text = ""
+        try:
+            last_user_id = int(thread_id.rsplit(":", 1)[1])
+            row = await db.execute(
+                select(DBMessage.text).where(DBMessage.id == last_user_id)
+            )
+            summary_text = row.scalar_one_or_none() or ""
+        except (ValueError, IndexError):
+            pass
 
         # 找到当时 _consume 为这次 ask_user 调用存的那条待补全工具消息（text 还是
         # 空的，等着这次的答案填进去），补种进 initial_pending——见 _consume 的参数
@@ -138,7 +132,7 @@ async def _resume_stream(session_id: str, body: AskResult, db: AsyncSession, use
             Command(resume=body.answer),
             thread_id,
             session_id=session_id,
-            summary_text=last_user.text,
+            summary_text=summary_text,
             model=model,
             db=db,
             db_lock=db_lock,

@@ -2,7 +2,7 @@ import { useCallback, useRef, useState } from 'react'
 import { ArrowUp, Square, Mic, Image as ImageIcon, X, Plus } from 'lucide-react'
 import { useSessionStore, makeMessage, makeVersionCard, makeErrorCard } from '@/store/session'
 import { useUIStore } from '@/store/ui'
-import { streamChat, streamAskResult, type SSEEvent } from '@/lib/api'
+import { streamChat, streamAskResult, streamResume, type SSEEvent } from '@/lib/api'
 import { toast } from '@/lib/toast'
 import { useClickOutside } from '@/hooks/useClickOutside'
 import type { Message } from '@/types/project'
@@ -42,6 +42,7 @@ export default function ChatSidebar() {
   const endStreaming = useSessionStore((s) => s.endStreaming)
   const beginAwaitingAnswer = useSessionStore((s) => s.beginAwaitingAnswer)
   const endAwaitingAnswer = useSessionStore((s) => s.endAwaitingAnswer)
+  const setResumable = useSessionStore((s) => s.setResumable)
   const applyFileWrite = useSessionStore((s) => s.applyFileWrite)
   const applyFileDelete = useSessionStore((s) => s.applyFileDelete)
   const selectedModel = useSessionStore((s) => s.selectedModel)
@@ -143,11 +144,16 @@ export default function ChatSidebar() {
     setAttachments((prev) => prev.filter((_, i) => i !== idx))
   }
 
-  // 消费一条 SSE 流：把后端事件逐条映射到 store。发送 / 重试共用同一套处理逻辑，
+  // 消费一条 SSE 流：把后端事件逐条映射到 store。发送 / 重试 / 续跑共用同一套处理逻辑，
   // 避免两份几乎一样的事件分发代码各写一遍、日后改协议还得改两处。
-  const consumeStream = async (stream: AsyncGenerator<SSEEvent>) => {
+  // 返回值：这次流是否「正常收场」（收到 done / error / awaiting_answer 之一）。
+  // 返回 false 说明 for-await 是因为连接中途断掉才结束的（网络抖动等）——调用方据此把
+  // 会话标记为可续跑，让用户点「继续生成」从断点接着跑，而不用从头重来。
+  const consumeStream = async (stream: AsyncGenerator<SSEEvent>): Promise<boolean> => {
     // 逐 token 累积到本地变量，再统一冲刷给 store
     let accumulated = ''
+    // 是否正常收到了终止事件（done/error/awaiting_answer）。没收到就断流 = 被中断。
+    let settled = false
     for await (const event of stream) {
       if (event.type === 'message_delta') {
         accumulated += event.text
@@ -195,8 +201,10 @@ export default function ChatSidebar() {
           accumulated = ''
         }
         appendMessage(makeErrorCard(event.message))
+        settled = true
         break
       } else if (event.type === 'done') {
+        settled = true
         break
       } else if (event.type === 'awaiting_answer') {
         // ask_user 触发 interrupt() 暂停本轮：这次流到此正常结束（不是真的跑完）。
@@ -207,9 +215,11 @@ export default function ChatSidebar() {
           accumulated = ''
         }
         beginAwaitingAnswer()
+        settled = true
         break
       }
     }
+    return settled
   }
 
   const handleSend = async (overrideText?: string) => {
@@ -262,7 +272,12 @@ export default function ChatSidebar() {
 
     // 3. 流式消费 SSE
     try {
-      await consumeStream(streamChat(text, targetSessionId, selectedModel, controller.signal, images))
+      const settled = await consumeStream(
+        streamChat(text, targetSessionId, selectedModel, controller.signal, images),
+      )
+      // 流没正常收场（既非 done/error，也非 ask_user 暂停）= 连接中途断了。
+      // 同会话内直接标记可续跑，用户点「继续生成」即可从断点接着跑，无需刷新页面。
+      if (!settled) setResumable(targetSessionId, true)
     } finally {
       // 4. 无论正常结束 / 出错 / 用户中断，都冲刷累积内容并退出流式态。
       //    退出流式态会让 PreviewPane 的构建 effect 重跑：若本轮有改动还没构建过
@@ -285,6 +300,8 @@ export default function ChatSidebar() {
     // 先把最新一轮用户消息之后的旧内容从对话里截掉 —— 看起来像把这条消息重新发出去。
     // 后端会同步删掉这些消息行（但保留版本快照），两边对「最后一条用户消息」的判定一致。
     truncateAfterLastUserMessage()
+    // 重试是「从头再跑这一轮」，旧的中断续跑标记作废
+    setResumable(session.id, false)
 
     // 进入流式态 + 建中断控制器，和发送完全一致，所以「停止」按钮一样能中断重试
     beginStreaming()
@@ -293,11 +310,38 @@ export default function ChatSidebar() {
 
     try {
       // message 传空串、retry=true：真正的 prompt 由后端取最后一条用户消息
-      await consumeStream(streamChat('', session.id, selectedModel, controller.signal, [], true))
+      const settled = await consumeStream(
+        streamChat('', session.id, selectedModel, controller.signal, [], true),
+      )
+      if (!settled) setResumable(session.id, true)
     } finally {
       abortRef.current = null
       endStreaming()
       loadBilling() // 重试一轮同样可能扣点，结束后刷新今日剩余
+    }
+  }
+
+  // 「继续生成」：从断点续跑被中断的那一轮（刷新 / 锁屏 / 断网导致 SSE 半途而废）。
+  // 后端 checkpointer 留着断点，streamResume 用同一 thread 从断点接着跑，喂给和
+  // handleSend 一样的 consumeStream 管线。跑法与 handleRetry 完全对称，「停止」按钮同样能中断。
+  const handleResume = async () => {
+    if (!session || isStreaming || creating || awaitingAnswer) return
+
+    // 先乐观清掉标记（避免重复点）；若续跑又被中断，consumeStream 返回 false 会重新置位。
+    setResumable(session.id, false)
+    beginStreaming()
+    const controller = new AbortController()
+    abortRef.current = controller
+
+    try {
+      const settled = await consumeStream(
+        streamResume(session.id, selectedModel, controller.signal),
+      )
+      if (!settled) setResumable(session.id, true)
+    } finally {
+      abortRef.current = null
+      endStreaming()
+      loadBilling()
     }
   }
 
@@ -323,9 +367,10 @@ export default function ChatSidebar() {
       const controller = new AbortController()
       abortRef.current = controller
       try {
-        await consumeStream(
+        const settled = await consumeStream(
           streamAskResult(session.id, msg.toolCallId as string, answer, selectedModel, controller.signal),
         )
+        if (!settled) setResumable(session.id, true)
       } finally {
         abortRef.current = null
         endStreaming()
@@ -353,7 +398,7 @@ export default function ChatSidebar() {
       aria-label="对话"
     >
       <div className={styles.chatBody}>
-        {noSession ? <EmptyHero /> : <MessageList onRetry={handleRetry} onAskUserAnswer={handleAskUserAnswer} />}
+        {noSession ? <EmptyHero /> : <MessageList onRetry={handleRetry} onResume={handleResume} onAskUserAnswer={handleAskUserAnswer} />}
       </div>
 
       <footer className={styles.composer}>

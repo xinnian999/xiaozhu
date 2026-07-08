@@ -405,6 +405,20 @@ export async function listSessionMessages(sessionId: string): Promise<ApiMessage
   return data
 }
 
+/** 探测某会话「最新一轮」是否被中断、可从断点续跑。
+ *  刷新 / 锁屏后 JS 上下文已重建，只能问服务端：后端据 checkpointer 状态判断
+ *  （有未跑完节点且不是 ask_user 暂停）。失败一律当「不可续」，不打断主流程。 */
+export async function getResumeState(sessionId: string): Promise<boolean> {
+  try {
+    const { data } = await http.get<{ resumable: boolean }>(
+      `/api/sessions/${sessionId}/resume-state`,
+    )
+    return !!data.resumable
+  } catch {
+    return false
+  }
+}
+
 // ── 回报构建结果（唤醒后端 check_build）──────────────────────
 // AI 每次调 check_build → 前端构建一次(vite build) + iframe 重载渲染收集运行时错误 →
 // 把「编译 + 运行」两类结果一并回报这里，唤醒正挂在 build_store 上等结果的 check_build。
@@ -594,6 +608,50 @@ export async function* streamAskResult(
       // 不是 JSON 就用状态码兜底
     }
     toast(`提交失败：${detail}`)
+    yield { type: 'error', message: detail }
+    yield { type: 'done' }
+    return
+  }
+
+  yield* consumeSSE(res, signal)
+}
+
+// ── 从断点续跑被中断的那一轮 ────────────────────────────────────
+// 生成途中刷新 / 锁屏 / 断网会打断 SSE，但后端 checkpointer 留着断点状态（见后端
+// app.api.resume）。这个接口用同一个 thread 从断点接着跑，开一条新的 SSE 流，形状和
+// streamChat 完全对齐——调用方（ChatSidebar 的 consumeStream）可直接照常消费。
+export async function* streamResume(
+  sessionId: string,
+  model: string | null,
+  signal?: AbortSignal,
+): AsyncGenerator<SSEEvent> {
+  const isAbort = (e: unknown) =>
+    signal?.aborted || (e instanceof DOMException && e.name === 'AbortError')
+
+  let res: Response
+  try {
+    res = await fetch(`/api/sessions/${sessionId}/resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ ...(model ? { model } : {}) }),
+      signal,
+    })
+  } catch (e: unknown) {
+    if (isAbort(e)) return
+    const msg = e instanceof Error ? e.message : '网络错误'
+    toast(`继续生成失败：${msg}`)
+    throw e
+  }
+
+  if (!res.ok || !res.body) {
+    let detail = `HTTP ${res.status}`
+    try {
+      const data = await res.json()
+      if (data?.detail) detail = data.detail
+    } catch {
+      // 不是 JSON 就用状态码兜底
+    }
+    toast(`继续生成失败：${detail}`)
     yield { type: 'error', message: detail }
     yield { type: 'done' }
     return

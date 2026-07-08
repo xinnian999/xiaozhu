@@ -42,6 +42,51 @@
   }
 }
 
+// 中断续跑提示卡：最新一轮被打断后显示。低调、左对齐贴合 AI 回复。
+.resumeCard {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: $space-2;
+  margin-bottom: $space-4;
+  padding: $space-3;
+  border: 1px solid var(--color-border);
+  border-radius: $radius-md;
+  background: var(--color-bg-soft);
+
+  .resumeText {
+    margin: 0;
+    font-size: $fs-12;
+    line-height: $lh-snug;
+    color: var(--color-text-dim);
+  }
+
+  .resumeBtn {
+    @include button-reset;
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: $space-1;
+    padding: $space-1 $space-3;
+    height: 30px;
+    border-radius: $radius-sm;
+    background: var(--color-accent);
+    color: white;
+    font-size: $fs-12;
+    font-weight: $fw-medium;
+    box-shadow: 0 4px 12px var(--color-accent-glow);
+    transition: opacity $dur-base $ease-out;
+
+    &:hover {
+      opacity: 0.9;
+    }
+
+    .resumeIcon {
+      flex-shrink: 0;
+    }
+  }
+}
+
 // 生成中的「正在生成」+ 可选的慢提示，竖排一组
 .thinkingWrap {
   margin-bottom: $space-4;

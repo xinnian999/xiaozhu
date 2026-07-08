@@ -109,6 +109,9 @@ class SessionAdminRead(BaseModel):
 
     id: str
     user_id: str
+    # 由 API join users 填充：会话所属用户昵称 / 邮箱（用户已删时为 None）。裸 id 无意义，后台展示这两个。
+    user_nickname: str | None = None
+    user_email: str | None = None
     title: str | None
     created_at: datetime
     updated_at: datetime

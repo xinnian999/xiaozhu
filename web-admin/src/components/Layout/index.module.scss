@@ -1,8 +1,11 @@
 // ============================================
 // 整体布局样式
 // ============================================
+// 锁死为一屏高（不用 min-height）——否则内容一多会把整页撑高，侧栏跟着被拉长、
+// 底部用户区被顶下去。固定 100vh + 溢出隐藏，滚动交给内容区局部处理。
 .layout {
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 
 .sider {
@@ -97,6 +100,10 @@
 }
 
 .content {
+  // flex:1 + min-height:0 让内容区吃满「一屏减去自身外边距」的高度，超出部分本区域内部滚动，
+  // 不再把整页（连带侧栏）撑高。min-height:0 是关键：不加它 flex 子项默认按内容撑高、overflow 失效。
+  flex: 1;
+  min-height: 0;
   margin: 16px;
   padding: 16px;
   background: var(--color-bg-soft);

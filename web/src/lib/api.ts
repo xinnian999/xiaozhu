@@ -425,17 +425,19 @@ export async function postBuildResult(
   }
 }
 
-// ── boot 失败上报（best-effort 旁路监控）───────────────────────
-// 预览运行环境（WebContainer）从境外 boot，国内偶发失败/超时。失败时把原因 + 环境信息
-// 上报后端，管理后台据此监控失败率、定位偶发原因。同 postBuildResult：走原生 fetch、
-// 静默失败，绝不打扰用户（上报本身失败无所谓）。
-export async function reportBootFailure(payload: {
+// ── boot 结果上报（best-effort 旁路监控）───────────────────────
+// 预览运行环境（WebContainer）从境外 boot，国内偶发失败/超时、或很慢。每次 boot 结束都上报：
+// 成功报 kind='ok' + 耗时，失败报 timeout/error + 原因。后端据此统计 boot 耗时分布 + 失败率。
+// 同 postBuildResult：走原生 fetch、静默失败，绝不打扰用户（上报本身失败无所谓）。
+export async function reportBootResult(payload: {
   session_id?: string | null
   stage?: string
-  kind?: 'timeout' | 'error'
+  kind?: 'timeout' | 'error' | 'ok'
   message?: string
   cross_origin_isolated?: boolean
   elapsed_ms?: number
+  // 是否冷 boot（会话内首次成功前的 boot）：用于把冷/热 boot 分开统计耗时。
+  cold?: boolean
 }): Promise<void> {
   try {
     await fetch('/api/boot-failure', {

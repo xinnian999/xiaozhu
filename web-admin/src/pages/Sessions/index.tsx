@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Table, Button, Popconfirm, App as AntdApp } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import dayjs from 'dayjs'
+import UserCell from '@/components/UserCell'
 import { listSessions, countSessions, deleteSession, type AdminSession } from '@/lib/api'
 
 const PAGE_SIZE = 20
@@ -41,9 +42,15 @@ export default function Sessions() {
   }
 
   const columns: ColumnsType<AdminSession> = [
-    { title: '会话 ID', dataIndex: 'id', ellipsis: true },
-    { title: '用户 ID', dataIndex: 'user_id', ellipsis: true },
     { title: '标题', dataIndex: 'title', ellipsis: true, render: (v: string | null) => v || '—' },
+    {
+      // 用户列：昵称 + 邮箱替代裸 user_id。
+      title: '用户',
+      dataIndex: 'user_nickname',
+      width: 200,
+      ellipsis: true,
+      render: (_, row) => <UserCell nickname={row.user_nickname} email={row.user_email} />,
+    },
     { title: '创建时间', dataIndex: 'created_at', render: (v: string) => dayjs(v).format('YYYY-MM-DD HH:mm') },
     { title: '更新时间', dataIndex: 'updated_at', render: (v: string) => dayjs(v).format('YYYY-MM-DD HH:mm') },
     {

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.models.session import Session, SessionAdminRead
+from app.models.user import User
 
 router = APIRouter(prefix="/sessions", tags=["admin-sessions"])
 
@@ -18,10 +19,24 @@ async def list_sessions(
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
-) -> list[Session]:
-    stmt = select(Session).order_by(Session.created_at.desc()).offset(offset).limit(limit)
+) -> list[SessionAdminRead]:
+    # LEFT JOIN users：把 user_id 换成昵称 + 邮箱展示（裸 id 看了没意义）。
+    # outerjoin —— 用户可能已删，join 不上时昵称邮箱为 None，会话记录仍要显示。
+    stmt = (
+        select(Session, User.nickname, User.email)
+        .outerjoin(User, Session.user_id == User.id)
+        .order_by(Session.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
     result = await db.execute(stmt)
-    return list(result.scalars().all())
+    out: list[SessionAdminRead] = []
+    for sess, nickname, email in result.all():
+        row = SessionAdminRead.model_validate(sess)
+        row.user_nickname = nickname
+        row.user_email = email
+        out.append(row)
+    return out
 
 
 @router.get("/count", response_model=int)

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Table, Tag, Button, Space, Popconfirm, Input, Select, App as AntdApp } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import dayjs from 'dayjs'
+import UserCell from '@/components/UserCell'
 import {
   listOrders,
   countOrders,
@@ -81,8 +82,14 @@ export default function Orders() {
   }
 
   const columns: ColumnsType<AdminOrder> = [
-    { title: '用户昵称', dataIndex: 'user_nickname', ellipsis: true, render: (v: string | null) => v || '—' },
-    { title: '用户 ID', dataIndex: 'user_id', ellipsis: true },
+    {
+      // 用户列：昵称 + 邮箱替代裸 user_id。
+      title: '用户',
+      dataIndex: 'user_nickname',
+      width: 200,
+      ellipsis: true,
+      render: (_, row) => <UserCell nickname={row.user_nickname} email={row.user_email} />,
+    },
     { title: '档位', dataIndex: 'tier' },
     { title: '金额', dataIndex: 'amount', render: (v: string) => `¥${v}` },
     {

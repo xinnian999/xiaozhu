@@ -3,7 +3,7 @@ import { AlertTriangle } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
 import { useUIStore, type WCStatus, type LogLevel } from '@/store/ui'
 import { bootAndRun, syncFiles, resetContainer, isBooted, isPreviewRunning } from '@/lib/webcontainer'
-import { postBuildResult, reportBootFailure } from '@/lib/api'
+import { postBuildResult, reportBootResult } from '@/lib/api'
 import styles from './index.module.scss'
 
 // 编译通过后，iframe 重载渲染期间收集运行时错误的窗口（从 iframe load 事件起算）。
@@ -158,7 +158,7 @@ export default function PreviewPane() {
         // boot / 启动失败：上报后端供管理后台监控（best-effort，静默）。
         // crossOriginIsolated 为 false 说明 COOP/COEP 没生效（必然 boot 失败），是重要线索。
         onBootFail: (info) => {
-          reportBootFailure({
+          reportBootResult({
             session_id: activeIdRef.current,
             stage: info.stage,
             kind: info.kind,
@@ -166,6 +166,19 @@ export default function PreviewPane() {
             cross_origin_isolated:
               typeof crossOriginIsolated !== 'undefined' ? crossOriginIsolated : undefined,
             elapsed_ms: info.elapsedMs,
+            cold: info.cold,
+          })
+        },
+        // boot 成功：上报成功耗时（kind='ok'），带冷/热标记，供后台统计 boot 耗时分布。
+        onBootOk: (info) => {
+          reportBootResult({
+            session_id: activeIdRef.current,
+            stage: 'booting',
+            kind: 'ok',
+            cross_origin_isolated:
+              typeof crossOriginIsolated !== 'undefined' ? crossOriginIsolated : undefined,
+            elapsed_ms: info.elapsedMs,
+            cold: info.cold,
           })
         },
       })

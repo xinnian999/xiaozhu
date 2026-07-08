@@ -69,8 +69,9 @@ class OrderAdminRead(BaseModel):
 
     id: str
     user_id: str
-    # 列表接口 join users 表填充，审核接口可不填。
+    # 列表接口 join users 表填充，审核接口可不填。裸 id 无意义，后台展示昵称 + 邮箱。
     user_nickname: str | None = None
+    user_email: str | None = None
     tier: str
     amount: str
     status: str

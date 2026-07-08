@@ -31,6 +31,29 @@ let containerPromise: Promise<WebContainer> | null = null
 let previewStarted = false  // vite preview 静态服务是否已起来
 let lastFiles: FileMap | null = null  // 上次 mount 的文件快照，用于增量 diff
 
+// 本浏览器会话里是否已经成功 boot 过一次。用于给「冷/热 boot」打标：
+//   - 冷 boot：会话内首次成功前的 boot，运行时（~470KB/3.9MB）和依赖都还没缓存，最慢；
+//   - 热 boot：之后（切项目）的重 boot，运行时多半已进 HTTP 缓存、依赖走 IndexedDB，理应快很多。
+// 上报后按 cold 分组统计耗时，用来看「慢主要慢在冷 boot」还是热 boot 也慢。
+let hasBootedOk = false
+
+/** 一次 boot 成功的埋点：是否冷 boot + 耗时（ms）。供上层上报统计。 */
+export type BootOkMeta = { cold: boolean; elapsedMs: number }
+// 最近一次成功 boot 的埋点。getContainer 每次真正 boot 成功后刷新，bootAndRun 读它上报。
+let lastBootOk: BootOkMeta | null = null
+// 最近一次 boot 启动时是否为冷 boot（失败上报也要带上，故与成功埋点分开单独记）。
+let lastBootCold = false
+
+/** 读最近一次成功 boot 的埋点（cold + elapsedMs）。没有则 null。 */
+export function getLastBootMeta(): BootOkMeta | null {
+  return lastBootOk
+}
+
+/** 最近一次 boot 启动时是否为冷 boot —— 失败上报用。 */
+export function wasLastBootCold(): boolean {
+  return lastBootCold
+}
+
 // WebContainer.boot() 的超时兜底（ms）。boot 要从境外（StackBlitz）下载 ~470KB 运行时并握手。
 // 没有超时的话，连接彻底卡死时会永远停在 booting、进度条卡 16%，用户以为死机。
 //
@@ -202,11 +225,19 @@ function bootWithTimeout(): Promise<WebContainer> {
  *  任一情况最终失败都清空单例，允许用户刷新后重来。 */
 export function getContainer(): Promise<WebContainer> {
   if (!containerPromise) {
+    // 本次 boot 是不是冷 boot：会话里还没成功 boot 过 = 冷。成功/失败上报都要用。
+    const cold = !hasBootedOk
+    lastBootCold = cold
     containerPromise = (async () => {
       let lastErr: unknown
       for (let attempt = 0; attempt <= BOOT_MAX_RETRIES; attempt++) {
         try {
-          return await bootWithTimeout()
+          const startedAt = Date.now()
+          const wc = await bootWithTimeout()
+          // 成功：记冷/热耗时埋点，标记「本会话已成功 boot 过」（后续都算热 boot）。
+          hasBootedOk = true
+          lastBootOk = { cold, elapsedMs: Date.now() - startedAt }
+          return wc
         } catch (e) {
           lastErr = e
           // 超时：底层 boot 仍在进行，不能再 boot()，直接放弃、抛给上层。
@@ -528,14 +559,26 @@ export async function bootAndRun(
       kind: 'timeout' | 'error'
       message: string
       elapsedMs?: number
+      cold?: boolean
     }) => void
+    // boot 成功回调：带冷/热标记 + 耗时，供上层上报统计 boot 耗时分布。
+    // 只在这次 bootAndRun 真的触发了一次 boot（而非复用已 ready 的实例）时才回调。
+    onBootOk?: (info: { cold: boolean; elapsedMs: number }) => void
   },
 ): Promise<void> {
   // 记录当前阶段：失败上报时要知道卡在 booting 还是后续哪一步。
   let stage = 'booting'
+  // 进来时是否已有容器：若已 boot 过（复用实例），这次并不会真的触发 boot，
+  // 不能把上一次的成功埋点误报成本次。只有「这次真的新 boot 了」才上报 onBootOk。
+  const willBoot = !isBooted()
   try {
     hooks.onStatus('booting')
     const wc = await getContainer()
+    // 仅当这次确实新 boot 了才上报成功耗时（避免复用实例时误报旧埋点）。
+    if (willBoot) {
+      const okMeta = getLastBootMeta()
+      if (okMeta) hooks.onBootOk?.(okMeta)
+    }
 
     stage = 'mounting'
     hooks.onStatus('mounting')
@@ -700,6 +743,7 @@ export async function bootAndRun(
       kind: isBootErr ? e.kind : 'error',
       message: msg,
       elapsedMs: isBootErr ? e.elapsedMs : undefined,
+      cold: wasLastBootCold(),
     })
   }
 }

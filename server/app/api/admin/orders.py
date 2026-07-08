@@ -21,12 +21,15 @@ from app.models.user import User
 router = APIRouter(prefix="/orders", tags=["admin-orders"])
 
 
-def _order_admin_read(order: Order, user_nickname: str | None = None) -> OrderAdminRead:
-    """ORM 订单 → 管理后台响应（可选附带用户昵称）。"""
+def _order_admin_read(
+    order: Order, user_nickname: str | None = None, user_email: str | None = None
+) -> OrderAdminRead:
+    """ORM 订单 → 管理后台响应（可选附带用户昵称 / 邮箱）。"""
     return OrderAdminRead(
         id=order.id,
         user_id=order.user_id,
         user_nickname=user_nickname,
+        user_email=user_email,
         tier=order.tier,
         amount=order.amount,
         status=order.status,
@@ -46,13 +49,13 @@ async def list_orders(
     status: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> list[OrderAdminRead]:
-    stmt = select(Order, User.nickname).join(User, Order.user_id == User.id)
+    stmt = select(Order, User.nickname, User.email).join(User, Order.user_id == User.id)
     # 可选按状态过滤，方便后台只看「待审核」。
     if status:
         stmt = stmt.where(Order.status == status)
     stmt = stmt.order_by(Order.created_at.desc()).offset(offset).limit(limit)
     result = await db.execute(stmt)
-    return [_order_admin_read(order, nickname) for order, nickname in result.all()]
+    return [_order_admin_read(order, nickname, email) for order, nickname, email in result.all()]
 
 
 @router.get("/count", response_model=int)

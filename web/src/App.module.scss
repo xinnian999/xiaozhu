@@ -8,6 +8,7 @@
   justify-content: center;
   width: 100vw;
   height: 100vh;
+  height: 100dvh;
   background: var(--color-bg);
   color: var(--color-text-dim);
   font-size: $fs-14;
@@ -27,6 +28,7 @@
 .app {
   width: 100vw;
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   overflow: hidden;

@@ -327,6 +327,12 @@
     }
   }
 
+  @include mobile {
+    .composer {
+      padding-bottom: calc(#{$space-3} + env(safe-area-inset-bottom, 0px));
+    }
+  }
+
   // —— 浅色主题下的差异（结构性）——
   @include light {
     .composer .composerInner {

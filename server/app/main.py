@@ -6,12 +6,16 @@ startup 事件 + CORS + 路由注册三件事在这里完成。
 
 from contextlib import asynccontextmanager
 from pathlib import Path
+import stat
 
+import anyio
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from starlette.datastructures import MutableHeaders
+from starlette.exceptions import HTTPException
+from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.api import (
@@ -121,6 +125,28 @@ class SetupGateMiddleware:
         await response(scope, receive, send)
 
 
+class SPAStaticFiles(StaticFiles):
+    """StaticFiles 扩展：html=True 时对客户端路由回落 index.html。
+
+    Starlette 自带的 html 模式只处理目录 URL / 404.html，无法覆盖
+    React Router 深链（如 /admin/users）刷新即 404 的问题。
+    """
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        try:
+            return await super().get_response(path, scope)
+        except HTTPException as exc:
+            if exc.status_code != 404 or not self.html:
+                raise
+            # 带扩展名的路径按静态资源处理，找不到就真 404（避免把 .js/.css 错成 HTML）。
+            if path and "." in Path(path).name:
+                raise
+            full_path, stat_result = await anyio.to_thread.run_sync(self.lookup_path, "index.html")
+            if stat_result is not None and stat.S_ISREG(stat_result.st_mode):
+                return self.file_response(full_path, stat_result, scope)
+            raise
+
+
 # ── 应用生命周期 ────────────────────────────────────────────
 # lifespan 是 FastAPI 推荐的新写法（替代旧的 @app.on_event）。
 # yield 之前是 startup 逻辑，yield 之后是 shutdown 逻辑。
@@ -205,7 +231,7 @@ app.include_router(setup.router)
 # dev 期该目录不存在，跳过（管理后台走独立的 vite:9100）；生产由 Dockerfile 的
 # web-admin 构建阶段拷进来。鉴权走 /api/admin/* 的 get_current_admin（JWT），无需在此另设。
 if ADMIN_STATIC_DIR.is_dir():
-    app.mount("/admin", StaticFiles(directory=ADMIN_STATIC_DIR, html=True), name="static-admin")
+    app.mount("/admin", SPAStaticFiles(directory=ADMIN_STATIC_DIR, html=True), name="static-admin")
 
 
 @app.get("/health")

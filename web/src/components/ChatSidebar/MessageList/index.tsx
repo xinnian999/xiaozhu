@@ -41,22 +41,37 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
   const sessionId = session?.id ?? null
   // 本轮流式已累积的文本：非空 = 已经在吐字了，就不再显示「思考中」计时提示。
   const streamingText = session?.streamingText ?? ''
+  // 最新工具卡：用于判断当前这段「静默等待」到底是在构建、修复，还是已经构建完等模型总结。
+  // 注意：工具卡的 result 是异步回填的，下面的 phaseKey 会把「工具刚出现」和「工具有结果」
+  // 当成两个阶段，计时也跟着重置，避免把整轮累计时间误显示成当前卡住时间。
+  const latestTool = [...messages].reverse().find((m) => m.kind === 'tool')
+  const latestToolResult = latestTool?.toolResult ?? ''
+  const phaseKey = [
+    sessionId,
+    messages.length,
+    latestTool?.toolCallId ?? '',
+    latestTool?.toolName ?? '',
+    latestToolResult ? 'result' : 'pending',
+  ].join(':')
 
-  // 「正在生成」持续了多少秒。isStreaming 期间每秒 +1，用来判断要不要亮慢提示、显示计时。
-  // 一旦开始吐字（streamingText 非空）或退出流式就停表复位。
+  // 当前阶段静默持续了多少秒。进入新的工具/工具结果阶段时会重置，
+  // 避免把整轮累计耗时误显示成当前卡住时间。
   const [genSeconds, setGenSeconds] = useState(0)
   useEffect(() => {
     if (!isStreaming || streamingText) {
-      setGenSeconds(0)
-      return
+      const resetTimer = setTimeout(() => setGenSeconds(0), 0)
+      return () => clearTimeout(resetTimer)
     }
-    setGenSeconds(0)
     const started = Date.now()
+    const resetTimer = setTimeout(() => setGenSeconds(0), 0)
     const timer = setInterval(() => {
       setGenSeconds(Math.floor((Date.now() - started) / 1000))
     }, 1000)
-    return () => clearInterval(timer)
-  }, [isStreaming, streamingText, sessionId])
+    return () => {
+      clearTimeout(resetTimer)
+      clearInterval(timer)
+    }
+  }, [isStreaming, streamingText, phaseKey])
 
   // 新消息到来 / 进入思考态时滚动到底部
   useEffect(() => {
@@ -111,6 +126,27 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
   const tail = messages[messages.length - 1]
   const tailToolRunning = tail?.kind === 'tool' && !tail.toolResult
 
+  // 底部生成态文案：把「整轮还在跑」拆成更具体的阶段。
+  // 尤其是 check_build 已经成功返回时，右侧预览可能已经能看了，此时继续显示
+  // 「模型正在思考」会让用户误以为构建还卡着；改成「预览已生成」更符合实际。
+  let thinkingLabel = '正在生成'
+  let thinkingHint = `模型正在思考，已等待 ${genSeconds}s…`
+  if (latestTool?.toolName === 'check_build' && latestToolResult) {
+    if (latestToolResult.includes('构建通过')) {
+      thinkingLabel = '预览已生成'
+      thinkingHint = `模型正在整理完成说明，已等待 ${genSeconds}s…`
+    } else if (latestToolResult.includes('运行时报错') || latestToolResult.includes('构建失败')) {
+      thinkingLabel = '收到构建反馈'
+      thinkingHint = `模型正在定位并修复问题，已等待 ${genSeconds}s…`
+    } else if (latestToolResult.includes('构建超时')) {
+      thinkingLabel = '预览等待超时'
+      thinkingHint = `模型正在处理超时结果，已等待 ${genSeconds}s…`
+    }
+  } else if (latestTool?.toolResult) {
+    thinkingLabel = '继续处理'
+    thinkingHint = `模型正在规划下一步，已等待 ${genSeconds}s…`
+  }
+
   return (
     <div className={styles.list}>
       {messages.map((msg, i) => (
@@ -161,10 +197,10 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
           让「秒数在走」证明它还在干活，避免被当成卡死。 */}
       {isStreaming && !tailToolRunning && (
         <div className={styles.thinkingWrap} aria-live="polite">
-          <span className={styles.thinking}>正在生成</span>
+          <span className={styles.thinking}>{thinkingLabel}</span>
           {genSeconds >= SLOW_GEN_HINT_AFTER && (
             <span className={styles.thinkingHint}>
-              模型正在思考，已等待 {genSeconds}s…
+              {thinkingHint}
             </span>
           )}
         </div>

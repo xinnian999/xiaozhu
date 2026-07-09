@@ -40,6 +40,13 @@
   justify-content: flex-end;
 }
 
+// 行内排序按钮：紧凑横排
+.sortActions {
+  :global(.ant-btn) {
+    padding-inline: 4px;
+  }
+}
+
 // —— 移动端：工具栏纵向堆叠 ——
 @include mobile {
   .toolbar {

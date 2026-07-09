@@ -1,7 +1,7 @@
 """LLM 模型配置（搬进数据库）—— 原本写死在 app/llm.py 的 AVAILABLE_MODELS。
 
 单表设计：每个模型自带全部所需信息（不再有「分组」共享 key 的机制）：
-  id / name / base_url / api_key / logo / cost(倍率) / vision(识图) / enabled(启用)。
+  id / base_url / api_key / logo / cost(倍率) / vision(识图) / enabled(启用)。
 
 读取方：app/llm.py。它启动时把本表读进内存缓存（registry），
 build_llm / public_models / 白名单校验都查缓存，不每次打数据库；
@@ -21,11 +21,8 @@ class LlmModel(Base):
 
     __tablename__ = "llm_models"
 
-    # 真正传给中转的模型名，做主键，如 "qwen3-coder-next"。
+    # 真正传给中转的模型名，做主键，如 "qwen3-coder-next"。同时作为前端展示名。
     id: Mapped[str] = mapped_column(String, primary_key=True)
-
-    # 给前端下拉框展示的人类可读名，如 "Qwen3 Coder Next"。
-    name: Mapped[str] = mapped_column(String, nullable=False)
 
     # 该模型调用的中转地址（OpenAI 兼容端点）。为空则用官方 api.openai.com。
     base_url: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -50,8 +47,7 @@ class LlmModel(Base):
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
     def __str__(self) -> str:
-        # 后台关联展示时的文本。用「显示名」更直观。
-        return self.name
+        return self.id
 
 
 # ── Pydantic Schemas ───────────────────────────────────────────────────────────
@@ -64,7 +60,6 @@ class LlmModelAdminRead(BaseModel):
     model_config = {"from_attributes": True}
 
     id: str
-    name: str
     base_url: str | None
     api_key: str
     logo: str
@@ -77,7 +72,6 @@ class LlmModelAdminRead(BaseModel):
 class LlmModelAdminCreate(BaseModel):
     """POST /api/admin/models 的请求体：新增一个模型（对齐 admin.py 的 form_include_pk）。"""
     id: str = Field(min_length=1)
-    name: str = Field(min_length=1)
     base_url: str | None = None
     api_key: str = ""
     logo: str = ""
@@ -89,7 +83,6 @@ class LlmModelAdminCreate(BaseModel):
 
 class LlmModelAdminUpdate(BaseModel):
     """PATCH /api/admin/models/{id} 的请求体：编辑模型，字段都可选（partial update）。"""
-    name: str | None = Field(default=None, min_length=1)
     base_url: str | None = None
     api_key: str | None = None
     logo: str | None = None
@@ -108,7 +101,6 @@ class SetEnabledRequest(BaseModel):
 class LlmModelExportItem(BaseModel):
     """导出/导入用的单条模型配置（含明文 api_key，仅管理员接口使用）。"""
     id: str = Field(min_length=1)
-    name: str = Field(min_length=1)
     base_url: str | None = None
     api_key: str = ""
     logo: str = ""

@@ -27,6 +27,7 @@ import {
   type ModelExportBundle,
   type ModelExportItem,
 } from '@/lib/api'
+import { ArrowDown, ArrowUp, ArrowUpToLine } from 'lucide-react'
 import { ModelIcon } from '@/lib/lobeIcon'
 import styles from './index.module.scss'
 
@@ -70,7 +71,12 @@ export default function Models() {
   const [loading, setLoading] = useState(false)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [testingId, setTestingId] = useState<string | null>(null)
+  const [reorderingId, setReorderingId] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  /** 新建/复制时追加到列表末尾的排序权重 */
+  const nextSortOrder = () =>
+    data.reduce((max, m) => Math.max(max, m.sort_order), -1) + 1
 
   // 新建 / 编辑抽屉；editing=null 且 open=true 表示新建或复制
   const [open, setOpen] = useState(false)
@@ -107,7 +113,7 @@ export default function Models() {
     setEditing(null)
     setIsCopy(false)
     form.resetFields()
-    form.setFieldsValue({ vision: false, enabled: true, cost: 1, sort_order: 0 })
+    form.setFieldsValue({ vision: false, enabled: true, cost: 1 })
     setOpen(true)
   }
 
@@ -116,13 +122,11 @@ export default function Models() {
     setIsCopy(false)
     form.setFieldsValue({
       id: model.id,
-      name: model.name,
       base_url: model.base_url,
       api_key: '', // 敏感值不回填脱敏串；留空表示不改
       logo: model.logo,
       vision: model.vision,
       cost: model.cost,
-      sort_order: model.sort_order,
       enabled: model.enabled,
     })
     setOpen(true)
@@ -135,13 +139,11 @@ export default function Models() {
     form.resetFields()
     form.setFieldsValue({
       id: suggestCopyId(model.id),
-      name: `${model.name}（副本）`,
       base_url: model.base_url,
       api_key: '', // 列表里是脱敏值，复制后需重新填写
       logo: model.logo,
       vision: model.vision,
       cost: model.cost,
-      sort_order: model.sort_order,
       enabled: model.enabled,
     })
     setOpen(true)
@@ -162,7 +164,8 @@ export default function Models() {
       await updateModel(editing.id, payload)
       message.success('已保存')
     } else {
-      await createModel(values)
+      // 新建/复制默认排到列表末尾，不再手填 sort_order
+      await createModel({ ...values, sort_order: nextSortOrder() })
       message.success(isCopy ? '已复制创建' : '已创建')
     }
     closeDrawer()
@@ -216,8 +219,8 @@ export default function Models() {
         return
       }
       for (const m of models) {
-        if (!m.id || !m.name) {
-          throw new Error(`模型配置缺少 id 或 name：${m.id ?? '（无 id）'}`)
+        if (!m.id) {
+          throw new Error(`模型配置缺少 id：${m.id ?? '（无 id）'}`)
         }
       }
 
@@ -237,6 +240,46 @@ export default function Models() {
     }
   }
 
+  // 行内排序：与相邻项交换 sort_order，置顶则压到当前最小值之前
+  const handleReorder = async (id: string, action: 'up' | 'down' | 'top') => {
+    const index = data.findIndex((m) => m.id === id)
+    if (index < 0) return
+
+    setReorderingId(id)
+    try {
+      if (action === 'up') {
+        if (index === 0) return
+        const current = data[index]
+        const prev = data[index - 1]
+        await Promise.all([
+          updateModel(current.id, { sort_order: prev.sort_order }),
+          updateModel(prev.id, { sort_order: current.sort_order }),
+        ])
+        message.success('已上移')
+      } else if (action === 'down') {
+        if (index === data.length - 1) return
+        const current = data[index]
+        const next = data[index + 1]
+        await Promise.all([
+          updateModel(current.id, { sort_order: next.sort_order }),
+          updateModel(next.id, { sort_order: current.sort_order }),
+        ])
+        message.success('已下移')
+      } else {
+        if (index === 0) return
+        const current = data[index]
+        const topOrder = data[0].sort_order
+        await updateModel(current.id, { sort_order: topOrder - 1 })
+        message.success('已置顶')
+      }
+      fetchData()
+    } catch {
+      /* http 拦截器已提示 */
+    } finally {
+      setReorderingId(null)
+    }
+  }
+
   // 探测单条模型的 base_url / api_key / 模型名是否可用
   const handleTest = async (row: AdminModel) => {
     setTestingId(row.id)
@@ -244,9 +287,9 @@ export default function Models() {
       const result = await testModel(row.id)
       const latency = result.latency_ms != null ? `（${result.latency_ms}ms）` : ''
       if (result.ok) {
-        message.success(`${row.name}：${result.message}${latency}`)
+        message.success(`${row.id}：${result.message}${latency}`)
       } else {
-        message.error(`${row.name}：${result.message}${latency}`)
+        message.error(`${row.id}：${result.message}${latency}`)
       }
     } catch {
       /* http 拦截器已提示 */
@@ -256,7 +299,45 @@ export default function Models() {
   }
 
   const columns: ColumnsType<AdminModel> = [
-    { title: '排序', dataIndex: 'sort_order', width: 70, fixed: 'left' },
+    {
+      title: '排序',
+      width: 110,
+      fixed: 'left',
+      render: (_, row, index) => {
+        const busy = reorderingId !== null
+        const isFirst = index === 0
+        const isLast = index === data.length - 1
+        return (
+          <Space size={0} className={styles.sortActions}>
+            <Button
+              type="text"
+              size="small"
+              title="上移"
+              disabled={isFirst || busy}
+              loading={reorderingId === row.id}
+              icon={<ArrowUp size={14} />}
+              onClick={() => handleReorder(row.id, 'up')}
+            />
+            <Button
+              type="text"
+              size="small"
+              title="下移"
+              disabled={isLast || busy}
+              icon={<ArrowDown size={14} />}
+              onClick={() => handleReorder(row.id, 'down')}
+            />
+            <Button
+              type="text"
+              size="small"
+              title="置顶"
+              disabled={isFirst || busy}
+              icon={<ArrowUpToLine size={14} />}
+              onClick={() => handleReorder(row.id, 'top')}
+            />
+          </Space>
+        )
+      },
+    },
     {
       title: '状态',
       dataIndex: 'enabled',
@@ -281,8 +362,7 @@ export default function Models() {
           '—'
         ),
     },
-    { title: '模型 ID', dataIndex: 'id', width: 200, ellipsis: true, fixed: 'left' },
-    { title: '显示名', dataIndex: 'name', width: 160, ellipsis: true },
+    { title: '模型 ID', dataIndex: 'id', width: 220, ellipsis: true, fixed: 'left' },
     { title: 'Base URL', dataIndex: 'base_url', width: 220, ellipsis: true, render: (v: string | null) => v || '（官方）' },
     { title: 'API Key', dataIndex: 'api_key', width: 140, render: (v: string) => <span className={styles.secret}>{v || '—'}</span> },
     { title: '识图', dataIndex: 'vision', width: 70, render: (v: boolean) => (v ? '✓' : '—') },
@@ -349,7 +429,7 @@ export default function Models() {
         columns={columns}
         dataSource={data}
         loading={loading}
-        scroll={{ x: 1280 }}
+        scroll={{ x: 1120 }}
         rowSelection={{
           fixed: true,
           selectedRowKeys: selectedIds,
@@ -377,9 +457,6 @@ export default function Models() {
           <Form.Item label="模型 ID" name="id" rules={[{ required: true, message: '请填写模型 ID（主键）' }]}>
             {/* 编辑时主键不可改 */}
             <Input disabled={!!editing} placeholder="如 qwen3-coder-next" />
-          </Form.Item>
-          <Form.Item label="显示名" name="name" rules={[{ required: true, message: '请填写显示名' }]}>
-            <Input placeholder="如 Qwen3 Coder Next" />
           </Form.Item>
           <Form.Item label="Base URL（空=官方）" name="base_url">
             <Input placeholder="OpenAI 兼容端点，留空用官方" />
@@ -427,9 +504,6 @@ export default function Models() {
           <Space size="large">
             <Form.Item label="倍率" name="cost">
               <InputNumber min={1} />
-            </Form.Item>
-            <Form.Item label="排序" name="sort_order">
-              <InputNumber />
             </Form.Item>
             <Form.Item label="识图" name="vision" valuePropName="checked">
               <Switch />

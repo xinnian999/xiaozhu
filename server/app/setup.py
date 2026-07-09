@@ -73,7 +73,7 @@ def _render_form(error: str = "") -> str:
     """渲染初始化向导表单。error 非空时在顶部显示红色错误条。
 
     模型区是「动态手填」：默认一行，可增删。每行手填全部字段
-    （模型 ID / 显示名 / Base URL / API Key / icon / 识图 / 倍率）。
+    （模型 ID / Base URL / API Key / icon / 识图 / 倍率）。
     提交时前端把所有行序列化成一个隐藏字段 models(JSON)，后端解析入库。
     """
     err_html = f'<div class="err">{html.escape(error)}</div>' if error else ""
@@ -177,10 +177,7 @@ def _render_form(error: str = "") -> str:
     card.innerHTML =
       '<div class="mc-head"><span class="mc-idx">模型</span>' +
       '<button type="button" class="mc-del">删除</button></div>' +
-      '<div class="row2">' +
-        '<div><label>模型 ID</label><input data-k="id" placeholder="如 qwen3-coder-next"></div>' +
-        '<div><label>显示名</label><input data-k="name" placeholder="如 Qwen3 Coder"></div>' +
-      '</div>' +
+      '<label>模型 ID</label><input data-k="id" placeholder="如 qwen3-coder-next">' +
       '<label>Base URL</label>' +
       '<input data-k="base_url" placeholder="https://your-proxy.example.com/v1">' +
       '<label>API Key</label>' +
@@ -252,8 +249,8 @@ async def setup_submit(
     """处理初始化提交：建首个管理员 + 手动创建模型 + 写 SMTP。全部在一个事务里。
 
     models 是前端序列化的 JSON 数组，每个元素含
-    {{id, name, base_url, api_key, logo, cost, vision}}。逐条 upsert 进 llm_models，
-    全部启用、sort_order 按顺序。要求至少一条、且每条 id/name/base_url/api_key 齐全。
+    {{id, base_url, api_key, logo, cost, vision}}。逐条 upsert 进 llm_models，
+    全部启用、sort_order 按顺序。要求至少一条、且每条 id/base_url/api_key 齐全。
     再次校验「未初始化」——不只信缓存，防止已初始化后有人重复 POST 抢建管理员。
     """
     # 防重复：已初始化直接回登录页（自锁）
@@ -279,13 +276,12 @@ async def setup_submit(
         if not isinstance(r, dict):
             continue
         mid = str(r.get("id", "")).strip()
-        name = str(r.get("name", "")).strip()
         b = str(r.get("base_url", "")).strip()
         k = str(r.get("api_key", "")).strip()
-        # 每条必须四要素齐全，否则整体退回让用户补
-        if not (mid and name and b and k):
+        # 每条必须三要素齐全，否则整体退回让用户补
+        if not (mid and b and k):
             return HTMLResponse(
-                _render_form("每个模型的 ID / 显示名 / Base URL / API Key 都要填"),
+                _render_form("每个模型的 ID / Base URL / API Key 都要填"),
                 status_code=400,
             )
         if mid in seen_ids:
@@ -297,7 +293,7 @@ async def setup_submit(
         except (TypeError, ValueError):
             cost = 1
         parsed.append({
-            "id": mid, "name": name, "base_url": b, "api_key": k,
+            "id": mid, "base_url": b, "api_key": k,
             "logo": str(r.get("logo", "")).strip(),
             "vision": bool(r.get("vision", False)),
             "cost": cost,
@@ -323,7 +319,6 @@ async def setup_submit(
             await db.execute(select(LlmModel).where(LlmModel.id == m["id"]))
         ).scalar_one_or_none()
         if existing is not None:
-            existing.name = m["name"]
             existing.base_url = m["base_url"]
             existing.api_key = m["api_key"]
             existing.logo = m["logo"]
@@ -333,7 +328,7 @@ async def setup_submit(
             existing.sort_order = i
         else:
             db.add(LlmModel(
-                id=m["id"], name=m["name"], base_url=m["base_url"], api_key=m["api_key"],
+                id=m["id"], base_url=m["base_url"], api_key=m["api_key"],
                 logo=m["logo"], vision=m["vision"], cost=m["cost"], enabled=True, sort_order=i,
             ))
     # 3) SMTP（选填）：只写非空项，复用 runtime_config 的 upsert 语义

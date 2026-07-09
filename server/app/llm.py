@@ -23,9 +23,9 @@ from app.models.llm_config import LlmModel
 # vision / cost 都是实测标定过的值（见 scripts/check_vision.py 与 billing.py），别凭记忆改。
 # _env_key 仅用于首次播种时去 .env 的 API_KEY_* 取对应 key，不入库、不是模型字段。
 SEED_MODELS = [
-    {"id": "qwen3-coder-next", "name": "Qwen3 Coder Next", "logo": "Qwen.Color", "vision": False, "cost": 1, "_env_key": "qwen"},
-    {"id": "qwen3.6-plus", "name": "Qwen3.6 Plus", "logo": "Qwen.Color", "vision": True, "cost": 1, "_env_key": "qwen"},
-    {"id": "gpt-5.5", "name": "GPT-5.5", "logo": "OpenAI", "vision": False, "cost": 2, "_env_key": "gpt"},
+    {"id": "qwen3-coder-next", "logo": "Qwen.Color", "vision": False, "cost": 1, "_env_key": "qwen"},
+    {"id": "qwen3.6-plus", "logo": "Qwen.Color", "vision": True, "cost": 1, "_env_key": "qwen"},
+    {"id": "gpt-5.5", "logo": "OpenAI", "vision": False, "cost": 2, "_env_key": "gpt"},
 ]
 
 
@@ -47,7 +47,6 @@ async def reload_registry(session: AsyncSession) -> None:
     _MODELS_BY_ID = {
         m.id: {
             "id": m.id,
-            "name": m.name,
             "base_url": m.base_url,
             "api_key": m.api_key,
             "logo": m.logo,
@@ -82,7 +81,7 @@ def default_model_id() -> str:
 def public_models() -> list[dict]:
     """给前端的模型清单。只吐已启用模型的 id / label / icon / vision / cost ——
     故意不含 api_key（密钥，绝不外吐）。
-    字段名沿用前端约定：label=name、icon=logo。
+    字段名沿用前端约定：label=id、icon=logo。
     """
     result = []
     for mid in _ORDERED_IDS:
@@ -90,7 +89,7 @@ def public_models() -> list[dict]:
         result.append(
             {
                 "id": m["id"],
-                "label": m["name"],
+                "label": m["id"],
                 "icon": m["logo"],
                 "vision": m["vision"],
                 "cost": m["cost"],
@@ -156,7 +155,6 @@ async def ensure_seeded(session: AsyncSession) -> None:
         session.add(
             LlmModel(
                 id=m["id"],
-                name=m["name"],
                 base_url=base_url,
                 api_key=env_keys.get(m["_env_key"], ""),
                 logo=m["logo"],

@@ -236,7 +236,6 @@ export async function updateSetting(key: string, value: string) {
 // ── LLM 模型 ──────────────────────────────────────────────────
 export type AdminModel = {
   id: string
-  name: string
   base_url: string | null
   api_key: string
   logo: string
@@ -248,7 +247,6 @@ export type AdminModel = {
 
 export type ModelCreatePayload = {
   id: string
-  name: string
   base_url?: string | null
   api_key?: string
   logo?: string
@@ -263,7 +261,6 @@ export type ModelUpdatePayload = Partial<Omit<ModelCreatePayload, 'id'>>
 /** 导出/导入用的单条模型配置（含明文 api_key）。 */
 export type ModelExportItem = ModelCreatePayload & {
   id: string
-  name: string
 }
 
 export type ModelExportBundle = {

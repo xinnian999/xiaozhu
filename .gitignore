@@ -7,7 +7,7 @@ dist-ssr
 *.local
 # 生产模式下拷到后端的前端产物（由 web/dist 拷贝而来，不提交）
 server/static/
-
+server/static-admin/
 # 日志
 logs
 *.log

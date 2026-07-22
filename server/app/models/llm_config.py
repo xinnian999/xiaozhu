@@ -52,11 +52,14 @@ class LlmModel(Base):
 
 # ── Pydantic Schemas ───────────────────────────────────────────────────────────
 
+from typing import Literal  # noqa: E402
+
 from pydantic import BaseModel, Field  # noqa: E402
 
 
 class LlmModelAdminRead(BaseModel):
     """管理后台模型列表响应。api_key 脱敏后再放进这个字段，脱敏逻辑在路由层处理。"""
+
     model_config = {"from_attributes": True}
 
     id: str
@@ -71,6 +74,7 @@ class LlmModelAdminRead(BaseModel):
 
 class LlmModelAdminCreate(BaseModel):
     """POST /api/admin/models 的请求体：新增一个模型（对齐 admin.py 的 form_include_pk）。"""
+
     id: str = Field(min_length=1)
     base_url: str | None = None
     api_key: str = ""
@@ -83,6 +87,7 @@ class LlmModelAdminCreate(BaseModel):
 
 class LlmModelAdminUpdate(BaseModel):
     """PATCH /api/admin/models/{id} 的请求体：编辑模型，字段都可选（partial update）。"""
+
     base_url: str | None = None
     api_key: str | None = None
     logo: str | None = None
@@ -94,12 +99,16 @@ class LlmModelAdminUpdate(BaseModel):
 
 class SetEnabledRequest(BaseModel):
     """POST /api/admin/models/set-enabled 的请求体：批量启停。"""
+
     model_ids: list[str] = Field(min_length=1)
     enabled: bool
 
 
 class LlmModelExportItem(BaseModel):
     """导出/导入用的单条模型配置（含明文 api_key，仅管理员接口使用）。"""
+
+    model_config = {"from_attributes": True}
+
     id: str = Field(min_length=1)
     base_url: str | None = None
     api_key: str = ""
@@ -112,6 +121,7 @@ class LlmModelExportItem(BaseModel):
 
 class LlmModelExportBundle(BaseModel):
     """GET /api/admin/models/export 的响应体：带版本号的导出包，方便跨环境迁移。"""
+
     version: int = 1
     exported_at: datetime
     models: list[LlmModelExportItem]
@@ -119,11 +129,13 @@ class LlmModelExportBundle(BaseModel):
 
 class LlmModelImportRequest(BaseModel):
     """POST /api/admin/models/import 的请求体：按 id upsert 导入模型配置。"""
+
     models: list[LlmModelExportItem] = Field(min_length=1)
 
 
 class LlmModelImportResult(BaseModel):
     """导入结果统计。"""
+
     created: int
     updated: int
     total: int
@@ -131,7 +143,35 @@ class LlmModelImportResult(BaseModel):
 
 class LlmModelTestResult(BaseModel):
     """POST /api/admin/models/{id}/test 的响应体：连通性探测结果。"""
+
     ok: bool
     message: str
     latency_ms: int | None = None
 
+
+ModelTestCapability = Literal[
+    "connectivity",
+    "vision",
+    "thinking",
+    "tools",
+]
+ModelTestStatus = Literal["passed", "unsupported", "failed"]
+
+
+class LlmModelCapabilityTestDetail(BaseModel):
+    """组合能力卡中的子项结果，目前用于思考能力的三项细分。"""
+
+    key: Literal["thinking", "reasoning_content", "disable_thinking"]
+    label: str
+    status: ModelTestStatus
+    message: str
+
+
+class LlmModelCapabilityTestResult(BaseModel):
+    """单项能力探测结果；管理后台会逐项调用，以便实时展示进度。"""
+
+    capability: ModelTestCapability
+    status: ModelTestStatus
+    message: str
+    latency_ms: int | None = None
+    details: list[LlmModelCapabilityTestDetail] = Field(default_factory=list)

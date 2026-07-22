@@ -5,7 +5,10 @@ api_key 在列表/详情响应里脱敏（编辑时前端仍可传明文新值�
 """
 
 import asyncio
+import base64
+import struct
 import time
+import zlib
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Response
@@ -20,11 +23,15 @@ from app.models.llm_config import (
     LlmModelAdminCreate,
     LlmModelAdminRead,
     LlmModelAdminUpdate,
+    LlmModelCapabilityTestDetail,
     LlmModelExportBundle,
     LlmModelExportItem,
     LlmModelImportRequest,
     LlmModelImportResult,
+    LlmModelCapabilityTestResult,
     LlmModelTestResult,
+    ModelTestCapability,
+    ModelTestStatus,
     SetEnabledRequest,
 )
 
@@ -54,6 +61,95 @@ def _message_text(content: object) -> str:
     return str(content).strip()
 
 
+def _solid_png_data_url(red: int, green: int, blue: int) -> str:
+    """用标准库生成 32×32 纯色 PNG，避免为识图探测引入图片依赖。"""
+    width = height = 32
+    raw = b"".join(b"\x00" + bytes((red, green, blue)) * width for _ in range(height))
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data))
+            + kind
+            + data
+            + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+        )
+
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+    return "data:image/png;base64," + base64.b64encode(png).decode()
+
+
+def _reasoning_tokens(resp: object) -> int:
+    """兼容不同中转/LangChain 版本，提取可观察到的推理 token 数。"""
+    response_metadata = getattr(resp, "response_metadata", {}) or {}
+    usage_metadata = getattr(resp, "usage_metadata", {}) or {}
+    candidates = [
+        response_metadata.get("token_usage", {}),
+        response_metadata.get("usage", {}),
+        usage_metadata,
+    ]
+    for usage in candidates:
+        if not isinstance(usage, dict):
+            continue
+        details = (
+            usage.get("completion_tokens_details")
+            or usage.get("output_token_details")
+            or {}
+        )
+        if isinstance(details, dict):
+            value = details.get("reasoning_tokens") or details.get("reasoning")
+            if isinstance(value, int):
+                return value
+    return 0
+
+
+def _has_reasoning_signal(resp: object) -> bool:
+    additional = getattr(resp, "additional_kwargs", {}) or {}
+    if isinstance(additional, dict):
+        for key in ("reasoning_content", "reasoning", "reasoning_details"):
+            if additional.get(key):
+                return True
+    return _reasoning_tokens(resp) > 0
+
+
+def _reasoning_content(resp: object) -> str:
+    """只读取中转明确返回的 reasoning_content，不用 token 数推测正文。"""
+    additional = getattr(resp, "additional_kwargs", {}) or {}
+    if not isinstance(additional, dict):
+        return ""
+    content = additional.get("reasoning_content")
+    return _message_text(content) if content else ""
+
+
+async def _invoke_with_timeout(
+    llm_instance: object, messages: list[HumanMessage], **kwargs: object
+):
+    return await asyncio.wait_for(
+        llm_instance.ainvoke(messages, **kwargs),  # type: ignore[attr-defined]
+        timeout=_TEST_TIMEOUT_SEC,
+    )
+
+
+def _capability_result(
+    capability: ModelTestCapability,
+    status: ModelTestStatus,
+    message: str,
+    started: float,
+    details: list[LlmModelCapabilityTestDetail] | None = None,
+) -> LlmModelCapabilityTestResult:
+    return LlmModelCapabilityTestResult(
+        capability=capability,
+        status=status,
+        message=message,
+        latency_ms=int((time.perf_counter() - started) * 1000),
+        details=details or [],
+    )
+
+
 @router.get("", response_model=list[LlmModelAdminRead])
 async def list_models(db: AsyncSession = Depends(get_db)) -> list[LlmModelAdminRead]:
     """全量列出模型，按排序权重展示（对齐前端清单的排序习惯）。"""
@@ -65,9 +161,7 @@ async def list_models(db: AsyncSession = Depends(get_db)) -> list[LlmModelAdminR
 async def export_models(db: AsyncSession = Depends(get_db)) -> LlmModelExportBundle:
     """导出全部模型配置（含明文 api_key），用于跨环境迁移。"""
     result = await db.execute(select(LlmModel).order_by(LlmModel.sort_order))
-    models = [
-        LlmModelExportItem.model_validate(m) for m in result.scalars().all()
-    ]
+    models = [LlmModelExportItem.model_validate(m) for m in result.scalars().all()]
     return LlmModelExportBundle(exported_at=datetime.now(), models=models)
 
 
@@ -134,7 +228,9 @@ async def update_model(
 
 
 @router.post("/{model_id}/test", response_model=LlmModelTestResult)
-async def test_model(model_id: str, db: AsyncSession = Depends(get_db)) -> LlmModelTestResult:
+async def test_model(
+    model_id: str, db: AsyncSession = Depends(get_db)
+) -> LlmModelTestResult:
     """探测模型连通性：发一条极简对话，验证 base_url / api_key / 模型名是否可用。"""
     model = await db.get(LlmModel, model_id)
     if model is None:
@@ -151,9 +247,13 @@ async def test_model(model_id: str, db: AsyncSession = Depends(get_db)) -> LlmMo
     started = time.perf_counter()
     try:
         resp = await asyncio.wait_for(
-            llm_instance.ainvoke([
-                HumanMessage(content='Reply with exactly the word "ok" without any other text.'),
-            ]),
+            llm_instance.ainvoke(
+                [
+                    HumanMessage(
+                        content='Reply with exactly the word "ok" without any other text.'
+                    ),
+                ]
+            ),
             timeout=_TEST_TIMEOUT_SEC,
         )
         latency_ms = int((time.perf_counter() - started) * 1000)
@@ -178,6 +278,236 @@ async def test_model(model_id: str, db: AsyncSession = Depends(get_db)) -> LlmMo
         )
 
 
+@router.post(
+    "/{model_id}/test/{capability}",
+    response_model=LlmModelCapabilityTestResult,
+)
+async def test_model_capability(
+    model_id: str,
+    capability: ModelTestCapability,
+    db: AsyncSession = Depends(get_db),
+) -> LlmModelCapabilityTestResult:
+    """独立探测一项模型能力，供“全面测试”弹窗逐项执行并实时展示。"""
+    model = await db.get(LlmModel, model_id)
+    if model is None:
+        raise HTTPException(status_code=404, detail="模型不存在")
+    if not model.api_key:
+        return LlmModelCapabilityTestResult(
+            capability=capability,
+            status="failed",
+            message="未配置 API Key",
+        )
+
+    try:
+        llm_instance = llm.build_llm(model_id)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        return LlmModelCapabilityTestResult(
+            capability=capability,
+            status="failed",
+            message=detail,
+        )
+
+    started = time.perf_counter()
+    try:
+        if capability == "connectivity":
+            resp = await _invoke_with_timeout(
+                llm_instance,
+                [
+                    HumanMessage(
+                        content='Reply with exactly the word "ok" without any other text.'
+                    )
+                ],
+            )
+            preview = _message_text(resp.content)
+            preview = preview[:60] + ("…" if len(preview) > 60 else "")
+            return _capability_result(
+                capability,
+                "passed",
+                f"连接成功，模型已响应：{preview or '空回复'}",
+                started,
+            )
+
+        if capability == "vision":
+            resp = await _invoke_with_timeout(
+                llm_instance,
+                [
+                    HumanMessage(
+                        content=[
+                            {
+                                "type": "text",
+                                "text": "这张纯色图片是什么颜色？只回答颜色名称。",
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": _solid_png_data_url(230, 35, 45)},
+                            },
+                        ]
+                    )
+                ],
+            )
+            answer = _message_text(resp.content)
+            if "红" in answer or "red" in answer.lower():
+                return _capability_result(
+                    capability,
+                    "passed",
+                    f"正确识别红色测试图（{answer[:50]}）",
+                    started,
+                )
+            return _capability_result(
+                capability,
+                "unsupported",
+                f"图片请求已返回，但未正确识别红色测试图（{answer[:60] or '空回复'}）",
+                started,
+            )
+
+        if capability == "thinking":
+            resp = await _invoke_with_timeout(
+                llm_instance,
+                [HumanMessage(content="请认真计算 137 × 29，只回答最终数字。")],
+                extra_body={"enable_thinking": True},
+            )
+            tokens = _reasoning_tokens(resp)
+            content = _reasoning_content(resp)
+            has_reasoning = _has_reasoning_signal(resp)
+            details = [
+                LlmModelCapabilityTestDetail(
+                    key="thinking",
+                    label="思考信号",
+                    status="passed" if has_reasoning else "unsupported",
+                    message=(
+                        f"检测到 {tokens} 个推理 token"
+                        if tokens
+                        else "检测到模型返回的推理信号"
+                        if has_reasoning
+                        else "未检测到推理内容或推理 token"
+                    ),
+                ),
+                LlmModelCapabilityTestDetail(
+                    key="reasoning_content",
+                    label="推理内容",
+                    status="passed" if content else "unsupported",
+                    message=(
+                        f"返回 {len(content)} 个字符"
+                        if content
+                        else "未返回 reasoning_content 文本"
+                    ),
+                ),
+            ]
+
+            if not has_reasoning:
+                details.append(
+                    LlmModelCapabilityTestDetail(
+                        key="disable_thinking",
+                        label="关闭思考",
+                        status="unsupported",
+                        message="未先检测到思考，无法验证关闭开关",
+                    )
+                )
+                return _capability_result(
+                    capability,
+                    "unsupported",
+                    "未检测到模型思考能力",
+                    started,
+                    details,
+                )
+
+            try:
+                disabled_resp = await _invoke_with_timeout(
+                    llm_instance,
+                    [HumanMessage(content="请计算 137 × 29，只回答最终数字。")],
+                    extra_body={"enable_thinking": False},
+                )
+                can_disable = not _has_reasoning_signal(disabled_resp)
+                details.append(
+                    LlmModelCapabilityTestDetail(
+                        key="disable_thinking",
+                        label="关闭思考",
+                        status="passed" if can_disable else "failed",
+                        message=(
+                            "关闭后推理信号已消失"
+                            if can_disable
+                            else "关闭后仍检测到推理信号，开关可能被忽略"
+                        ),
+                    )
+                )
+            except TimeoutError:
+                can_disable = False
+                details.append(
+                    LlmModelCapabilityTestDetail(
+                        key="disable_thinking",
+                        label="关闭思考",
+                        status="failed",
+                        message=f"关闭验证超时（>{_TEST_TIMEOUT_SEC}s）",
+                    )
+                )
+            except Exception as exc:
+                can_disable = False
+                details.append(
+                    LlmModelCapabilityTestDetail(
+                        key="disable_thinking",
+                        label="关闭思考",
+                        status="failed",
+                        message=f"{type(exc).__name__}: {str(exc)[:120]}",
+                    )
+                )
+
+            status: ModelTestStatus = (
+                "failed" if not can_disable else "passed" if content else "unsupported"
+            )
+            return _capability_result(
+                capability,
+                status,
+                "已完成思考能力组合测试",
+                started,
+                details,
+            )
+
+        tool_schema = {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "查询指定城市当前天气",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string", "description": "城市名"}},
+                    "required": ["city"],
+                },
+            },
+        }
+        tool_llm = llm_instance.bind_tools([tool_schema], tool_choice="required")
+        resp = await _invoke_with_timeout(
+            tool_llm,
+            [HumanMessage(content="请调用工具查询北京天气，不要直接回答。")],
+        )
+        tool_calls = getattr(resp, "tool_calls", []) or []
+        if tool_calls and tool_calls[0].get("name") == "get_weather":
+            args = tool_calls[0].get("args", {})
+            return _capability_result(
+                capability,
+                "passed",
+                f"成功生成 get_weather 工具调用（参数：{args}）",
+                started,
+            )
+        return _capability_result(
+            capability,
+            "unsupported",
+            "请求成功，但模型没有返回规范的工具调用",
+            started,
+        )
+    except TimeoutError:
+        return _capability_result(
+            capability, "failed", f"请求超时（>{_TEST_TIMEOUT_SEC}s）", started
+        )
+    except Exception as exc:
+        return _capability_result(
+            capability,
+            "failed",
+            f"{type(exc).__name__}: {str(exc)[:200]}",
+            started,
+        )
+
+
 @router.delete("/{model_id}", status_code=204)
 async def delete_model(model_id: str, db: AsyncSession = Depends(get_db)) -> Response:
     model = await db.get(LlmModel, model_id)
@@ -196,7 +526,9 @@ async def set_enabled_batch(
 ) -> list[LlmModelAdminRead]:
     """批量启用/禁用（对齐 admin.py 的 enable_selected / disable_selected 两个 action）。"""
     await db.execute(
-        update(LlmModel).where(LlmModel.id.in_(body.model_ids)).values(enabled=body.enabled)
+        update(LlmModel)
+        .where(LlmModel.id.in_(body.model_ids))
+        .values(enabled=body.enabled)
     )
     await db.commit()
     await llm.refresh()

@@ -11,6 +11,9 @@ import {
   Space,
   Tag,
   Popconfirm,
+  Modal,
+  Progress,
+  Spin,
   App as AntdApp,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
@@ -22,12 +25,27 @@ import {
   updateModel,
   deleteModel,
   setModelsEnabled,
-  testModel,
+  testModelCapability,
   type AdminModel,
+  type ModelCapabilityTestResult,
   type ModelExportBundle,
   type ModelExportItem,
+  type ModelTestCapability,
 } from '@/lib/api'
-import { ArrowDown, ArrowUp, ArrowUpToLine } from 'lucide-react'
+import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpToLine,
+  BrainCircuit,
+  CircleCheck,
+  CircleHelp,
+  CircleX,
+  ImageIcon,
+  RotateCw,
+  Wrench,
+  Wifi,
+  type LucideIcon,
+} from 'lucide-react'
 import { ModelIcon } from '@/lib/lobeIcon'
 import styles from './index.module.scss'
 
@@ -45,6 +63,34 @@ const LOGO_OPTIONS = [
   { value: 'Zhipu.Color', label: '智谱 GLM' },
   { value: 'MiniMax.Color', label: 'MiniMax' },
 ]
+
+const CAPABILITY_TESTS: Array<{
+  key: ModelTestCapability
+  label: string
+  description: string
+  icon: LucideIcon
+}> = [
+  { key: 'connectivity', label: '连通性', description: '验证地址、密钥与模型名称可正常响应', icon: Wifi },
+  { key: 'vision', label: '识图能力', description: '发送一张已知颜色图片并校验识别结果', icon: ImageIcon },
+  {
+    key: 'thinking',
+    label: '思考能力',
+    description: '测试思考信号、推理内容与关闭思考开关',
+    icon: BrainCircuit,
+  },
+  { key: 'tools', label: '工具调用', description: '要求模型生成符合规范的函数调用', icon: Wrench },
+]
+
+type TestItemState = {
+  phase: 'pending' | 'running' | 'done'
+  result?: ModelCapabilityTestResult
+}
+
+function emptyTestStates(): Record<ModelTestCapability, TestItemState> {
+  return Object.fromEntries(
+    CAPABILITY_TESTS.map((item) => [item.key, { phase: 'pending' }]),
+  ) as Record<ModelTestCapability, TestItemState>
+}
 
 /** 解析导入 JSON：支持标准导出包，也兼容直接的 models 数组。 */
 function parseImportFile(json: unknown): ModelExportItem[] {
@@ -70,8 +116,11 @@ export default function Models() {
   const [data, setData] = useState<AdminModel[]>([])
   const [loading, setLoading] = useState(false)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
-  const [testingId, setTestingId] = useState<string | null>(null)
   const [reorderingId, setReorderingId] = useState<string | null>(null)
+  const [testTarget, setTestTarget] = useState<AdminModel | null>(null)
+  const [testStates, setTestStates] = useState(emptyTestStates)
+  const [testsRunning, setTestsRunning] = useState(false)
+  const testRunRef = useRef(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   /** 新建/复制时追加到列表末尾的排序权重 */
@@ -106,6 +155,8 @@ export default function Models() {
   }, [])
 
   useEffect(() => {
+    // 初次挂载需立即拉取服务端模型清单；fetchData 的引用由 useCallback 保持稳定。
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchData()
   }, [fetchData])
 
@@ -280,23 +331,67 @@ export default function Models() {
     }
   }
 
-  // 探测单条模型的 base_url / api_key / 模型名是否可用
-  const handleTest = async (row: AdminModel) => {
-    setTestingId(row.id)
+  const runCapability = async (
+    row: AdminModel,
+    capability: ModelTestCapability,
+    runId: number,
+  ) => {
+    setTestStates((prev) => ({ ...prev, [capability]: { phase: 'running' } }))
     try {
-      const result = await testModel(row.id)
-      const latency = result.latency_ms != null ? `（${result.latency_ms}ms）` : ''
-      if (result.ok) {
-        message.success(`${row.id}：${result.message}${latency}`)
-      } else {
-        message.error(`${row.id}：${result.message}${latency}`)
-      }
-    } catch {
-      /* http 拦截器已提示 */
-    } finally {
-      setTestingId(null)
+      const result = await testModelCapability(row.id, capability)
+      if (testRunRef.current !== runId) return
+      setTestStates((prev) => ({ ...prev, [capability]: { phase: 'done', result } }))
+    } catch (error) {
+      if (testRunRef.current !== runId) return
+      const rawReason = error instanceof Error ? error.message : '未知错误'
+      const timeoutMatch = rawReason.match(/timeout of (\d+)ms exceeded/i)
+      const reason = timeoutMatch
+        ? `等待模型响应超时（${Math.round(Number(timeoutMatch[1]) / 1000)} 秒），请稍后单独重试`
+        : rawReason
+      setTestStates((prev) => ({
+        ...prev,
+        [capability]: {
+          phase: 'done',
+          result: { capability, status: 'failed', message: reason, latency_ms: null, details: [] },
+        },
+      }))
     }
   }
+
+  const runAllTests = async (row: AdminModel) => {
+    const runId = ++testRunRef.current
+    setTestStates(emptyTestStates())
+    setTestsRunning(true)
+    for (const item of CAPABILITY_TESTS) {
+      if (testRunRef.current !== runId) return
+      await runCapability(row, item.key, runId)
+    }
+    if (testRunRef.current === runId) setTestsRunning(false)
+  }
+
+  const openFullTest = (row: AdminModel) => {
+    setTestTarget(row)
+    void runAllTests(row)
+  }
+
+  const closeFullTest = () => {
+    testRunRef.current += 1
+    setTestsRunning(false)
+    setTestTarget(null)
+  }
+
+  const retryCapability = async (capability: ModelTestCapability) => {
+    if (!testTarget || testsRunning) return
+    const runId = ++testRunRef.current
+    setTestsRunning(true)
+    await runCapability(testTarget, capability, runId)
+    if (testRunRef.current === runId) setTestsRunning(false)
+  }
+
+  const completedTests = CAPABILITY_TESTS.filter((item) => testStates[item.key].phase === 'done').length
+  const passedTests = CAPABILITY_TESTS.filter(
+    (item) => testStates[item.key].result?.status === 'passed',
+  ).length
 
   const columns: ColumnsType<AdminModel> = [
     {
@@ -369,7 +464,7 @@ export default function Models() {
     { title: '倍率', dataIndex: 'cost', width: 70 },
     {
       title: '操作',
-      width: 210,
+      width: 250,
       fixed: 'right',
       render: (_, row) => (
         <Space size={4}>
@@ -382,10 +477,10 @@ export default function Models() {
           <Button
             type="link"
             size="small"
-            loading={testingId === row.id}
-            onClick={() => handleTest(row)}
+            loading={testsRunning && testTarget?.id === row.id}
+            onClick={() => openFullTest(row)}
           >
-            测试
+            全面测试
           </Button>
           <Popconfirm title="确认删除该模型？" onConfirm={() => onDelete(row.id)} okText="删除" cancelText="取消">
             <Button type="link" size="small" danger>
@@ -514,6 +609,129 @@ export default function Models() {
           </Space>
         </Form>
       </Drawer>
+
+
+      <Modal
+        title={null}
+        open={!!testTarget}
+        onCancel={closeFullTest}
+        width={680}
+        destroyOnHidden
+        className={styles.testModal}
+        footer={
+          <div className={styles.testFooter}>
+            <span className={styles.testFootnote}>测试只发送探测请求，不会修改模型配置</span>
+            <Space>
+              <Button onClick={closeFullTest}>关闭</Button>
+              <Button
+                type="primary"
+                icon={<RotateCw size={15} />}
+                loading={testsRunning}
+                onClick={() => testTarget && void runAllTests(testTarget)}
+              >
+                重新测试全部
+              </Button>
+            </Space>
+          </div>
+        }
+      >
+        {testTarget && (
+          <div className={styles.testPanel}>
+            <div className={styles.testHeader}>
+              <div className={styles.testModelIcon}>
+                <ModelIcon name={testTarget.logo} size={30} />
+              </div>
+              <div className={styles.testHeading}>
+                <span className={styles.testEyebrow}>MODEL CAPABILITY CHECK</span>
+                <h2>{testTarget.id}</h2>
+                <p>正在以真实请求验证模型能力，测试项将依次完成。</p>
+              </div>
+              <div className={styles.testScore}>
+                <strong>{passedTests}</strong>
+                <span>/ {CAPABILITY_TESTS.length} 通过</span>
+              </div>
+            </div>
+
+            <Progress
+              percent={Math.round((completedTests / CAPABILITY_TESTS.length) * 100)}
+              showInfo={false}
+              strokeColor="#1677ff"
+              trailColor="rgba(22, 119, 255, 0.10)"
+              className={styles.testProgress}
+            />
+
+            <div className={styles.testList}>
+              {CAPABILITY_TESTS.map((item) => {
+                const state = testStates[item.key]
+                const result = state.result
+                const Icon = item.icon
+                const statusIcon =
+                  state.phase === 'running' ? (
+                    <Spin size="small" />
+                  ) : result?.status === 'passed' ? (
+                    <CircleCheck size={20} />
+                  ) : result?.status === 'unsupported' ? (
+                    <CircleHelp size={20} />
+                  ) : result?.status === 'failed' ? (
+                    <CircleX size={20} />
+                  ) : (
+                    <span className={styles.pendingDot} />
+                  )
+                return (
+                  <div
+                    key={item.key}
+                    className={`${styles.testItem} ${result ? styles[result.status] : ''}`}
+                  >
+                    <div className={styles.testItemIcon}><Icon size={19} /></div>
+                    <div className={styles.testItemBody}>
+                      <div className={styles.testItemTitle}>
+                        <strong>{item.label}</strong>
+                        {result?.latency_ms != null && <span>{result.latency_ms} ms</span>}
+                      </div>
+                      {result?.details?.length ? (
+                        <div className={styles.testDetails}>
+                          {result.details.map((detail) => (
+                            <div key={detail.key} className={styles.testDetail}>
+                              <span data-status={detail.status}>
+                                {detail.status === 'passed' ? (
+                                  <CircleCheck size={13} />
+                                ) : detail.status === 'unsupported' ? (
+                                  <CircleHelp size={13} />
+                                ) : (
+                                  <CircleX size={13} />
+                                )}
+                                {detail.label}
+                              </span>
+                              <em title={detail.message}>{detail.message}</em>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p title={result?.message}>
+                          {result
+                            ? `${result.status === 'failed' ? '失败原因：' : ''}${result.message}`
+                            : state.phase === 'running'
+                              ? '正在发送探测请求…'
+                              : item.description}
+                        </p>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      className={styles.testStatus}
+                      disabled={testsRunning}
+                      title={state.phase === 'done' ? `重新测试${item.label}` : item.description}
+                      onClick={() => state.phase === 'done' && void retryCapability(item.key)}
+                    >
+                      {statusIcon}
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   )
 }

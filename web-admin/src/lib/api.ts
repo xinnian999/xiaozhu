@@ -281,6 +281,35 @@ export type ModelTestResult = {
   latency_ms: number | null
 }
 
+export type ModelTestCapability =
+  | 'connectivity'
+  | 'vision'
+  | 'thinking'
+  | 'tools'
+
+export type ModelCapabilityTestDetail = {
+  key: 'thinking' | 'reasoning_content' | 'disable_thinking'
+  label: string
+  status: 'passed' | 'unsupported' | 'failed'
+  message: string
+}
+
+export type ModelCapabilityTestResult = {
+  capability: ModelTestCapability
+  status: 'passed' | 'unsupported' | 'failed'
+  message: string
+  latency_ms: number | null
+  details: ModelCapabilityTestDetail[]
+}
+
+/**
+ * 后端单次模型调用最多等待 30 秒；“关闭思考”会先开后关、连续调用两次。
+ * 这里给网络与序列化留少量余量，避免全局 10 秒超时把慢推理误报为能力失败。
+ */
+export function modelCapabilityTestTimeout(capability: ModelTestCapability) {
+  return capability === 'thinking' ? 65_000 : 35_000
+}
+
 export async function listModels() {
   const res = await http.get<AdminModel[]>('/api/admin/models')
   return res.data
@@ -296,8 +325,13 @@ export async function importModels(models: ModelExportItem[]) {
   return res.data
 }
 
-export async function testModel(id: string) {
-  const res = await http.post<ModelTestResult>(`/api/admin/models/${encodeURIComponent(id)}/test`)
+export async function testModelCapability(id: string, capability: ModelTestCapability) {
+  const timeout = modelCapabilityTestTimeout(capability)
+  const res = await http.post<ModelCapabilityTestResult>(
+    `/api/admin/models/${encodeURIComponent(id)}/test/${capability}`,
+    undefined,
+    { timeout },
+  )
   return res.data
 }
 

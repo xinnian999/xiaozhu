@@ -10,11 +10,17 @@
 """
 
 from fastapi import HTTPException
-from langchain_openai import ChatOpenAI
+from langchain_core.language_models import BaseChatModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.model_providers import (
+    build_chat_model,
+    canonical_model_values,
+    infer_provider,
+    provider_logo,
+)
 from app.models.llm_config import LlmModel
 
 
@@ -23,9 +29,14 @@ from app.models.llm_config import LlmModel
 # vision / cost 都是实测标定过的值（见 scripts/check_vision.py 与 billing.py），别凭记忆改。
 # _env_key 仅用于首次播种时去 .env 的 API_KEY_* 取对应 key，不入库、不是模型字段。
 SEED_MODELS = [
-    {"id": "qwen3-coder-next", "logo": "Qwen.Color", "vision": False, "cost": 1, "_env_key": "qwen"},
-    {"id": "qwen3.6-plus", "logo": "Qwen.Color", "vision": True, "cost": 1, "_env_key": "qwen"},
-    {"id": "gpt-5.5", "logo": "OpenAI", "vision": False, "cost": 2, "_env_key": "gpt"},
+    {
+        "id": "qwen3-coder-next",
+        "vision": False,
+        "cost": 1,
+        "_env_key": "qwen",
+    },
+    {"id": "qwen3.6-plus", "vision": True, "cost": 1, "_env_key": "qwen"},
+    {"id": "gpt-5.5", "vision": False, "cost": 2, "_env_key": "gpt"},
 ]
 
 
@@ -42,14 +53,17 @@ async def reload_registry(session: AsyncSession) -> None:
     global _MODELS_BY_ID, _ORDERED_IDS
 
     models = (
-        await session.execute(select(LlmModel).order_by(LlmModel.sort_order))
-    ).scalars().all()
+        (await session.execute(select(LlmModel).order_by(LlmModel.sort_order)))
+        .scalars()
+        .all()
+    )
     _MODELS_BY_ID = {
         m.id: {
             "id": m.id,
+            "provider": m.provider,
             "base_url": m.base_url,
             "api_key": m.api_key,
-            "logo": m.logo,
+            "logo": provider_logo(m.provider),
             "vision": m.vision,
             "cost": m.cost,
             "enabled": m.enabled,
@@ -98,7 +112,7 @@ def public_models() -> list[dict]:
     return result
 
 
-def build_llm(model: str) -> ChatOpenAI:
+def build_llm(model: str, *, thinking: bool | None = None) -> BaseChatModel:
     """按模型名构造 LLM 实例。model 必须已通过白名单校验。
 
     api_key / base_url 都取自该模型自己的字段。base_url 为空则走官方地址。
@@ -112,23 +126,7 @@ def build_llm(model: str) -> ChatOpenAI:
             status_code=400,
             detail=f"模型 {model} 未配置 api_key，请在管理后台设置。",
         )
-    return ChatOpenAI(
-        model=model,
-        api_key=api_key,
-        base_url=meta.get("base_url") or None,
-        # 一次 write_file 要塞下整个文件内容，4096 太小，写稍大的页面就会被截断。先给到 16384。
-        max_tokens=16384,
-        # 禁止「并行工具调用」：让模型一次只发一个 tool_call，工具按顺序逐个执行。
-        # 我们一个请求共享同一个 async DB 会话，而 AsyncSession 不允许被并发使用 ——
-        # 模型若一轮同时发多个 write_file，LangGraph 会并发执行，多个 commit 撞在一起报
-        # "transaction is closed" / "_prepare_impl in progress"。串行化后该类竞态彻底消失，
-        # 也更贴合「逐个文件写入、渐进预览」的设计。tools.py 里的 db 锁是第二道保险
-        #（防个别中转无视此参数）。经 model_kwargs 透传到 OpenAI 兼容请求体。
-        model_kwargs={"parallel_tool_calls": False},
-        # 全局关闭 qwen 系的「思考」开关：开着既慢又看不到思维链（中转只回计数），得不偿失。
-        # 经 extra_body 透传，不认识它的模型（gpt 系）会忽略，无副作用。
-        extra_body={"enable_thinking": False},
-    )
+    return build_chat_model(meta, thinking=thinking)
 
 
 async def ensure_seeded(session: AsyncSession) -> None:
@@ -140,7 +138,9 @@ async def ensure_seeded(session: AsyncSession) -> None:
       让模型完全由「系统初始化向导」手动创建 —— 否则会残留一堆空 key 的坏模型。
     幂等：表里已有模型就不动（不覆盖后台 / 向导的改动）。
     """
-    has_model = (await session.execute(select(LlmModel.id).limit(1))).first() is not None
+    has_model = (
+        await session.execute(select(LlmModel.id).limit(1))
+    ).first() is not None
     if has_model:
         return
 
@@ -149,15 +149,18 @@ async def ensure_seeded(session: AsyncSession) -> None:
     if not env_keys:
         return
 
-    base_url = settings.openai_base_url  # 全局中转地址，作为每个模型 base_url 的初始值
+    base_url = settings.openai_base_url  # 老配置是全局中转；只按官方域名识别厂商。
+    provider = infer_provider(base_url)
+    provider, logo, base_url = canonical_model_values(provider, base_url)
 
     for i, m in enumerate(SEED_MODELS):
         session.add(
             LlmModel(
                 id=m["id"],
+                provider=provider,
                 base_url=base_url,
                 api_key=env_keys.get(m["_env_key"], ""),
-                logo=m["logo"],
+                logo=logo,
                 vision=m["vision"],
                 cost=m["cost"],
                 enabled=True,

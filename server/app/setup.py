@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import llm, runtime_config
 from app.db import get_db
 from app.mock_profile import random_avatar_seed, random_nickname
+from app.model_providers import canonical_model_values, provider_catalog
 from app.models.llm_config import LlmModel
 from app.models.user import User
 from app.security import hash_password
@@ -60,24 +61,49 @@ def is_initialized_cached() -> bool:
     return _initialized is True
 
 
-# 向导「添加模型」下拉里给的常见 icon 建议（@lobehub/icons 组件标识符）。
-# 只是 datalist 建议，用户可自由填别的；前端解析不出会自动兜底，不会报错。
-ICON_SUGGESTIONS = [
-    "OpenAI", "Qwen.Color", "Claude.Color", "Gemini.Color", "DeepSeek.Color",
-    "Moonshot", "Doubao.Color", "Grok", "Zhipu.Color", "MiniMax.Color",
-]
-
-
 # ── 向导页 HTML（内联，避免为一次性页面新建模板文件）──────────────────────────
-def _render_form(error: str = "") -> str:
+def _render_form(
+    error: str = "",
+    *,
+    form_values: dict[str, str] | None = None,
+    model_rows: list[dict] | None = None,
+) -> str:
     """渲染初始化向导表单。error 非空时在顶部显示红色错误条。
 
     模型区是「动态手填」：默认一行，可增删。每行手填全部字段
-    （模型 ID / Base URL / API Key / icon / 识图 / 倍率）。
+    （厂商 / 模型 ID / Base URL / API Key / 识图 / 倍率）。Logo 由厂商自动派生。
     提交时前端把所有行序列化成一个隐藏字段 models(JSON)，后端解析入库。
+
+    ``form_values`` / ``model_rows`` 只接收本次 POST 的原始输入，用于校验失败时
+    原样恢复表单；不会读取或回显数据库里已有的密码、API Key。
     """
+    values = form_values or {}
+
+    def field_value(name: str) -> str:
+        return html.escape(values.get(name, ""), quote=True)
+
+    # JSON 放进内联脚本前转义 HTML/script 边界字符，避免模型 ID 等输入截断脚本。
+    initial_models_json = json.dumps(
+        model_rows or [], ensure_ascii=False, separators=(",", ":")
+    )
+    initial_models_json = (
+        initial_models_json.replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
     err_html = f'<div class="err">{html.escape(error)}</div>' if error else ""
-    icon_options = "".join(f'<option value="{html.escape(v)}">' for v in ICON_SUGGESTIONS)
+    provider_options = "".join(
+        (
+            f'<option value="{html.escape(item["id"], quote=True)}" '
+            f'data-base-url="{html.escape(item["default_base_url"] or "", quote=True)}" '
+            f'data-description="{html.escape(item["description"], quote=True)}"'
+            f"{' selected' if item['id'] == 'custom_openai' else ''}>"
+            f"{html.escape(item['label'])}</option>"
+        )
+        for item in provider_catalog()
+    )
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -104,6 +130,7 @@ def _render_form(error: str = "") -> str:
                          border:1px solid #f0c0c0; border-radius:7px; font-size:12px; cursor:pointer; }}
   .model-card .mc-del:hover {{ background:#fde8e8; }}
   .model-card input, .model-card select {{ margin-bottom:8px; }}
+  .model-card .provider-hint {{ min-height:17px; margin:-2px 0 8px; color:#86868b; font-size:12px; line-height:1.4; }}
   .row2 {{ display:flex; gap:12px; }}
   .row2 > div {{ flex:1; }}
   .row2 label {{ margin-top:0; }}
@@ -130,14 +157,14 @@ def _render_form(error: str = "") -> str:
       <h2>管理员账号</h2>
       <p class="hint">用于登录管理后台 /admin。请牢记密码。</p>
       <label>邮箱</label>
-      <input name="admin_email" type="email" placeholder="you@example.com" required>
+      <input name="admin_email" type="email" placeholder="you@example.com" value="{field_value("admin_email")}" required>
       <label>密码</label>
-      <input name="admin_password" type="password" placeholder="至少 6 位" minlength="6" required>
+      <input name="admin_password" type="password" placeholder="至少 6 位" value="{field_value("admin_password")}" minlength="6" required>
     </div>
 
     <div class="card">
       <h2>模型接入</h2>
-      <p class="hint">手动添加模型，<b>至少一个</b>。每个模型填全部字段；之后都能在后台增删改。</p>
+      <p class="hint">选择 API 厂商后会自动匹配 Logo 和默认地址，<b>至少添加一个模型</b>；之后都能在后台增删改。</p>
       <div id="model-list"></div>
       <button type="button" class="add-btn" id="add-model">+ 添加模型</button>
     </div>
@@ -145,15 +172,15 @@ def _render_form(error: str = "") -> str:
     <div class="card">
       <h2>邮件 SMTP <span class="optional">（选填，用于发注册验证码，可稍后在后台配）</span></h2>
       <div class="row2">
-        <div><label>SMTP 服务器</label><input name="smtp_host" placeholder="smtp.qq.com"></div>
-        <div><label>端口</label><input name="smtp_port" placeholder="465"></div>
+        <div><label>SMTP 服务器</label><input name="smtp_host" placeholder="smtp.qq.com" value="{field_value("smtp_host")}"></div>
+        <div><label>端口</label><input name="smtp_port" placeholder="465" value="{field_value("smtp_port")}"></div>
       </div>
       <label>发信邮箱</label>
-      <input name="smtp_user" placeholder="you@qq.com">
+      <input name="smtp_user" placeholder="you@qq.com" value="{field_value("smtp_user")}">
       <label>授权码（不是登录密码）</label>
-      <input name="smtp_password" type="password">
+      <input name="smtp_password" type="password" value="{field_value("smtp_password")}">
       <label>发件人显示名</label>
-      <input name="smtp_from_name" placeholder="小筑">
+      <input name="smtp_from_name" placeholder="小筑" value="{field_value("smtp_from_name")}">
     </div>
 
     <!-- 模型行由 JS 序列化进这里 -->
@@ -162,8 +189,6 @@ def _render_form(error: str = "") -> str:
   </form>
 </div>
 
-<datalist id="icon-list">{icon_options}</datalist>
-
 <script>
 (function() {{
   var list = document.getElementById('model-list');
@@ -171,30 +196,61 @@ def _render_form(error: str = "") -> str:
   var form = document.getElementById('setup-form');
 
   // 渲染一张模型卡。字段用 data-k 标记，提交时据此收集成 JSON。
-  function addRow() {{
+  function addRow(initial) {{
     var card = document.createElement('div');
     card.className = 'model-card';
     card.innerHTML =
       '<div class="mc-head"><span class="mc-idx">模型</span>' +
       '<button type="button" class="mc-del">删除</button></div>' +
-      '<label>模型 ID</label><input data-k="id" placeholder="如 qwen3-coder-next">' +
-      '<label>Base URL</label>' +
-      '<input data-k="base_url" placeholder="https://your-proxy.example.com/v1">' +
+      '<label>模型厂商</label>' +
+      '<select data-k="provider">{provider_options}</select>' +
+      '<p class="provider-hint"></p>' +
+      '<label>模型 ID</label><input data-k="id" placeholder="如 qwen3-coder-next" required>' +
+      '<label>Base URL <span class="optional">（官方厂商可使用自动配置）</span></label>' +
+      '<input data-k="base_url" placeholder="选择厂商后自动填写；自定义接口请手动填写">' +
       '<label>API Key</label>' +
-      '<input data-k="api_key" placeholder="sk-...">' +
+      '<input data-k="api_key" type="password" placeholder="sk-..." required>' +
       '<div class="row2">' +
-        '<div><label>Logo 标识</label><input data-k="logo" list="icon-list" placeholder="如 Qwen.Color"></div>' +
         '<div><label>倍率</label><input data-k="cost" type="number" min="1" value="1"></div>' +
       '</div>' +
       '<label class="chk"><input data-k="vision" type="checkbox"> 支持识图（多模态图片输入）</label>';
+    var provider = card.querySelector('[data-k="provider"]');
+    var baseUrl = card.querySelector('[data-k="base_url"]');
+    var providerHint = card.querySelector('.provider-hint');
+    if (initial) {{
+      card.querySelectorAll('[data-k]').forEach(function(el) {{
+        var key = el.getAttribute('data-k');
+        if (!(key in initial)) return;
+        if (el.type === 'checkbox') {{
+          el.checked = initial[key] === true || initial[key] === 'true' || initial[key] === 'on' || initial[key] === 1;
+        }} else {{
+          el.value = initial[key] == null ? '' : String(initial[key]);
+        }}
+      }});
+      // 已删除或未知的厂商值按兜底协议恢复，避免 select 落入空选项。
+      if (!provider.value) provider.value = 'custom_openai';
+    }}
+    function applyProviderDefaults(overwriteBaseUrl) {{
+      var selected = provider.options[provider.selectedIndex];
+      if (overwriteBaseUrl) baseUrl.value = selected.getAttribute('data-base-url') || '';
+      baseUrl.required = provider.value === 'custom_openai';
+      providerHint.textContent = (selected.getAttribute('data-description') || '') + ' · Logo 自动匹配';
+    }}
+    provider.addEventListener('change', function() {{ applyProviderDefaults(true); }});
+    applyProviderDefaults(!initial);
     card.querySelector('.mc-del').onclick = function() {{
       if (list.children.length > 1) card.remove();
     }};
     list.appendChild(card);
   }}
 
-  addBtn.onclick = addRow;
-  addRow(); // 默认给一行
+  addBtn.onclick = function() {{ addRow(); }};
+  var initialRows = {initial_models_json};
+  if (Array.isArray(initialRows) && initialRows.length) {{
+    initialRows.forEach(function(row) {{ addRow(row); }});
+  }} else {{
+    addRow(); // 默认给一行
+  }}
 
   // 提交前把所有卡片收集成 JSON 塞进隐藏字段
   form.addEventListener('submit', function() {{
@@ -249,26 +305,54 @@ async def setup_submit(
     """处理初始化提交：建首个管理员 + 手动创建模型 + 写 SMTP。全部在一个事务里。
 
     models 是前端序列化的 JSON 数组，每个元素含
-    {{id, base_url, api_key, logo, cost, vision}}。逐条 upsert 进 llm_models，
-    全部启用、sort_order 按顺序。要求至少一条、且每条 id/base_url/api_key 齐全。
+    {{provider, id, base_url, api_key, cost, vision}}。逐条 upsert 进 llm_models，
+    厂商、Logo 和默认 Base URL 会在服务端再次规范化；全部启用、sort_order 按顺序。
+    要求至少一条且每条 id/api_key 齐全，自定义兼容接口还必须填写 Base URL。
     再次校验「未初始化」——不只信缓存，防止已初始化后有人重复 POST 抢建管理员。
     """
     # 防重复：已初始化直接回登录页（自锁）
     if await is_initialized(db):
         return RedirectResponse("/admin/login", status_code=302)
 
+    # 校验失败时只回填本次 POST 的值；绝不从数据库读取已有密码或模型密钥。
+    submitted_values = {
+        "admin_email": admin_email,
+        "admin_password": admin_password,
+        "smtp_host": smtp_host,
+        "smtp_port": smtp_port,
+        "smtp_user": smtp_user,
+        "smtp_password": smtp_password,
+        "smtp_from_name": smtp_from_name,
+    }
+    try:
+        decoded_rows = json.loads(models)
+    except json.JSONDecodeError:
+        decoded_rows = None
+    submitted_model_rows = (
+        [row for row in decoded_rows if isinstance(row, dict)]
+        if isinstance(decoded_rows, list)
+        else []
+    )
+
+    def render_error(message: str) -> HTMLResponse:
+        return HTMLResponse(
+            _render_form(
+                message,
+                form_values=submitted_values,
+                model_rows=submitted_model_rows,
+            ),
+            status_code=400,
+        )
+
     # 基本校验
     email = admin_email.strip().lower()
     if len(admin_password) < 6:
-        return HTMLResponse(_render_form("密码至少 6 位"), status_code=400)
+        return render_error("密码至少 6 位")
 
     # 解析并校验模型列表
-    try:
-        rows = json.loads(models)
-    except json.JSONDecodeError:
-        return HTMLResponse(_render_form("模型数据格式错误，请重试"), status_code=400)
-    if not isinstance(rows, list):
-        return HTMLResponse(_render_form("模型数据格式错误，请重试"), status_code=400)
+    if decoded_rows is None or not isinstance(decoded_rows, list):
+        return render_error("模型数据格式错误，请重试")
+    rows = decoded_rows
 
     parsed: list[dict] = []
     seen_ids: set[str] = set()
@@ -276,31 +360,38 @@ async def setup_submit(
         if not isinstance(r, dict):
             continue
         mid = str(r.get("id", "")).strip()
-        b = str(r.get("base_url", "")).strip()
         k = str(r.get("api_key", "")).strip()
-        # 每条必须三要素齐全，否则整体退回让用户补
-        if not (mid and b and k):
-            return HTMLResponse(
-                _render_form("每个模型的 ID / Base URL / API Key 都要填"),
-                status_code=400,
-            )
+        raw_base_url = str(r.get("base_url", "")).strip() or None
+        provider, logo, base_url = canonical_model_values(
+            str(r.get("provider", "")).strip() or None,
+            raw_base_url,
+        )
+        if not (mid and k):
+            return render_error("每个模型的 ID / API Key 都要填")
+        if provider == "custom_openai" and not base_url:
+            return render_error("自定义 / 中转站模型必须填写 Base URL")
         if mid in seen_ids:
-            return HTMLResponse(_render_form(f"模型 ID「{mid}」重复了"), status_code=400)
+            return render_error(f"模型 ID「{mid}」重复了")
         seen_ids.add(mid)
         # cost 容错：非法/缺省当 1
         try:
             cost = max(1, int(r.get("cost", 1)))
         except (TypeError, ValueError):
             cost = 1
-        parsed.append({
-            "id": mid, "base_url": b, "api_key": k,
-            "logo": str(r.get("logo", "")).strip(),
-            "vision": bool(r.get("vision", False)),
-            "cost": cost,
-        })
+        parsed.append(
+            {
+                "id": mid,
+                "provider": provider,
+                "base_url": base_url,
+                "api_key": k,
+                "logo": logo,
+                "vision": bool(r.get("vision", False)),
+                "cost": cost,
+            }
+        )
 
     if not parsed:
-        return HTMLResponse(_render_form("请至少添加一个模型"), status_code=400)
+        return render_error("请至少添加一个模型")
 
     # ── 一个事务里落库 ──
     # 1) 首个管理员
@@ -319,6 +410,7 @@ async def setup_submit(
             await db.execute(select(LlmModel).where(LlmModel.id == m["id"]))
         ).scalar_one_or_none()
         if existing is not None:
+            existing.provider = m["provider"]
             existing.base_url = m["base_url"]
             existing.api_key = m["api_key"]
             existing.logo = m["logo"]
@@ -327,10 +419,19 @@ async def setup_submit(
             existing.enabled = True
             existing.sort_order = i
         else:
-            db.add(LlmModel(
-                id=m["id"], base_url=m["base_url"], api_key=m["api_key"],
-                logo=m["logo"], vision=m["vision"], cost=m["cost"], enabled=True, sort_order=i,
-            ))
+            db.add(
+                LlmModel(
+                    id=m["id"],
+                    provider=m["provider"],
+                    base_url=m["base_url"],
+                    api_key=m["api_key"],
+                    logo=m["logo"],
+                    vision=m["vision"],
+                    cost=m["cost"],
+                    enabled=True,
+                    sort_order=i,
+                )
+            )
     # 3) SMTP（选填）：只写非空项，复用 runtime_config 的 upsert 语义
     smtp_values = {
         "smtp_host": smtp_host.strip(),

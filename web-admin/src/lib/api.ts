@@ -236,6 +236,7 @@ export async function updateSetting(key: string, value: string) {
 // ── LLM 模型 ──────────────────────────────────────────────────
 export type AdminModel = {
   id: string
+  provider: string
   base_url: string | null
   api_key: string
   logo: string
@@ -245,11 +246,21 @@ export type AdminModel = {
   sort_order: number
 }
 
+/** 后端预制的模型厂商目录；Logo 与默认端点都由厂商配置统一维护。 */
+export type ModelProvider = {
+  id: string
+  label: string
+  logo: string
+  adapter: string
+  default_base_url: string | null
+  description: string
+}
+
 export type ModelCreatePayload = {
   id: string
+  provider: string
   base_url?: string | null
   api_key?: string
-  logo?: string
   vision?: boolean
   cost?: number
   enabled?: boolean
@@ -258,9 +269,13 @@ export type ModelCreatePayload = {
 
 export type ModelUpdatePayload = Partial<Omit<ModelCreatePayload, 'id'>>
 
-/** 导出/导入用的单条模型配置（含明文 api_key）。 */
-export type ModelExportItem = ModelCreatePayload & {
-  id: string
+/**
+ * 导出/导入用的单条模型配置（含明文 api_key）。
+ * provider 可选是为了继续兼容尚未包含厂商字段的历史导出包；logo 仅作旧格式兼容。
+ */
+export type ModelExportItem = Omit<ModelCreatePayload, 'provider'> & {
+  provider?: string
+  logo?: string
 }
 
 export type ModelExportBundle = {
@@ -315,6 +330,11 @@ export async function listModels() {
   return res.data
 }
 
+export async function listModelProviders() {
+  const res = await http.get<ModelProvider[]>('/api/admin/models/providers')
+  return res.data
+}
+
 export async function exportModels() {
   const res = await http.get<ModelExportBundle>('/api/admin/models/export')
   return res.data
@@ -328,9 +348,9 @@ export async function importModels(models: ModelExportItem[]) {
 export async function testModelCapability(id: string, capability: ModelTestCapability) {
   const timeout = modelCapabilityTestTimeout(capability)
   const res = await http.post<ModelCapabilityTestResult>(
-    `/api/admin/models/${encodeURIComponent(id)}/test/${capability}`,
+    `/api/admin/models/operations/model/test/${capability}`,
     undefined,
-    { timeout },
+    { params: { model_id: id }, timeout },
   )
   return res.data
 }
@@ -341,12 +361,14 @@ export async function createModel(body: ModelCreatePayload) {
 }
 
 export async function updateModel(id: string, body: ModelUpdatePayload) {
-  const res = await http.patch<AdminModel>(`/api/admin/models/${id}`, body)
+  const res = await http.patch<AdminModel>('/api/admin/models/operations/model', body, {
+    params: { model_id: id },
+  })
   return res.data
 }
 
 export async function deleteModel(id: string) {
-  await http.delete(`/api/admin/models/${id}`)
+  await http.delete('/api/admin/models/operations/model', { params: { model_id: id } })
 }
 
 export async function setModelsEnabled(ids: string[], enabled: boolean) {

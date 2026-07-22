@@ -27,8 +27,80 @@
   color: var(--color-text-dim);
 }
 
-// 品牌 Logo 下拉项 / 回显：图标 + 中文名横排对齐
-.logoOption {
+// 厂商是 Logo、请求协议和推荐端点的单一事实源。
+.providerCell {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 9px;
+}
+
+.providerIcon,
+.providerOptionIcon {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid color-mix(in srgb, var(--color-border) 82%, #1677ff 18%);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--color-bg) 95%, #1677ff 5%);
+}
+
+.providerMeta {
+  min-width: 0;
+
+  strong,
+  small {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  strong {
+    color: var(--color-text);
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  small {
+    max-width: 130px;
+    margin-top: 1px;
+    color: var(--color-text-dim);
+    font-size: 10px;
+  }
+}
+
+.providerOption {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-block: 3px;
+
+  > span:last-child {
+    min-width: 0;
+  }
+
+  strong,
+  small {
+    display: block;
+  }
+
+  strong {
+    font-size: 13px;
+    line-height: 1.25;
+  }
+
+  small {
+    margin-top: 2px;
+    color: var(--color-text-dim);
+    font-size: 11px;
+    line-height: 1.3;
+  }
+}
+
+.providerSelection {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -192,7 +264,12 @@
     font-size: 12px;
     line-height: 1.4;
     overflow-wrap: anywhere;
+    white-space: pre-wrap;
   }
+}
+
+.testResultMessage {
+  max-width: 100%;
 }
 
 .testItemTitle {
@@ -240,14 +317,13 @@
 
   em {
     display: block;
-    overflow: hidden;
     margin-top: 3px;
     color: var(--color-text-dim);
     font-size: 10px;
     font-style: normal;
     line-height: 1.35;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
   }
 }
 
@@ -294,6 +370,20 @@
   border-color: rgba(217, 65, 65, 0.25);
 
   .testStatus { color: #d94141; }
+}
+
+.skipped {
+  border-color: var(--color-border);
+  background: color-mix(in srgb, var(--color-bg) 95%, var(--color-border) 5%);
+
+  .testItemIcon,
+  .testStatus {
+    color: var(--color-text-dim);
+  }
+
+  .testItemIcon {
+    background: color-mix(in srgb, var(--color-bg) 88%, var(--color-border) 12%);
+  }
 }
 
 .testFooter {

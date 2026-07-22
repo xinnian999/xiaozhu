@@ -21,12 +21,9 @@ class Settings(BaseSettings):
         extra="allow",
     )
 
-    # ── LLM API（走 OpenAI 兼容协议）────────────────────────────
-    # 改用 OpenAI 协议是为了兼容更多中转服务 —— Anthropic 原生协议的中转
-    # 经常会注入它自己的 system prompt / 工具集，污染我们 bind_tools 的结果。
-    # OpenAI 协议生态成熟，中转一般是纯透传，行为更可预测。
-
-    # 中转站只有一个，base_url 全局共用。None 表示用官方 api.openai.com。
+    # ── 旧版 LLM 环境变量（仅首次迁移入库）───────────────────────
+    # 正常运行时每个模型的 provider/base_url/api_key 都来自 llm_models；这里保留
+    # OPENAI_BASE_URL 与 API_KEY_*，只为旧部署首次播种数据库时平滑迁移。
     openai_base_url: str | None = None
 
     @property

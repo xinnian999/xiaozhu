@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Table,
   Button,
@@ -19,6 +19,7 @@ import {
 import type { ColumnsType } from 'antd/es/table'
 import {
   listModels,
+  listModelProviders,
   exportModels,
   importModels,
   createModel,
@@ -30,6 +31,7 @@ import {
   type ModelCapabilityTestResult,
   type ModelExportBundle,
   type ModelExportItem,
+  type ModelProvider,
   type ModelTestCapability,
 } from '@/lib/api'
 import {
@@ -39,6 +41,7 @@ import {
   BrainCircuit,
   CircleCheck,
   CircleHelp,
+  CircleMinus,
   CircleX,
   ImageIcon,
   RotateCw,
@@ -48,21 +51,6 @@ import {
 } from 'lucide-react'
 import { ModelIcon } from '@/lib/lobeIcon'
 import styles from './index.module.scss'
-
-// 品牌 Logo 选项：value 为 @lobehub/icons 组件标识符，label 用中文名方便识别。
-// 与 server/app/setup.py 的 ICON_SUGGESTIONS 对应，新增品牌时两边同步维护即可。
-const LOGO_OPTIONS = [
-  { value: 'OpenAI', label: 'OpenAI' },
-  { value: 'Qwen.Color', label: '通义千问' },
-  { value: 'Claude.Color', label: 'Claude（Anthropic）' },
-  { value: 'Gemini.Color', label: 'Gemini（谷歌）' },
-  { value: 'DeepSeek.Color', label: 'DeepSeek 深度求索' },
-  { value: 'Moonshot', label: '月之暗面 Kimi' },
-  { value: 'Doubao.Color', label: '豆包' },
-  { value: 'Grok', label: 'Grok（xAI）' },
-  { value: 'Zhipu.Color', label: '智谱 GLM' },
-  { value: 'MiniMax.Color', label: 'MiniMax' },
-]
 
 const CAPABILITY_TESTS: Array<{
   key: ModelTestCapability
@@ -82,8 +70,10 @@ const CAPABILITY_TESTS: Array<{
 ]
 
 type TestItemState = {
-  phase: 'pending' | 'running' | 'done'
+  /** skipped 仅是前端编排状态，不改变后端能力测试契约。 */
+  phase: 'pending' | 'running' | 'done' | 'skipped'
   result?: ModelCapabilityTestResult
+  message?: string
 }
 
 function emptyTestStates(): Record<ModelTestCapability, TestItemState> {
@@ -114,6 +104,7 @@ function parseImportFile(json: unknown): ModelExportItem[] {
 export default function Models() {
   const { message, modal } = AntdApp.useApp()
   const [data, setData] = useState<AdminModel[]>([])
+  const [providers, setProviders] = useState<ModelProvider[]>([])
   const [loading, setLoading] = useState(false)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [reorderingId, setReorderingId] = useState<string | null>(null)
@@ -132,6 +123,20 @@ export default function Models() {
   const [editing, setEditing] = useState<AdminModel | null>(null)
   const [isCopy, setIsCopy] = useState(false)
   const [form] = Form.useForm()
+  const selectedProviderId = Form.useWatch('provider', form) as string | undefined
+  const providerById = useMemo(
+    () => new Map(providers.map((provider) => [provider.id, provider])),
+    [providers],
+  )
+  const selectedProvider = selectedProviderId
+    ? providerById.get(selectedProviderId)
+    : undefined
+  const providerChanged = Boolean(
+    editing && selectedProviderId && selectedProviderId !== (editing.provider || 'custom_openai'),
+  )
+
+  const providerForModel = (model: AdminModel) => providerById.get(model.provider)
+  const logoForModel = (model: AdminModel) => providerForModel(model)?.logo || model.logo || 'OpenAI'
 
   /** 根据已有 ID 生成不冲突的复制用主键（如 foo → foo-copy，已占用则 foo-copy-2）。 */
   const suggestCopyId = (sourceId: string) => {
@@ -148,7 +153,18 @@ export default function Models() {
   const fetchData = useCallback(async () => {
     setLoading(true)
     try {
-      setData(await listModels())
+      const [modelsResult, providersResult] = await Promise.allSettled([
+        listModels(),
+        listModelProviders(),
+      ])
+      // 厂商目录是模型列表的增强信息。即使目录接口暂时不可用（例如滚动发布
+      // 期间前后端版本短暂不一致），仍展示模型并用记录中的 provider/logo 降级。
+      if (modelsResult.status === 'fulfilled') {
+        setData(modelsResult.value)
+      }
+      if (providersResult.status === 'fulfilled') {
+        setProviders(providersResult.value)
+      }
     } finally {
       setLoading(false)
     }
@@ -164,7 +180,12 @@ export default function Models() {
     setEditing(null)
     setIsCopy(false)
     form.resetFields()
-    form.setFieldsValue({ vision: false, enabled: true, cost: 1 })
+    form.setFieldsValue({
+      provider: 'custom_openai',
+      vision: false,
+      enabled: true,
+      cost: 1,
+    })
     setOpen(true)
   }
 
@@ -173,9 +194,9 @@ export default function Models() {
     setIsCopy(false)
     form.setFieldsValue({
       id: model.id,
+      provider: model.provider || 'custom_openai',
       base_url: model.base_url,
       api_key: '', // 敏感值不回填脱敏串；留空表示不改
-      logo: model.logo,
       vision: model.vision,
       cost: model.cost,
       enabled: model.enabled,
@@ -190,9 +211,9 @@ export default function Models() {
     form.resetFields()
     form.setFieldsValue({
       id: suggestCopyId(model.id),
+      provider: model.provider || 'custom_openai',
       base_url: model.base_url,
       api_key: '', // 列表里是脱敏值，复制后需重新填写
-      logo: model.logo,
       vision: model.vision,
       cost: model.cost,
       enabled: model.enabled,
@@ -203,6 +224,24 @@ export default function Models() {
   const closeDrawer = () => {
     setOpen(false)
     setIsCopy(false)
+  }
+
+  const handleProviderChange = (providerId: string) => {
+    const provider = providerById.get(providerId)
+    const currentBaseUrl = String(form.getFieldValue('base_url') ?? '').trim()
+    const knownDefaultUrls = new Set(
+      providers
+        .map((item) => item.default_base_url?.trim())
+        .filter((url): url is string => Boolean(url)),
+    )
+    const shouldUseProviderDefault = !currentBaseUrl || knownDefaultUrls.has(currentBaseUrl)
+    // 厂商切换意味着鉴权端点也切换，不能沿用刚为另一厂商输入的 Key。
+    form.setFieldsValue({
+      ...(shouldUseProviderDefault
+        ? { base_url: provider?.default_base_url ?? null }
+        : {}),
+      api_key: '',
+    })
   }
 
   const submit = async () => {
@@ -335,26 +374,32 @@ export default function Models() {
     row: AdminModel,
     capability: ModelTestCapability,
     runId: number,
-  ) => {
+  ): Promise<ModelCapabilityTestResult | null> => {
     setTestStates((prev) => ({ ...prev, [capability]: { phase: 'running' } }))
     try {
       const result = await testModelCapability(row.id, capability)
-      if (testRunRef.current !== runId) return
+      if (testRunRef.current !== runId) return null
       setTestStates((prev) => ({ ...prev, [capability]: { phase: 'done', result } }))
+      return result
     } catch (error) {
-      if (testRunRef.current !== runId) return
+      if (testRunRef.current !== runId) return null
       const rawReason = error instanceof Error ? error.message : '未知错误'
       const timeoutMatch = rawReason.match(/timeout of (\d+)ms exceeded/i)
       const reason = timeoutMatch
         ? `等待模型响应超时（${Math.round(Number(timeoutMatch[1]) / 1000)} 秒），请稍后单独重试`
         : rawReason
+      const result: ModelCapabilityTestResult = {
+        capability,
+        status: 'failed',
+        message: reason,
+        latency_ms: null,
+        details: [],
+      }
       setTestStates((prev) => ({
         ...prev,
-        [capability]: {
-          phase: 'done',
-          result: { capability, status: 'failed', message: reason, latency_ms: null, details: [] },
-        },
+        [capability]: { phase: 'done', result },
       }))
+      return result
     }
   }
 
@@ -364,7 +409,21 @@ export default function Models() {
     setTestsRunning(true)
     for (const item of CAPABILITY_TESTS) {
       if (testRunRef.current !== runId) return
-      await runCapability(row, item.key, runId)
+      const result = await runCapability(row, item.key, runId)
+      if (testRunRef.current !== runId) return
+      if (item.key === 'connectivity' && result?.status !== 'passed') {
+        const skippedMessage = '未执行：请先修复连通性，再重新测试全部能力。'
+        setTestStates((prev) => {
+          const next = { ...prev }
+          for (const remaining of CAPABILITY_TESTS) {
+            if (remaining.key !== 'connectivity') {
+              next[remaining.key] = { phase: 'skipped', message: skippedMessage }
+            }
+          }
+          return next
+        })
+        break
+      }
     }
     if (testRunRef.current === runId) setTestsRunning(false)
   }
@@ -388,7 +447,9 @@ export default function Models() {
     if (testRunRef.current === runId) setTestsRunning(false)
   }
 
-  const completedTests = CAPABILITY_TESTS.filter((item) => testStates[item.key].phase === 'done').length
+  const completedTests = CAPABILITY_TESTS.filter((item) =>
+    ['done', 'skipped'].includes(testStates[item.key].phase),
+  ).length
   const passedTests = CAPABILITY_TESTS.filter(
     (item) => testStates[item.key].result?.status === 'passed',
   ).length
@@ -441,21 +502,24 @@ export default function Models() {
       render: (v: boolean) => <Tag color={v ? 'green' : 'default'}>{v ? '启用' : '停用'}</Tag>,
     },
     {
-      title: 'Logo',
-      dataIndex: 'logo',
-      width: 70,
-      align: 'center',
+      title: '厂商',
+      dataIndex: 'provider',
+      width: 190,
       fixed: 'left',
-      render: (v: string) =>
-        v ? (
-          <ModelIcon
-            name={v}
-            size={22}
-            fallback={<span className={styles.secret}>{v}</span>}
-          />
-        ) : (
-          '—'
-        ),
+      render: (_: string, row) => {
+        const provider = providerForModel(row)
+        return (
+          <span className={styles.providerCell}>
+            <span className={styles.providerIcon}>
+              <ModelIcon name={provider?.logo || logoForModel(row)} size={21} />
+            </span>
+            <span className={styles.providerMeta}>
+              <strong>{provider?.label || row.provider || '自定义 / 中转站'}</strong>
+              <small>{provider?.description || 'OpenAI 兼容协议'}</small>
+            </span>
+          </span>
+        )
+      },
     },
     { title: '模型 ID', dataIndex: 'id', width: 220, ellipsis: true, fixed: 'left' },
     { title: 'Base URL', dataIndex: 'base_url', width: 220, ellipsis: true, render: (v: string | null) => v || '（官方）' },
@@ -524,7 +588,7 @@ export default function Models() {
         columns={columns}
         dataSource={data}
         loading={loading}
-        scroll={{ x: 1120 }}
+        scroll={{ x: 1240 }}
         rowSelection={{
           fixed: true,
           selectedRowKeys: selectedIds,
@@ -549,52 +613,97 @@ export default function Models() {
         }
       >
         <Form form={form} layout="vertical">
-          <Form.Item label="模型 ID" name="id" rules={[{ required: true, message: '请填写模型 ID（主键）' }]}>
-            {/* 编辑时主键不可改 */}
-            <Input disabled={!!editing} placeholder="如 qwen3-coder-next" />
-          </Form.Item>
-          <Form.Item label="Base URL（空=官方）" name="base_url">
-            <Input placeholder="OpenAI 兼容端点，留空用官方" />
-          </Form.Item>
           <Form.Item
-            label="API Key"
-            name="api_key"
-            extra={
-              editing
-                ? '留空表示不修改（列表中已脱敏显示）'
-                : isCopy
-                  ? '复制不会带入原 Key，请重新填写'
-                  : undefined
-            }
+            label="模型厂商"
+            name="provider"
+            rules={[{ required: true, message: '请选择模型实际使用的 API 厂商' }]}
+            extra="厂商决定请求协议、能力参数与 Logo；未知中转接口请选择“自定义 / 中转站”。"
           >
-            <Input.Password placeholder="API Key" />
-          </Form.Item>
-          <Form.Item label="品牌 Logo" name="logo" extra="选择模型所属品牌，列表用于展示对应图标">
             <Select
-              allowClear
               showSearch
-              placeholder="选择品牌 Logo"
-              options={LOGO_OPTIONS}
+              loading={loading && providers.length === 0}
+              placeholder="选择模型厂商"
               optionFilterProp="label"
-              // 下拉项：图标 + 中文名
-              optionRender={(opt) => (
-                <span className={styles.logoOption}>
-                  <ModelIcon name={String(opt.value)} size={18} />
-                  {opt.label}
+              onChange={handleProviderChange}
+              options={providers.map((provider) => ({
+                value: provider.id,
+                label: provider.label,
+                description: provider.description,
+                logo: provider.logo,
+              }))}
+              optionRender={(option) => (
+                <span className={styles.providerOption}>
+                  <span className={styles.providerOptionIcon}>
+                    <ModelIcon name={String(option.data.logo)} size={20} />
+                  </span>
+                  <span>
+                    <strong>{option.label}</strong>
+                    <small>{String(option.data.description)}</small>
+                  </span>
                 </span>
               )}
-              // 选中后的回显：同样带图标
-              labelRender={(props) =>
-                props.value ? (
-                  <span className={styles.logoOption}>
-                    <ModelIcon name={String(props.value)} size={18} />
-                    {props.label}
+              labelRender={(props) => {
+                const provider = providerById.get(String(props.value))
+                return provider ? (
+                  <span className={styles.providerSelection}>
+                    <ModelIcon name={provider.logo} size={18} />
+                    {provider.label}
                   </span>
                 ) : (
                   <>{props.label}</>
                 )
-              }
+              }}
             />
+          </Form.Item>
+          <Form.Item
+            label="模型 ID"
+            name="id"
+            rules={[{ required: true, message: '请填写模型 ID（主键）' }]}
+          >
+            {/* 编辑时主键不可改 */}
+            <Input disabled={!!editing} placeholder="如 qwen3-coder-next" />
+          </Form.Item>
+          <Form.Item
+            label="Base URL（空=官方）"
+            name="base_url"
+            rules={[
+              {
+                required: selectedProvider?.id === 'custom_openai',
+                message: '自定义 / 中转站模型必须填写 Base URL',
+              },
+            ]}
+            extra={
+              selectedProvider?.default_base_url
+                ? `已自动填入 ${selectedProvider.label} 的推荐端点，可按实际部署修改。`
+                : selectedProvider?.id === 'custom_openai'
+                  ? '请填写中转站或自部署服务的 OpenAI 兼容端点。'
+                  : '留空时使用该厂商 SDK 的官方端点。'
+            }
+          >
+            <Input placeholder={selectedProvider?.default_base_url || '留空使用官方端点'} />
+          </Form.Item>
+          <Form.Item
+            label="API Key"
+            name="api_key"
+            rules={[
+              {
+                required: !editing || providerChanged,
+                message: providerChanged
+                  ? '更换厂商/鉴权端点需新 Key'
+                  : '请填写 API Key',
+              },
+            ]}
+            extra={
+              providerChanged
+                ? '更换厂商/鉴权端点需新 Key'
+                : editing
+                ? '留空表示不修改（列表中已脱敏显示）'
+                : isCopy
+                  ? '复制不会带入原 Key，请重新填写'
+                  : '新建模型需要填写对应厂商的 API Key'
+            }
+          >
+            <Input.Password placeholder="API Key" />
           </Form.Item>
           <Space size="large">
             <Form.Item label="倍率" name="cost">
@@ -639,7 +748,7 @@ export default function Models() {
           <div className={styles.testPanel}>
             <div className={styles.testHeader}>
               <div className={styles.testModelIcon}>
-                <ModelIcon name={testTarget.logo} size={30} />
+                <ModelIcon name={logoForModel(testTarget)} size={30} />
               </div>
               <div className={styles.testHeading}>
                 <span className={styles.testEyebrow}>MODEL CAPABILITY CHECK</span>
@@ -668,6 +777,8 @@ export default function Models() {
                 const statusIcon =
                   state.phase === 'running' ? (
                     <Spin size="small" />
+                  ) : state.phase === 'skipped' ? (
+                    <CircleMinus size={20} />
                   ) : result?.status === 'passed' ? (
                     <CircleCheck size={20} />
                   ) : result?.status === 'unsupported' ? (
@@ -680,7 +791,7 @@ export default function Models() {
                 return (
                   <div
                     key={item.key}
-                    className={`${styles.testItem} ${result ? styles[result.status] : ''}`}
+                    className={`${styles.testItem} ${result ? styles[result.status] : ''} ${state.phase === 'skipped' ? styles.skipped : ''}`}
                   >
                     <div className={styles.testItemIcon}><Icon size={19} /></div>
                     <div className={styles.testItemBody}>
@@ -688,30 +799,38 @@ export default function Models() {
                         <strong>{item.label}</strong>
                         {result?.latency_ms != null && <span>{result.latency_ms} ms</span>}
                       </div>
-                      {result?.details?.length ? (
-                        <div className={styles.testDetails}>
-                          {result.details.map((detail) => (
-                            <div key={detail.key} className={styles.testDetail}>
-                              <span data-status={detail.status}>
-                                {detail.status === 'passed' ? (
-                                  <CircleCheck size={13} />
-                                ) : detail.status === 'unsupported' ? (
-                                  <CircleHelp size={13} />
-                                ) : (
-                                  <CircleX size={13} />
-                                )}
-                                {detail.label}
-                              </span>
-                              <em title={detail.message}>{detail.message}</em>
+                      {result ? (
+                        <>
+                          <p className={styles.testResultMessage}>
+                            {result.status === 'failed' ? '失败原因：' : ''}
+                            {result.message}
+                          </p>
+                          {!!result.details?.length && (
+                            <div className={styles.testDetails}>
+                              {result.details.map((detail) => (
+                                <div key={detail.key} className={styles.testDetail}>
+                                  <span data-status={detail.status}>
+                                    {detail.status === 'passed' ? (
+                                      <CircleCheck size={13} />
+                                    ) : detail.status === 'unsupported' ? (
+                                      <CircleHelp size={13} />
+                                    ) : (
+                                      <CircleX size={13} />
+                                    )}
+                                    {detail.label}
+                                  </span>
+                                  <em>{detail.message}</em>
+                                </div>
+                              ))}
                             </div>
-                          ))}
-                        </div>
+                          )}
+                        </>
                       ) : (
-                        <p title={result?.message}>
-                          {result
-                            ? `${result.status === 'failed' ? '失败原因：' : ''}${result.message}`
-                            : state.phase === 'running'
-                              ? '正在发送探测请求…'
+                        <p>
+                          {state.phase === 'running'
+                            ? '正在发送探测请求…'
+                            : state.phase === 'skipped'
+                              ? state.message
                               : item.description}
                         </p>
                       )}
@@ -719,8 +838,14 @@ export default function Models() {
                     <button
                       type="button"
                       className={styles.testStatus}
-                      disabled={testsRunning}
-                      title={state.phase === 'done' ? `重新测试${item.label}` : item.description}
+                      disabled={testsRunning || state.phase === 'skipped'}
+                      title={
+                        state.phase === 'done'
+                          ? `重新测试${item.label}`
+                          : state.phase === 'skipped'
+                            ? state.message
+                            : item.description
+                      }
                       onClick={() => state.phase === 'done' && void retryCapability(item.key)}
                     >
                       {statusIcon}

@@ -111,22 +111,35 @@ def extract_text(response) -> str:
     )
 
 
+def _is_truncation_reason(reason: object) -> bool:
+    """兼容 OpenAI、Anthropic 与 Google 的输出上限结束标记。"""
+    normalized = str(reason).strip().lower().replace("-", "_")
+    return normalized in {
+        "length",
+        "max_tokens",
+        "max_output_tokens",
+    } or normalized.endswith(".max_tokens")
+
+
 def build_human_content(text: str, images: list[str] | None) -> str | list[dict]:
     """把「文本 + 图片」拼成 LLM 的 HumanMessage content。
 
     没图片就直接返回纯字符串 —— 最省事、最省 token,行为和以前完全一样。
-    有图片才用 OpenAI 风格的多模态 block 列表（中转站走 OpenAI 兼容协议,
-    识图模型认这个格式）:
-        [{"type": "text", "text": "..."},
-         {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}]
-    data URL 可直接当 image_url.url 传,不用先上传换成 http 链接。
+    有图片时使用 LangChain 标准内容块，由各厂商适配器转换成自己的 wire format。
+    这样 Anthropic / Gemini 不会再收到硬编码的 OpenAI ``image_url`` 结构。
     """
     if not images:
         return text
     blocks: list[dict] = []
     if text:
         blocks.append({"type": "text", "text": text})
-    blocks += [{"type": "image_url", "image_url": {"url": url}} for url in images]
+    for url in images:
+        if url.startswith("data:") and ";base64," in url:
+            header, data = url.split(",", 1)
+            mime_type = header[5:].split(";", 1)[0] or "image/png"
+            blocks.append({"type": "image", "base64": data, "mime_type": mime_type})
+        else:
+            blocks.append({"type": "image", "url": url})
     return blocks
 
 
@@ -604,8 +617,11 @@ async def _consume(
 
                 if node_name == "model":
                     for m in node_messages:
-                        finish_reason = m.response_metadata.get("finish_reason")
-                        if m.invalid_tool_calls or finish_reason == "length":
+                        response_metadata = m.response_metadata or {}
+                        finish_reason = response_metadata.get(
+                            "finish_reason"
+                        ) or response_metadata.get("stop_reason")
+                        if m.invalid_tool_calls or _is_truncation_reason(finish_reason):
                             print(
                                 f"[截断] finish_reason={finish_reason} "
                                 f"invalid_tool_calls={m.invalid_tool_calls}"

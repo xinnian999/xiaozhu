@@ -12,15 +12,27 @@
   }
 }
 
-// 「重新生成」按钮：放在对话末尾、AI 回复下方。低调的幽灵按钮，
-// 左对齐贴合 AI 回复（AI 回复无气泡、左对齐）。
+.timelineMeta {
+  display: flex;
+  align-items: center;
+  gap: $space-2;
+  min-height: 28px;
+  margin-bottom: $space-4;
+
+  .time {
+    font-family: var(--font-mono);
+    font-size: $fs-10;
+    color: var(--color-text-faint);
+  }
+}
+
+// 「重新生成」和时间同行，推到会话底栏右侧。
 .retryBtn {
   @include button-reset;
-  align-self: flex-start;
   display: inline-flex;
   align-items: center;
   gap: $space-1;
-  margin-bottom: $space-4;
+  margin-left: auto;
   padding: $space-1 $space-2;
   border-radius: $radius-sm;
   color: var(--color-text-mute);

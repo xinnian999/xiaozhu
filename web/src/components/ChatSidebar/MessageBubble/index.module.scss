@@ -23,9 +23,6 @@
       color: var(--color-text);
     }
 
-    .time {
-      text-align: right;
-    }
   }
 
   .content {
@@ -63,11 +60,6 @@
     word-break: break-word;
   }
 
-  .time {
-    font-family: var(--font-mono);
-    font-size: $fs-10;
-    color: var(--color-text-faint);
-  }
 }
 
 // ============================================
@@ -78,19 +70,6 @@
   flex-direction: column;
   gap: $space-1;
   margin-bottom: $space-4;
-
-  // 回复时间行；会话级「重新生成」统一由 MessageList 放在时间线最底部。
-  .metaRow {
-    display: flex;
-    align-items: center;
-    gap: $space-2;
-  }
-
-  .time {
-    font-family: var(--font-mono);
-    font-size: $fs-10;
-    color: var(--color-text-faint);
-  }
 }
 
 // markdown 排版：贴合现有文本风格，元素间距收紧；首尾元素不留外边距

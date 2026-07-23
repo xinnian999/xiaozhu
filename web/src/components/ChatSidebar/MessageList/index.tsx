@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { MessageSquare, RotateCcw, PlayCircle } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
+import { formatClock } from '@/lib/format'
 import type { Message } from '@/types/project'
-import MessageBubble, { AssistantMetaRow } from '../MessageBubble'
+import MessageBubble from '../MessageBubble'
 import styles from './index.module.scss'
 
 // 首次进入会话时，等右侧预览区的 fade-up 展开动画（0.6s）放完、布局稳定后再滚到底。
@@ -101,9 +102,8 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
     )
   }
 
-  // 只在「最后一条文本消息」下方显示时间，作为这轮对话结束的标记。
-  // 从后往前找第一条文本消息（跳过工具卡 / 版本卡 —— 它们本就不显示时间，
-  // 否则末尾跟着一张版本卡时会导致整段对话都不显示时间）。
+  // 底部操作栏使用最后一条文本消息的时间。跳过工具卡 / 版本卡，因为它们只是
+  // 同一轮回复的过程节点，不应该把时间锚点改成工具执行时刻。
   let lastTextIndex = -1
   for (let i = messages.length - 1; i >= 0; i--) {
     const k = messages[i].kind
@@ -116,16 +116,6 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
   // 是否有可重试的内容：至少有一条用户消息（手动编辑只追加版本卡、不产生用户消息）。
   const hasUserMessage = messages.some((m) => m.role === 'user')
   const canRetry = !isStreaming && !!onRetry && hasUserMessage
-  const lastTextIsAssistant = lastTextIndex >= 0 && messages[lastTextIndex].role === 'assistant'
-  // 待回答的 ask_user 是这段 assistant 回复的一部分，视觉顺序应是
-  // 「正文 → 问答卡 → 时间」。时间原本渲染在正文组件内部，需要在这种情况下
-  // 延后到卡片之后；否则刷新后数据库按「正文、工具」还原时，时间会夹在二者中间。
-  const hasPendingAskAfterLastText =
-    lastTextIndex >= 0 &&
-    messages
-      .slice(lastTextIndex + 1)
-      .some((m) => m.kind === 'tool' && m.toolName === 'ask_user' && !m.toolResult)
-  const deferAssistantMeta = lastTextIsAssistant && hasPendingAskAfterLastText
 
   // 对话末尾是不是一张「运行中」的工具卡（kind=tool 且还没拿到结果）。
   // 是的话，那张卡自带 loading 转圈，底部就不必再显示「正在生成」，避免双 loading。
@@ -155,20 +145,13 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
 
   return (
     <div className={styles.list}>
-      {messages.map((msg, i) => (
+      {messages.map((msg) => (
         <MessageBubble
           key={msg.id}
           message={msg}
-          isLast={i === lastTextIndex && !deferAssistantMeta}
           onAskUserAnswer={onAskUserAnswer}
         />
       ))}
-
-      {deferAssistantMeta && (
-        <AssistantMetaRow
-          createdAt={messages[lastTextIndex].createdAt}
-        />
-      )}
 
       {/* 中断续跑提示卡：最新一轮被打断（刷新 / 锁屏 / 断网）后显示。点「继续生成」从
           断点接着跑，不用从头重来。仅在没有进行中的流 / 没在等 ask_user 回答时出现。 */}
@@ -203,18 +186,27 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
         </div>
       )}
 
-      {/* 会话级操作始终放在完整时间线最底部，不再嵌进某条正文的时间行。
-          这样后续出现工具卡、版本卡或「继续生成」时，按钮也不会夹到消息中间。 */}
-      {canRetry && (
-        <button
-          type="button"
-          className={styles.retryBtn}
-          onClick={onRetry}
-          title="用当前项目状态重新生成这一轮（会追加一个新版本）"
-        >
-          <RotateCcw size={13} className={styles.retryIcon} />
-          <span>重新生成</span>
-        </button>
+      {/* 时间和重新生成是同一个会话级底栏，始终位于完整时间线最下面。 */}
+      {!isStreaming && lastTextIndex >= 0 && (
+        <div className={styles.timelineMeta}>
+          <time
+            className={styles.time}
+            dateTime={new Date(messages[lastTextIndex].createdAt).toISOString()}
+          >
+            {formatClock(messages[lastTextIndex].createdAt)}
+          </time>
+          {canRetry && (
+            <button
+              type="button"
+              className={styles.retryBtn}
+              onClick={onRetry}
+              title="用当前项目状态重新生成这一轮（会追加一个新版本）"
+            >
+              <RotateCcw size={13} className={styles.retryIcon} />
+              <span>重新生成</span>
+            </button>
+          )}
+        </div>
       )}
 
       <div ref={endRef} className={styles.listEnd} aria-hidden />

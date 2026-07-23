@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { FileText, FilePlus, FilePen, FolderOpen, Wrench, Bug, ChevronRight, GitCommit, RotateCcw, Loader2, Check, AlertCircle, HelpCircle, BrainCircuit } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { formatClock } from '@/lib/format'
 import { useSessionStore } from '@/store/session'
 import { useUIStore } from '@/store/ui'
 import { toast } from '@/lib/toast'
@@ -13,34 +12,9 @@ type Props = {
   message: Message
   /** 是否正在流式输出（显示光标动画，隐藏时间戳） */
   isStreaming?: boolean
-  /** 是否是对话里最后一条文本消息 —— 只有它才显示时间，作为本轮结束的标记 */
-  isLast?: boolean
   /** ask_user 交互卡片答完（单个问题或多问题 Tab 全部答完）时的回调，只传给 kind='tool'
    *  且 toolName='ask_user' 的消息。answer 是 AskUserChip 内部已经汇总格式化好的文本。 */
   onAskUserAnswer?: (message: Message, answer: string) => Promise<void>
-}
-
-type AssistantMetaProps = {
-  createdAt: number
-}
-
-function AssistantMetaContents({ createdAt }: AssistantMetaProps) {
-  return (
-    <div className={styles.metaRow}>
-      <time className={styles.time} dateTime={new Date(createdAt).toISOString()}>
-        {formatClock(createdAt)}
-      </time>
-    </div>
-  )
-}
-
-/** ask_user 卡片需要落在回复正文之后、时间栏之前；列表层用它把时间栏延后到卡片下方。 */
-export function AssistantMetaRow(props: AssistantMetaProps) {
-  return (
-    <div className={styles.assistantMsg}>
-      <AssistantMetaContents {...props} />
-    </div>
-  )
 }
 
 // ============================================
@@ -50,7 +24,7 @@ export function AssistantMetaRow(props: AssistantMetaProps) {
 //   （toolName === 'ask_user' 走独立的 AskUserChip，其余走 ToolCallChip）
 // - kind === 'version'：渲染成"版本卡"，附带回滚按钮
 // - 其余情况：渲染成普通文本气泡
-export default function MessageBubble({ message, isStreaming = false, isLast = false, onAskUserAnswer }: Props) {
+export default function MessageBubble({ message, isStreaming = false, onAskUserAnswer }: Props) {
   // 必须在任何条件 return 之前调用 hook（Hooks 规则）
   const openImagePreview = useUIStore((s) => s.openImagePreview)
 
@@ -94,9 +68,6 @@ export default function MessageBubble({ message, isStreaming = false, isLast = f
           {isStreaming && <span className={styles.cursor} aria-hidden />}
         </div>
 
-        {!isStreaming && isLast && (
-          <AssistantMetaContents createdAt={message.createdAt} />
-        )}
       </div>
     )
   }
@@ -123,11 +94,6 @@ export default function MessageBubble({ message, isStreaming = false, isLast = f
         {/* 只发图片没文字时不渲染空段落 */}
         {message.text && <p className={styles.text}>{message.text}</p>}
 
-        {isLast && (
-          <time className={styles.time} dateTime={new Date(message.createdAt).toISOString()}>
-            {formatClock(message.createdAt)}
-          </time>
-        )}
       </div>
     </article>
   )

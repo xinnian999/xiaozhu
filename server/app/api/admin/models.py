@@ -18,6 +18,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import llm
 from app.db import get_db
+from app.model_providers import (
+    canonical_model_values,
+    infer_provider,
+    provider_catalog,
+    provider_spec,
+    ReasoningObservation,
+    reasoning_observation,
+    supports_thinking_toggle,
+    tool_choice_for_provider,
+    unsupported_vision_reason,
+)
 from app.models.llm_config import (
     LlmModel,
     LlmModelAdminCreate,
@@ -28,6 +39,7 @@ from app.models.llm_config import (
     LlmModelExportItem,
     LlmModelImportRequest,
     LlmModelImportResult,
+    LlmProviderRead,
     LlmModelCapabilityTestResult,
     LlmModelTestResult,
     ModelTestCapability,
@@ -46,6 +58,9 @@ _TEST_TIMEOUT_SEC = 30
 def _to_read(model: LlmModel) -> LlmModelAdminRead:
     data = LlmModelAdminRead.model_validate(model)
     data.api_key = mask_secret(model.api_key)
+    spec = provider_spec(model.provider)
+    data.provider = spec.id
+    data.logo = spec.logo
     return data
 
 
@@ -83,46 +98,13 @@ def _solid_png_data_url(red: int, green: int, blue: int) -> str:
     return "data:image/png;base64," + base64.b64encode(png).decode()
 
 
-def _reasoning_tokens(resp: object) -> int:
-    """兼容不同中转/LangChain 版本，提取可观察到的推理 token 数。"""
-    response_metadata = getattr(resp, "response_metadata", {}) or {}
-    usage_metadata = getattr(resp, "usage_metadata", {}) or {}
-    candidates = [
-        response_metadata.get("token_usage", {}),
-        response_metadata.get("usage", {}),
-        usage_metadata,
-    ]
-    for usage in candidates:
-        if not isinstance(usage, dict):
-            continue
-        details = (
-            usage.get("completion_tokens_details")
-            or usage.get("output_token_details")
-            or {}
-        )
-        if isinstance(details, dict):
-            value = details.get("reasoning_tokens") or details.get("reasoning")
-            if isinstance(value, int):
-                return value
-    return 0
-
-
-def _has_reasoning_signal(resp: object) -> bool:
-    additional = getattr(resp, "additional_kwargs", {}) or {}
-    if isinstance(additional, dict):
-        for key in ("reasoning_content", "reasoning", "reasoning_details"):
-            if additional.get(key):
-                return True
-    return _reasoning_tokens(resp) > 0
-
-
-def _reasoning_content(resp: object) -> str:
-    """只读取中转明确返回的 reasoning_content，不用 token 数推测正文。"""
-    additional = getattr(resp, "additional_kwargs", {}) or {}
-    if not isinstance(additional, dict):
-        return ""
-    content = additional.get("reasoning_content")
-    return _message_text(content) if content else ""
+async def _thinking_probe(model_id: str, *, enabled: bool) -> ReasoningObservation:
+    model = llm.build_llm(model_id, thinking=enabled)
+    response = await _invoke_with_timeout(
+        model,
+        [HumanMessage(content="请认真计算 137 × 29，只回答最终数字。")],
+    )
+    return reasoning_observation(response)
 
 
 async def _invoke_with_timeout(
@@ -150,6 +132,81 @@ def _capability_result(
     )
 
 
+async def _record_detected_capability(
+    db: AsyncSession,
+    model: LlmModel,
+    capability: ModelTestCapability,
+    *,
+    supported: bool,
+    status: str,
+    thinking_toggle: bool = False,
+) -> None:
+    """把探测结论写回模型；聊天端只消费这里产生的能力标记。"""
+    if capability == "vision":
+        model.vision = supported
+        model.vision_status = status
+    elif capability == "thinking":
+        model.thinking = supported
+        model.thinking_toggle = supported and thinking_toggle
+        model.thinking_status = status
+    else:
+        return
+    await db.commit()
+    await llm.refresh()
+
+
+def _canonical_config(
+    data: dict,
+    *,
+    provider: str | None,
+    base_url: str | None,
+) -> dict:
+    provider_id, logo, canonical_base_url = canonical_model_values(provider, base_url)
+    data["provider"] = provider_id
+    data["logo"] = logo
+    data["base_url"] = canonical_base_url
+    return data
+
+
+def _test_error_message(exc: Exception, model: LlmModel) -> str:
+    """把常见厂商错误转成管理员能直接采取行动的失败原因。"""
+    raw = str(exc).replace("\n", " ").strip()
+    status_code = getattr(exc, "status_code", None)
+    if status_code is None:
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+    if status_code is None and (
+        "error code: 401" in raw.lower() or "status code: 401" in raw.lower()
+    ):
+        status_code = 401
+
+    if status_code == 401:
+        spec = provider_spec(model.provider)
+        base_url = model.base_url or spec.default_base_url or "厂商官方默认端点"
+        if spec.id == "qwen":
+            guidance = (
+                "阿里云官方端点必须使用同区域的 DashScope API Key；"
+                "若密钥来自中转站，请恢复对应 Base URL；"
+                "中转仅兼容通用 OpenAI 协议时可选择 OpenAI 厂商。"
+            )
+        elif spec.id == "minimax":
+            guidance = "MiniMax 中国站与国际站的 API Key 不通用，请确认 Base URL 区域。"
+        elif spec.id == "openai" and model.base_url:
+            guidance = "请确认该 Key 与 OpenAI 兼容 Base URL 属于同一服务。"
+        else:
+            guidance = "请重新填写该厂商当前区域签发的 API Key。"
+        return (
+            f"API Key 鉴权失败（401）：密钥与 {spec.label} 当前端点不匹配。"
+            f"当前 Base URL：{base_url}。{guidance}"
+        )
+
+    if status_code == 403:
+        return "鉴权成功但无权访问该模型（403），请检查模型权限、配额或区域。"
+    if status_code == 429:
+        return "厂商限流或额度不足（429），请检查余额与并发配额后重试。"
+    return f"{type(exc).__name__}: {raw[:300]}"
+
+
 @router.get("", response_model=list[LlmModelAdminRead])
 async def list_models(db: AsyncSession = Depends(get_db)) -> list[LlmModelAdminRead]:
     """全量列出模型，按排序权重展示（对齐前端清单的排序习惯）。"""
@@ -157,12 +214,24 @@ async def list_models(db: AsyncSession = Depends(get_db)) -> list[LlmModelAdminR
     return [_to_read(m) for m in result.scalars().all()]
 
 
+@router.get("/providers", response_model=list[LlmProviderRead])
+async def list_providers() -> list[LlmProviderRead]:
+    """返回可选择的厂商目录；Logo 与适配器信息均由服务端维护。"""
+    return [LlmProviderRead.model_validate(item) for item in provider_catalog()]
+
+
 @router.get("/export", response_model=LlmModelExportBundle)
 async def export_models(db: AsyncSession = Depends(get_db)) -> LlmModelExportBundle:
     """导出全部模型配置（含明文 api_key），用于跨环境迁移。"""
     result = await db.execute(select(LlmModel).order_by(LlmModel.sort_order))
-    models = [LlmModelExportItem.model_validate(m) for m in result.scalars().all()]
-    return LlmModelExportBundle(exported_at=datetime.now(), models=models)
+    models: list[LlmModelExportItem] = []
+    for model in result.scalars().all():
+        item = LlmModelExportItem.model_validate(model)
+        spec = provider_spec(model.provider)
+        item.provider = spec.id
+        item.logo = spec.logo
+        models.append(item)
+    return LlmModelExportBundle(version=3, exported_at=datetime.now(), models=models)
 
 
 @router.post("/import", response_model=LlmModelImportResult)
@@ -176,12 +245,29 @@ async def import_models(
     for item in body.models:
         existing = await db.get(LlmModel, item.id)
         data = item.model_dump()
+        # v1 导出包没有 provider：仅按官方域名迁移，不根据模型名猜厂商。
+        selected_provider = (
+            item.provider
+            if "provider" in item.model_fields_set
+            else infer_provider(item.base_url)
+        )
+        data = _canonical_config(
+            data,
+            provider=selected_provider,
+            base_url=item.base_url,
+        )
         if existing is None:
             db.add(LlmModel(**data))
             created += 1
         else:
             for field, value in data.items():
                 setattr(existing, field, value)
+            # 导入可能替换厂商、端点或密钥，旧环境的能力结论不可沿用。
+            existing.vision = False
+            existing.thinking = False
+            existing.thinking_toggle = False
+            existing.vision_status = "unknown"
+            existing.thinking_status = "unknown"
             updated += 1
     await db.commit()
     await llm.refresh()
@@ -201,7 +287,13 @@ async def create_model(
     existing = await db.get(LlmModel, body.id)
     if existing is not None:
         raise HTTPException(status_code=409, detail="该模型 ID 已存在")
-    model = LlmModel(**body.model_dump())
+    data = body.model_dump()
+    data = _canonical_config(
+        data,
+        provider=body.provider,
+        base_url=body.base_url,
+    )
+    model = LlmModel(**data)
     db.add(model)
     await db.commit()
     await db.refresh(model)
@@ -209,7 +301,12 @@ async def create_model(
     return _to_read(model)
 
 
-@router.patch("/{model_id}", response_model=LlmModelAdminRead)
+@router.patch(
+    "/{model_id}",
+    response_model=LlmModelAdminRead,
+    include_in_schema=False,
+)
+@router.patch("/operations/model", response_model=LlmModelAdminRead)
 async def update_model(
     model_id: str,
     body: LlmModelAdminUpdate,
@@ -219,7 +316,29 @@ async def update_model(
     model = await db.get(LlmModel, model_id)
     if model is None:
         raise HTTPException(status_code=404, detail="模型不存在")
-    for field, value in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    selected_provider = data.get("provider", model.provider)
+    selected_base_url = data.get("base_url", model.base_url)
+    data = _canonical_config(
+        data,
+        provider=selected_provider,
+        base_url=selected_base_url,
+    )
+    capability_config_changed = any(
+        field in body.model_fields_set
+        and data.get(field) != getattr(model, field)
+        for field in ("provider", "base_url", "api_key")
+    )
+    if capability_config_changed:
+        # 厂商、端点或密钥变化后，旧探测结论立即失效；需重新执行全面测试。
+        data.update(
+            vision=False,
+            thinking=False,
+            thinking_toggle=False,
+            vision_status="unknown",
+            thinking_status="unknown",
+        )
+    for field, value in data.items():
         setattr(model, field, value)
     await db.commit()
     await db.refresh(model)
@@ -227,7 +346,12 @@ async def update_model(
     return _to_read(model)
 
 
-@router.post("/{model_id}/test", response_model=LlmModelTestResult)
+@router.post(
+    "/{model_id}/test",
+    response_model=LlmModelTestResult,
+    include_in_schema=False,
+)
+@router.post("/operations/model/test", response_model=LlmModelTestResult)
 async def test_model(
     model_id: str, db: AsyncSession = Depends(get_db)
 ) -> LlmModelTestResult:
@@ -243,6 +367,11 @@ async def test_model(
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
         return LlmModelTestResult(ok=False, message=detail)
+    except Exception as exc:
+        return LlmModelTestResult(
+            ok=False,
+            message=f"适配器初始化失败：{type(exc).__name__}: {str(exc)[:200]}",
+        )
 
     started = time.perf_counter()
     try:
@@ -273,13 +402,18 @@ async def test_model(
         latency_ms = int((time.perf_counter() - started) * 1000)
         return LlmModelTestResult(
             ok=False,
-            message=f"{type(exc).__name__}: {str(exc)[:200]}",
+            message=_test_error_message(exc, model),
             latency_ms=latency_ms,
         )
 
 
 @router.post(
     "/{model_id}/test/{capability}",
+    response_model=LlmModelCapabilityTestResult,
+    include_in_schema=False,
+)
+@router.post(
+    "/operations/model/test/{capability}",
     response_model=LlmModelCapabilityTestResult,
 )
 async def test_model_capability(
@@ -292,6 +426,13 @@ async def test_model_capability(
     if model is None:
         raise HTTPException(status_code=404, detail="模型不存在")
     if not model.api_key:
+        await _record_detected_capability(
+            db,
+            model,
+            capability,
+            supported=False,
+            status="failed",
+        )
         return LlmModelCapabilityTestResult(
             capability=capability,
             status="failed",
@@ -301,11 +442,31 @@ async def test_model_capability(
     try:
         llm_instance = llm.build_llm(model_id)
     except HTTPException as exc:
+        await _record_detected_capability(
+            db,
+            model,
+            capability,
+            supported=False,
+            status="failed",
+        )
         detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
         return LlmModelCapabilityTestResult(
             capability=capability,
             status="failed",
             message=detail,
+        )
+    except Exception as exc:
+        await _record_detected_capability(
+            db,
+            model,
+            capability,
+            supported=False,
+            status="failed",
+        )
+        return LlmModelCapabilityTestResult(
+            capability=capability,
+            status="failed",
+            message=f"适配器初始化失败：{type(exc).__name__}: {str(exc)[:200]}",
         )
 
     started = time.perf_counter()
@@ -329,6 +490,22 @@ async def test_model_capability(
             )
 
         if capability == "vision":
+            if reason := unsupported_vision_reason(model.provider):
+                await _record_detected_capability(
+                    db,
+                    model,
+                    capability,
+                    supported=False,
+                    status="unsupported",
+                )
+                return _capability_result(
+                    capability,
+                    "unsupported",
+                    reason,
+                    started,
+                )
+            image_data_url = _solid_png_data_url(230, 35, 45)
+            header, image_data = image_data_url.split(",", 1)
             resp = await _invoke_with_timeout(
                 llm_instance,
                 [
@@ -339,8 +516,9 @@ async def test_model_capability(
                                 "text": "这张纯色图片是什么颜色？只回答颜色名称。",
                             },
                             {
-                                "type": "image_url",
-                                "image_url": {"url": _solid_png_data_url(230, 35, 45)},
+                                "type": "image",
+                                "base64": image_data,
+                                "mime_type": header[5:].split(";", 1)[0],
                             },
                         ]
                     )
@@ -348,12 +526,26 @@ async def test_model_capability(
             )
             answer = _message_text(resp.content)
             if "红" in answer or "red" in answer.lower():
+                await _record_detected_capability(
+                    db,
+                    model,
+                    capability,
+                    supported=True,
+                    status="supported",
+                )
                 return _capability_result(
                     capability,
                     "passed",
                     f"正确识别红色测试图（{answer[:50]}）",
                     started,
                 )
+            await _record_detected_capability(
+                db,
+                model,
+                capability,
+                supported=False,
+                status="unsupported",
+            )
             return _capability_result(
                 capability,
                 "unsupported",
@@ -362,40 +554,33 @@ async def test_model_capability(
             )
 
         if capability == "thinking":
-            resp = await _invoke_with_timeout(
-                llm_instance,
-                [HumanMessage(content="请认真计算 137 × 29，只回答最终数字。")],
-                extra_body={"enable_thinking": True},
-            )
-            tokens = _reasoning_tokens(resp)
-            content = _reasoning_content(resp)
-            has_reasoning = _has_reasoning_signal(resp)
+            enabled = await _thinking_probe(model_id, enabled=True)
             details = [
                 LlmModelCapabilityTestDetail(
                     key="thinking",
                     label="思考信号",
-                    status="passed" if has_reasoning else "unsupported",
+                    status="passed" if enabled.has_signal else "unsupported",
                     message=(
-                        f"检测到 {tokens} 个推理 token"
-                        if tokens
+                        f"检测到 {enabled.tokens} 个推理 token"
+                        if enabled.tokens
                         else "检测到模型返回的推理信号"
-                        if has_reasoning
+                        if enabled.has_signal
                         else "未检测到推理内容或推理 token"
                     ),
                 ),
                 LlmModelCapabilityTestDetail(
                     key="reasoning_content",
                     label="推理内容",
-                    status="passed" if content else "unsupported",
+                    status="passed" if enabled.content else "unsupported",
                     message=(
-                        f"返回 {len(content)} 个字符"
-                        if content
-                        else "未返回 reasoning_content 文本"
+                        f"返回 {len(enabled.content)} 个字符"
+                        if enabled.content
+                        else "未返回 thinking / reasoning_content 文本"
                     ),
                 ),
             ]
 
-            if not has_reasoning:
+            if not enabled.has_signal:
                 details.append(
                     LlmModelCapabilityTestDetail(
                         key="disable_thinking",
@@ -403,6 +588,13 @@ async def test_model_capability(
                         status="unsupported",
                         message="未先检测到思考，无法验证关闭开关",
                     )
+                )
+                await _record_detected_capability(
+                    db,
+                    model,
+                    capability,
+                    supported=False,
+                    status="unsupported",
                 )
                 return _capability_result(
                     capability,
@@ -412,13 +604,34 @@ async def test_model_capability(
                     details,
                 )
 
-            try:
-                disabled_resp = await _invoke_with_timeout(
-                    llm_instance,
-                    [HumanMessage(content="请计算 137 × 29，只回答最终数字。")],
-                    extra_body={"enable_thinking": False},
+            if not supports_thinking_toggle(model.provider, model.id):
+                details.append(
+                    LlmModelCapabilityTestDetail(
+                        key="disable_thinking",
+                        label="关闭思考",
+                        status="unsupported",
+                        message="该厂商或当前模型没有可验证的关闭思考参数",
+                    )
                 )
-                can_disable = not _has_reasoning_signal(disabled_resp)
+                await _record_detected_capability(
+                    db,
+                    model,
+                    capability,
+                    supported=True,
+                    status="supported",
+                    thinking_toggle=False,
+                )
+                return _capability_result(
+                    capability,
+                    "unsupported",
+                    "支持思考，但无法验证关闭开关",
+                    started,
+                    details,
+                )
+
+            try:
+                disabled = await _thinking_probe(model_id, enabled=False)
+                can_disable = not disabled.has_signal
                 details.append(
                     LlmModelCapabilityTestDetail(
                         key="disable_thinking",
@@ -448,12 +661,24 @@ async def test_model_capability(
                         key="disable_thinking",
                         label="关闭思考",
                         status="failed",
-                        message=f"{type(exc).__name__}: {str(exc)[:120]}",
+                        message=_test_error_message(exc, model),
                     )
                 )
 
+            await _record_detected_capability(
+                db,
+                model,
+                capability,
+                supported=True,
+                status="supported",
+                thinking_toggle=can_disable,
+            )
             status: ModelTestStatus = (
-                "failed" if not can_disable else "passed" if content else "unsupported"
+                "failed"
+                if not can_disable
+                else "passed"
+                if enabled.content
+                else "unsupported"
             )
             return _capability_result(
                 capability,
@@ -475,7 +700,14 @@ async def test_model_capability(
                 },
             },
         }
-        tool_llm = llm_instance.bind_tools([tool_schema], tool_choice="required")
+        # 工具能力独立测试：可关闭思考的厂商先关闭，避免 thinking 模式对
+        # tool_choice 的额外限制；不支持关闭的适配器会保留厂商默认行为。
+        tool_model = llm.build_llm(model_id, thinking=False)
+        tool_choice = tool_choice_for_provider(model.provider)
+        if tool_choice is None:
+            tool_llm = tool_model.bind_tools([tool_schema])
+        else:
+            tool_llm = tool_model.bind_tools([tool_schema], tool_choice=tool_choice)
         resp = await _invoke_with_timeout(
             tool_llm,
             [HumanMessage(content="请调用工具查询北京天气，不要直接回答。")],
@@ -496,19 +728,34 @@ async def test_model_capability(
             started,
         )
     except TimeoutError:
+        await _record_detected_capability(
+            db,
+            model,
+            capability,
+            supported=False,
+            status="failed",
+        )
         return _capability_result(
             capability, "failed", f"请求超时（>{_TEST_TIMEOUT_SEC}s）", started
         )
     except Exception as exc:
+        await _record_detected_capability(
+            db,
+            model,
+            capability,
+            supported=False,
+            status="failed",
+        )
         return _capability_result(
             capability,
             "failed",
-            f"{type(exc).__name__}: {str(exc)[:200]}",
+            _test_error_message(exc, model),
             started,
         )
 
 
-@router.delete("/{model_id}", status_code=204)
+@router.delete("/{model_id}", status_code=204, include_in_schema=False)
+@router.delete("/operations/model", status_code=204)
 async def delete_model(model_id: str, db: AsyncSession = Depends(get_db)) -> Response:
     model = await db.get(LlmModel, model_id)
     if model is None:

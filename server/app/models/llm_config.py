@@ -1,7 +1,7 @@
 """LLM 模型配置（搬进数据库）—— 原本写死在 app/llm.py 的 AVAILABLE_MODELS。
 
 单表设计：每个模型自带全部所需信息（不再有「分组」共享 key 的机制）：
-  id / base_url / api_key / logo / cost(倍率) / vision(识图) / enabled(启用)。
+  id / provider / base_url / api_key / logo / cost(倍率) / 能力探测结果 / enabled(启用)。
 
 读取方：app/llm.py。它启动时把本表读进内存缓存（registry），
 build_llm / public_models / 白名单校验都查缓存，不每次打数据库；
@@ -24,7 +24,12 @@ class LlmModel(Base):
     # 真正传给中转的模型名，做主键，如 "qwen3-coder-next"。同时作为前端展示名。
     id: Mapped[str] = mapped_column(String, primary_key=True)
 
-    # 该模型调用的中转地址（OpenAI 兼容端点）。为空则用官方 api.openai.com。
+    # 实际 API 厂商/协议。OpenAI 厂商也承载 OpenAI 兼容中转地址。
+    provider: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="openai"
+    )
+
+    # 该模型调用的 API 地址。为空时使用所选厂商的官方默认地址。
     base_url: Mapped[str | None] = mapped_column(String, nullable=True)
 
     # 该模型调用用的 api_key。敏感 —— 后台列表会脱敏显示。
@@ -36,6 +41,21 @@ class LlmModel(Base):
 
     # 是否支持识图（多模态）。前端据此把不支持的模型「添加图片」按钮置灰。
     vision: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="0")
+
+    # 是否检测到思考信号；是否能关闭另存一列，避免把「会思考但不可关闭」误装成可用开关。
+    thinking: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="0")
+    thinking_toggle: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="0"
+    )
+
+    # 能力探测状态：unknown / supported / unsupported / failed。
+    # 布尔列供业务快速判断；状态列供后台区分「不支持」与「尚未/探测失败」。
+    vision_status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="unknown"
+    )
+    thinking_status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="unknown"
+    )
 
     # 付费倍率：一轮对话扣多少点。普通 1、更贵的模型 2（计费见 app/billing.py）。
     cost: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
@@ -54,7 +74,7 @@ class LlmModel(Base):
 
 from typing import Literal  # noqa: E402
 
-from pydantic import BaseModel, Field  # noqa: E402
+from pydantic import BaseModel, Field, model_validator  # noqa: E402
 
 
 class LlmModelAdminRead(BaseModel):
@@ -63,10 +83,15 @@ class LlmModelAdminRead(BaseModel):
     model_config = {"from_attributes": True}
 
     id: str
+    provider: str
     base_url: str | None
     api_key: str
     logo: str
     vision: bool
+    thinking: bool
+    thinking_toggle: bool
+    vision_status: Literal["unknown", "supported", "unsupported", "failed"]
+    thinking_status: Literal["unknown", "supported", "unsupported", "failed"]
     cost: int
     enabled: bool
     sort_order: int
@@ -75,11 +100,13 @@ class LlmModelAdminRead(BaseModel):
 class LlmModelAdminCreate(BaseModel):
     """POST /api/admin/models 的请求体：新增一个模型（对齐 admin.py 的 form_include_pk）。"""
 
+    model_config = {"extra": "forbid"}
+
     id: str = Field(min_length=1)
+    provider: str = "openai"
     base_url: str | None = None
     api_key: str = ""
     logo: str = ""
-    vision: bool = False
     cost: int = Field(default=1, ge=1)
     enabled: bool = True
     sort_order: int = 0
@@ -88,13 +115,34 @@ class LlmModelAdminCreate(BaseModel):
 class LlmModelAdminUpdate(BaseModel):
     """PATCH /api/admin/models/{id} 的请求体：编辑模型，字段都可选（partial update）。"""
 
+    model_config = {"extra": "forbid"}
+
+    provider: str | None = None
     base_url: str | None = None
     api_key: str | None = None
     logo: str | None = None
-    vision: bool | None = None
     cost: int | None = Field(default=None, ge=1)
     enabled: bool | None = None
     sort_order: int | None = None
+
+    @model_validator(mode="after")
+    def reject_null_for_required_columns(self):
+        """字段可省略以支持 PATCH，但数据库非空列不能被显式写成 null。"""
+        non_nullable = {
+            "provider",
+            "api_key",
+            "cost",
+            "enabled",
+            "sort_order",
+        }
+        invalid = sorted(
+            field
+            for field in non_nullable & self.model_fields_set
+            if getattr(self, field) is None
+        )
+        if invalid:
+            raise ValueError(f"以下字段不能为 null：{', '.join(invalid)}")
+        return self
 
 
 class SetEnabledRequest(BaseModel):
@@ -110,10 +158,10 @@ class LlmModelExportItem(BaseModel):
     model_config = {"from_attributes": True}
 
     id: str = Field(min_length=1)
+    provider: str = "openai"
     base_url: str | None = None
     api_key: str = ""
     logo: str = ""
-    vision: bool = False
     cost: int = Field(default=1, ge=1)
     enabled: bool = True
     sort_order: int = 0
@@ -122,7 +170,7 @@ class LlmModelExportItem(BaseModel):
 class LlmModelExportBundle(BaseModel):
     """GET /api/admin/models/export 的响应体：带版本号的导出包，方便跨环境迁移。"""
 
-    version: int = 1
+    version: int = 3
     exported_at: datetime
     models: list[LlmModelExportItem]
 
@@ -139,6 +187,17 @@ class LlmModelImportResult(BaseModel):
     created: int
     updated: int
     total: int
+
+
+class LlmProviderRead(BaseModel):
+    """管理后台可选择的预制模型厂商。"""
+
+    id: str
+    label: str
+    logo: str
+    adapter: str
+    default_base_url: str | None
+    description: str
 
 
 class LlmModelTestResult(BaseModel):

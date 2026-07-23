@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { MessageSquare, RotateCcw, PlayCircle } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
+import { formatClock } from '@/lib/format'
 import type { Message } from '@/types/project'
 import MessageBubble from '../MessageBubble'
 import styles from './index.module.scss'
@@ -41,6 +42,12 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
   const sessionId = session?.id ?? null
   // 本轮流式已累积的文本：非空 = 已经在吐字了，就不再显示「思考中」计时提示。
   const streamingText = session?.streamingText ?? ''
+  // 厂商正在回传真实推理正文时，由思考卡自身展示流式状态，不再叠一层通用计时提示。
+  const liveReasoning = [...messages].reverse().find(
+    (m) => m.kind === 'reasoning' && m.reasoningStreaming,
+  )
+  const liveReasoningTextLength = liveReasoning?.text.length ?? 0
+  const hasLiveReasoning = liveReasoning !== undefined
   // 最新工具卡：用于判断当前这段「静默等待」到底是在构建、修复，还是已经构建完等模型总结。
   // 注意：工具卡的 result 是异步回填的，下面的 phaseKey 会把「工具刚出现」和「工具有结果」
   // 当成两个阶段，计时也跟着重置，避免把整轮累计时间误显示成当前卡住时间。
@@ -58,7 +65,7 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
   // 避免把整轮累计耗时误显示成当前卡住时间。
   const [genSeconds, setGenSeconds] = useState(0)
   useEffect(() => {
-    if (!isStreaming || streamingText) {
+    if (!isStreaming || streamingText || hasLiveReasoning) {
       const resetTimer = setTimeout(() => setGenSeconds(0), 0)
       return () => clearTimeout(resetTimer)
     }
@@ -71,7 +78,7 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
       clearTimeout(resetTimer)
       clearInterval(timer)
     }
-  }, [isStreaming, streamingText, phaseKey])
+  }, [isStreaming, streamingText, hasLiveReasoning, phaseKey])
 
   // 新消息到来 / 进入思考态时滚动到底部
   useEffect(() => {
@@ -89,7 +96,7 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
     }
     // 同会话后续更新：即时平滑滚动
     endRef.current.scrollIntoView({ behavior: 'smooth' })
-  }, [sessionId, messages.length, isStreaming, resumable])
+  }, [sessionId, messages.length, liveReasoningTextLength, isStreaming, resumable])
 
   if (messages.length === 0 && !isStreaming) {
     return (
@@ -101,9 +108,8 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
     )
   }
 
-  // 只在「最后一条文本消息」下方显示时间，作为这轮对话结束的标记。
-  // 从后往前找第一条文本消息（跳过工具卡 / 版本卡 —— 它们本就不显示时间，
-  // 否则末尾跟着一张版本卡时会导致整段对话都不显示时间）。
+  // 底部操作栏使用最后一条文本消息的时间。跳过工具卡 / 版本卡，因为它们只是
+  // 同一轮回复的过程节点，不应该把时间锚点改成工具执行时刻。
   let lastTextIndex = -1
   for (let i = messages.length - 1; i >= 0; i--) {
     const k = messages[i].kind
@@ -116,10 +122,6 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
   // 是否有可重试的内容：至少有一条用户消息（手动编辑只追加版本卡、不产生用户消息）。
   const hasUserMessage = messages.some((m) => m.role === 'user')
   const canRetry = !isStreaming && !!onRetry && hasUserMessage
-  // 最终回复（最后一条文本）是不是 AI 的：是 → 把「重新生成」挂到它的时间行右侧（落在版本卡之前）；
-  // 不是（少见：截断 / 报错导致这轮没产出 AI 文本）→ 退回到对话末尾的独立按钮兜底。
-  const lastTextIsAssistant = lastTextIndex >= 0 && messages[lastTextIndex].role === 'assistant'
-  const inlineRetry = canRetry && lastTextIsAssistant
 
   // 对话末尾是不是一张「运行中」的工具卡（kind=tool 且还没拿到结果）。
   // 是的话，那张卡自带 loading 转圈，底部就不必再显示「正在生成」，避免双 loading。
@@ -142,6 +144,9 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
       thinkingLabel = '预览等待超时'
       thinkingHint = `模型正在处理超时结果，已等待 ${genSeconds}s…`
     }
+  } else if (latestTool?.toolName === 'ask_user' && latestToolResult) {
+    thinkingLabel = '正在处理回答'
+    thinkingHint = `模型已收到你的回答，正在继续生成，已等待 ${genSeconds}s…`
   } else if (latestTool?.toolResult) {
     thinkingLabel = '继续处理'
     thinkingHint = `模型正在规划下一步，已等待 ${genSeconds}s…`
@@ -149,29 +154,13 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
 
   return (
     <div className={styles.list}>
-      {messages.map((msg, i) => (
+      {messages.map((msg) => (
         <MessageBubble
           key={msg.id}
           message={msg}
-          isLast={i === lastTextIndex}
-          // 只把回调给最终回复那条 AI 消息，它据此在时间同行渲染「重新生成」
-          onRetry={inlineRetry && i === lastTextIndex ? onRetry : undefined}
           onAskUserAnswer={onAskUserAnswer}
         />
       ))}
-
-      {/* 兜底：这轮没有 AI 最终回复可挂（截断 / 报错）时，仍在对话末尾给一个独立的重试按钮。 */}
-      {canRetry && !lastTextIsAssistant && (
-        <button
-          type="button"
-          className={styles.retryBtn}
-          onClick={onRetry}
-          title="用当前项目状态重新生成这一轮（会追加一个新版本）"
-        >
-          <RotateCcw size={13} className={styles.retryIcon} />
-          <span>重新生成</span>
-        </button>
-      )}
 
       {/* 中断续跑提示卡：最新一轮被打断（刷新 / 锁屏 / 断网）后显示。点「继续生成」从
           断点接着跑，不用从头重来。仅在没有进行中的流 / 没在等 ask_user 回答时出现。 */}
@@ -195,13 +184,36 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
           免得底部又冒一个 loading、和工具卡的转圈重复。空窗期 / 纯对话轮仍然显示。
           若久久没出字（推理型模型思考中、中转又不回传思维链），补一句耐心提示 + 计时，
           让「秒数在走」证明它还在干活，避免被当成卡死。 */}
-      {isStreaming && !tailToolRunning && (
+      {isStreaming && !tailToolRunning && !hasLiveReasoning && (
         <div className={styles.thinkingWrap} aria-live="polite">
           <span className={styles.thinking}>{thinkingLabel}</span>
           {genSeconds >= SLOW_GEN_HINT_AFTER && (
             <span className={styles.thinkingHint}>
               {thinkingHint}
             </span>
+          )}
+        </div>
+      )}
+
+      {/* 时间和重新生成是同一个会话级底栏，始终位于完整时间线最下面。 */}
+      {!isStreaming && lastTextIndex >= 0 && (
+        <div className={styles.timelineMeta}>
+          <time
+            className={styles.time}
+            dateTime={new Date(messages[lastTextIndex].createdAt).toISOString()}
+          >
+            {formatClock(messages[lastTextIndex].createdAt)}
+          </time>
+          {canRetry && (
+            <button
+              type="button"
+              className={styles.retryBtn}
+              onClick={onRetry}
+              title="用当前项目状态重新生成这一轮（会追加一个新版本）"
+            >
+              <RotateCcw size={13} className={styles.retryIcon} />
+              <span>重新生成</span>
+            </button>
           )}
         </div>
       )}

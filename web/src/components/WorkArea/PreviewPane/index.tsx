@@ -13,6 +13,20 @@ const REVEAL_COLLECT_MS = 1500
 // 别让后端 check_build 一直等到 90s 超时。
 const REVEAL_FALLBACK_MS = 6000
 
+type BuildCheckResult = {
+  ok: boolean
+  errors: string
+  runtime: boolean
+  visual: boolean
+}
+
+type RevealState = {
+  errors: string[]
+  layoutIssues: string[]
+  started: boolean
+  done: boolean
+}
+
 // ============================================
 // 预览面板：WebContainer 真实预览
 // - 首次进入 tab 才 boot（降低首屏开销）
@@ -58,8 +72,8 @@ export default function PreviewPane() {
   const appliedTickRef = useRef(0)
   // 记住上次【回报过】的完整结果（含运行时）—— 用于「版本没变但 AI 又调了一次 check_build」时，
   // 无需重新构建即可把上次结果原样回报，免得后端 check_build 干等到超时。
-  const lastBuildResultRef = useRef<{ ok: boolean; errors: string; runtime: boolean }>({
-    ok: true, errors: '', runtime: false,
+  const lastBuildResultRef = useRef<BuildCheckResult>({
+    ok: true, errors: '', runtime: false, visual: false,
   })
   // 容器当前归属哪个会话 —— 用来判断 activeId 变了要不要 teardown 重挂
   const containerSessionRef = useRef<string | null>(null)
@@ -76,16 +90,18 @@ export default function PreviewPane() {
   // activeId 放进 ref：下面的回调/定时器是在 effect 里建的闭包，
   // 直接读 activeId 会捕获到旧值，用 ref 保证拿到最新会话 id。
   const activeIdRef = useRef(activeId)
-  activeIdRef.current = activeId
+  useEffect(() => {
+    activeIdRef.current = activeId
+  }, [activeId])
 
-  // —— 揭晓收集：编译通过后，等 iframe 重载渲染、收集运行时错误，再回报 build-result ——
+  // —— 揭晓收集：编译通过后，等 iframe 重载渲染、收集运行时和布局错误，再回报 build-result ——
   // revealRef 非空 = 正有一次 check_build 揭晓在等结果。iframe load 后开收集窗，
-  // 窗内 console 桥抓到的运行时报错攒进 errors，窗结束就带着它们一起回报。
-  const revealRef = useRef<{ errors: string[]; started: boolean; done: boolean } | null>(null)
+  // 窗内桥接脚本抓到的运行时报错与布局问题，窗结束就带着它们一起回报。
+  const revealRef = useRef<RevealState | null>(null)
   const revealCollectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const revealFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // 收尾一次揭晓：把收集到的运行时错误打进 build-result 回报，唤醒后端 check_build。
+  // 收尾一次揭晓：把收集到的运行时和布局错误打进 build-result，唤醒后端 check_build。
   // 只用 ref，所以 useCallback([]) 稳定，可安全进各 effect 依赖。
   const finishReveal = useCallback(() => {
     const r = revealRef.current
@@ -96,10 +112,15 @@ export default function PreviewPane() {
     revealCollectTimerRef.current = null
     revealFallbackTimerRef.current = null
     revealRef.current = null
-    // 编译已通过；有运行时错误 → ok=false + runtime=true，否则一切正常。
-    const errs = r.errors
-    const result = { ok: errs.length === 0, errors: errs.join('\n'), runtime: errs.length > 0 }
-    lastBuildResultRef.current = result  // 记下真实结果（含运行时），供「重复 check_build」原样复用
+    // 编译已通过；运行时、布局任一类别有问题都不能通过，并分别打标供 agent 判断。
+    const errs = [...r.errors, ...r.layoutIssues]
+    const result: BuildCheckResult = {
+      ok: errs.length === 0,
+      errors: errs.join('\n'),
+      runtime: r.errors.length > 0,
+      visual: r.layoutIssues.length > 0,
+    }
+    lastBuildResultRef.current = result  // 记下真实结果，供「重复 check_build」原样复用
     const sid = activeIdRef.current
     if (sid) postBuildResult(sid, result)
   }, [])
@@ -231,14 +252,14 @@ export default function PreviewPane() {
         setWCStatus('ready')
         if (res.buildOk) {
           // 编译通过先记个基线（运行时这轮的话由 finishReveal 稍后覆盖成真实结果）
-          lastBuildResultRef.current = { ok: true, errors: '', runtime: false }
+          lastBuildResultRef.current = { ok: true, errors: '', runtime: false, visual: false }
           // 先架好「运行时错误收集」，再整页刷新 iframe 加载新 dist。build-result 不在这里
           // 立刻发 —— 要等 iframe 重载渲染、收集完运行时错误，由 finishReveal 带着「编译 +
           // 运行」结果一并回报（见 handleIframeLoad / 收集窗）。
           if (isReveal && activeId) {
             if (revealCollectTimerRef.current) clearTimeout(revealCollectTimerRef.current)
             if (revealFallbackTimerRef.current) clearTimeout(revealFallbackTimerRef.current)
-            revealRef.current = { errors: [], started: false, done: false }
+            revealRef.current = { errors: [], layoutIssues: [], started: false, done: false }
             // load 事件兜底：万一 iframe 始终不 load，到点也回报，别让 check_build 干等。
             revealFallbackTimerRef.current = setTimeout(finishReveal, REVEAL_FALLBACK_MS)
           }
@@ -246,7 +267,12 @@ export default function PreviewPane() {
         } else {
           // 编译失败：【不】刷新，保留上一个能跑的产物；错误显示到控制台「浏览器」面板，
           // 并立刻回报（编译错确定，无需等渲染）。
-          lastBuildResultRef.current = { ok: false, errors: res.buildError ?? '', runtime: false }
+          lastBuildResultRef.current = {
+            ok: false,
+            errors: res.buildError ?? '',
+            runtime: false,
+            visual: false,
+          }
           if (res.buildError) pushWcLog({ level: 'error', text: res.buildError })
           if (isReveal && activeId) postBuildResult(activeId, lastBuildResultRef.current)
         }
@@ -256,14 +282,15 @@ export default function PreviewPane() {
         setWCError(msg)
         setWCStatus('error')
         // 同步/构建本身抛异常（容器挂了等）也要回报，否则 check_build 同样会干等。
-        if (isReveal && activeId) postBuildResult(activeId, { ok: false, errors: msg, runtime: false })
+        if (isReveal && activeId) {
+          postBuildResult(activeId, { ok: false, errors: msg, runtime: false, visual: false })
+        }
       })
   }, [activeId, currentVersion.id, currentVersion.files, applyTick, isStreaming, setWCStatus, setWCLog, setWCError, reloadPreview, pushWcLog, finishReveal])
 
-  // —— 浏览器 console 桥接：iframe → 父页面 ——
-  // iframe 里注入的脚本会 postMessage({ type: 'xiaozhu-console', level, text })，
-  // 这里挂全局监听：推到控制台面板（给人看）；揭晓收集中时，error 还攒进 revealRef
-  // 供 build-result 回报（给 agent 看）。不再单独往后端推日志（log_store 已废）。
+  // —— 浏览器桥接：iframe → 父页面 ——
+  // console 桥把日志推到控制台；布局桥把浏览器实测的基础响应式问题攒进 revealRef，
+  // 两类问题最终一并回报给 agent。不再单独往后端推日志（log_store 已废）。
   useEffect(() => {
     const handle = (e: MessageEvent) => {
       const data = e.data
@@ -300,6 +327,18 @@ export default function PreviewPane() {
         const len = histStackRef.current.length
         // 用 getState 直接写，避免把 setter 加进 effect 依赖反复重订阅
         useUIStore.getState().setPreviewNav({ path, canBack: idx > 0, canForward: idx < len - 1 })
+        return
+      }
+
+      if (data.type === 'xiaozhu-layout') {
+        const r = revealRef.current
+        if (!r || r.done || !Array.isArray(data.issues)) return
+        for (const issue of data.issues) {
+          const text = String(issue ?? '').trim()
+          if (text && r.layoutIssues.length < 8 && !r.layoutIssues.includes(text)) {
+            r.layoutIssues.push(text)
+          }
+        }
         return
       }
 
@@ -346,7 +385,8 @@ export default function PreviewPane() {
       const t = setTimeout(() => setIframeVisible(true), 900)
       return () => clearTimeout(t)
     } else if (wcStatus !== 'syncing') {
-      setIframeVisible(false)
+      const t = setTimeout(() => setIframeVisible(false), 0)
+      return () => clearTimeout(t)
     }
   }, [wcStatus, wcUrl])
 
@@ -440,11 +480,14 @@ function BootingBlock({ status, log }: { status: WCStatus; log: string }) {
   // 卡太久才显示的慢加载提示：每次进入新阶段先清掉，超过该阶段阈值再亮出来
   const [slow, setSlow] = useState(false)
   useEffect(() => {
-    setSlow(false)
+    const resetTimer = setTimeout(() => setSlow(false), 0)
     const after = SLOW_HINT_AFTER[status]
-    if (!after) return
+    if (!after) return () => clearTimeout(resetTimer)
     const timer = setTimeout(() => setSlow(true), after)
-    return () => clearTimeout(timer)
+    return () => {
+      clearTimeout(resetTimer)
+      clearTimeout(timer)
+    }
   }, [status])
 
   // 动画当前显示值，用 ref 驱动 raf 避免闭包过期

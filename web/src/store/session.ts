@@ -84,6 +84,18 @@ type SessionState = {
   /** 回到"无激活会话"的空态首屏，不真正创建会话 */
   goToEmpty: () => void
   appendMessage: (msg: Message) => void
+  /** 追加一段推理正文；同一 streamId 始终更新同一张思考卡。 */
+  appendReasoningDelta: (streamId: string, text: string) => void
+  /** 推理流结束：用完整正文和 token 元数据锁定卡片，不重复新增。 */
+  finalizeReasoning: (
+    streamId: string,
+    text: string,
+    tokens: number | null,
+    fallback: boolean,
+    truncated: boolean,
+  ) => void
+  /** 候选回复被中间件否决时，移除已经流出的临时思考卡。 */
+  discardReasoning: (streamId: string) => void
   /** 重试前的截断：移除「最新一轮用户消息」之后的所有消息（旧回复 / 工具卡 / 版本卡），
    *  让对话看起来像把这条消息重新发了一遍。版本快照在后端保留，可在「版本历史」回滚。 */
   truncateAfterLastUserMessage: () => void
@@ -179,6 +191,16 @@ function fromApiMessage(m: ApiMessage): Message {
       toolResult: m.text || undefined,
     }
   }
+  if (m.kind === 'reasoning') {
+    const args = m.tool_args ?? {}
+    return {
+      ...base,
+      kind: 'reasoning',
+      reasoningTokens: typeof args.tokens === 'number' ? args.tokens : undefined,
+      reasoningFallback: args.fallback === true,
+      reasoningTruncated: args.truncated === true,
+    }
+  }
   if (m.kind === 'version') {
     const args = m.tool_args ?? {}
     return {
@@ -204,6 +226,21 @@ export function makeMessage(
     branchId: 'main',
     ...extra,
   }
+}
+
+/** 构造思考过程卡；真实正文和不返回正文时的兜底说明共用一种时间线消息。 */
+export function makeReasoningCard(
+  text: string,
+  tokens: number | null,
+  fallback: boolean,
+  truncated: boolean,
+): Message {
+  return makeMessage('assistant', text, {
+    kind: 'reasoning',
+    reasoningTokens: tokens ?? undefined,
+    reasoningFallback: fallback,
+    reasoningTruncated: truncated,
+  })
 }
 
 /** 构造一张「版本卡」消息（kind='version'）。AI 流 / 手动保存 / 回滚 三处共用，
@@ -426,6 +463,135 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }))
   },
 
+  appendReasoningDelta: (streamId, text) => {
+    const id = get().activeId
+    if (!id || !text) return
+    set((s) => ({
+      sessions: s.sessions.map((sess) => {
+        if (sess.id !== id) return sess
+        // LangGraph 从 ask_user 恢复后可能重新使用同一个 reasoning stream id。
+        // 只能续写仍处于流式态的卡片；历史卡即使 id 相同，也必须保留在原位置，
+        // 并在当前时间线末尾新建一张，避免回答后的进度跑到“已回答”上方。
+        let index = -1
+        for (let i = sess.messages.length - 1; i >= 0; i--) {
+          const message = sess.messages[i]
+          if (
+            message.kind === 'reasoning' &&
+            message.reasoningStreamId === streamId &&
+            message.reasoningStreaming
+          ) {
+            index = i
+            break
+          }
+        }
+        if (index === -1) {
+          return {
+            ...sess,
+            messages: [
+              ...sess.messages,
+              makeMessage('assistant', text, {
+                kind: 'reasoning',
+                reasoningStreamId: streamId,
+                reasoningStreaming: true,
+              }),
+            ],
+          }
+        }
+        return {
+          ...sess,
+          messages: sess.messages.map((message, messageIndex) =>
+            messageIndex === index
+              ? {
+                  ...message,
+                  text: message.text + text,
+                  reasoningStreaming: true,
+                }
+              : message,
+          ),
+        }
+      }),
+    }))
+  },
+
+  finalizeReasoning: (streamId, text, tokens, fallback, truncated) => {
+    const id = get().activeId
+    if (!id) return
+    set((s) => ({
+      sessions: s.sessions.map((sess) => {
+        if (sess.id !== id) return sess
+        // 与增量帧保持相同的“只命中当前流式卡”规则。若厂商只返回最终帧、
+        // 或恢复后的 id 与历史卡重复，则把结果作为一张新卡追加到末尾。
+        let index = -1
+        for (let i = sess.messages.length - 1; i >= 0; i--) {
+          const message = sess.messages[i]
+          if (
+            message.kind === 'reasoning' &&
+            message.reasoningStreamId === streamId &&
+            message.reasoningStreaming
+          ) {
+            index = i
+            break
+          }
+        }
+        const completed = {
+          text,
+          reasoningStreamId: streamId,
+          reasoningStreaming: false,
+          reasoningTokens: tokens ?? undefined,
+          reasoningFallback: fallback,
+          reasoningTruncated: truncated,
+        }
+        if (index === -1) {
+          return {
+            ...sess,
+            messages: [
+              ...sess.messages,
+              makeMessage('assistant', text, {
+                kind: 'reasoning',
+                ...completed,
+              }),
+            ],
+          }
+        }
+        return {
+          ...sess,
+          messages: sess.messages.map((message, messageIndex) =>
+            messageIndex === index ? { ...message, ...completed } : message,
+          ),
+        }
+      }),
+    }))
+  },
+
+  discardReasoning: (streamId) => {
+    const id = get().activeId
+    if (!id) return
+    set((s) => ({
+      sessions: s.sessions.map((sess) => {
+        if (sess.id !== id) return sess
+        // 同一个 id 可能在恢复前后各出现一次。候选被否决时只移除当前最新卡，
+        // 不能把已经完成并展示过的历史思考一并删掉。
+        let latestMatch = -1
+        let liveMatch = -1
+        for (let i = sess.messages.length - 1; i >= 0; i--) {
+          const message = sess.messages[i]
+          if (message.kind !== 'reasoning' || message.reasoningStreamId !== streamId) continue
+          if (latestMatch === -1) latestMatch = i
+          if (message.reasoningStreaming) {
+            liveMatch = i
+            break
+          }
+        }
+        const removeIndex = liveMatch !== -1 ? liveMatch : latestMatch
+        if (removeIndex === -1) return sess
+        return {
+          ...sess,
+          messages: sess.messages.filter((_, index) => index !== removeIndex),
+        }
+      }),
+    }))
+  },
+
   truncateAfterLastUserMessage: () => {
     const id = get().activeId
     if (!id) return
@@ -474,7 +640,26 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           (m) => m.kind === 'tool' && m.toolCallId === toolCallId,
         )
         if (exists) {
-          // 已有这张卡（流式阶段提前建的）→ 只更新工具名 / 参数，保留它的位置和已填的结果
+          // 已有这张卡（流式阶段提前建的）→ 更新工具名 / 参数并保留已填的结果。
+          // ask_user 是个例外：它会在 tool_call_chunks 刚出现工具名时就提前出卡，
+          // 那时本轮的 reasoning / 提问前正文还没插入，卡片会暂时跑到它们前面。
+          // 等完整 questions 到达时把卡片归位到当前时间线末尾，稳定成
+          // 「思考 → 正文 → 问答」；刷新后数据库本来也是这个顺序。
+          if (name === 'ask_user' && Array.isArray(args.questions)) {
+            const current = sess.messages.find(
+              (m) => m.kind === 'tool' && m.toolCallId === toolCallId,
+            )
+            if (!current) return sess
+            return {
+              ...sess,
+              messages: [
+                ...sess.messages.filter(
+                  (m) => !(m.kind === 'tool' && m.toolCallId === toolCallId),
+                ),
+                { ...current, toolName: name, toolArgs: args },
+              ],
+            }
+          }
           return {
             ...sess,
             messages: sess.messages.map((m) =>
@@ -545,9 +730,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set((s) => ({
       sessions: s.sessions.map((sess) => {
         if (sess.id !== id) return sess
-        const messages = sess.streamingText
+        const messages = (sess.streamingText
           ? [...sess.messages, makeMessage('assistant', sess.streamingText)]
           : sess.messages
+        ).map((message) =>
+          message.kind === 'reasoning' && message.reasoningStreaming
+            ? { ...message, reasoningStreaming: false }
+            : message,
+        )
         return { ...sess, messages, streamingText: '', isStreaming: false }
       }),
     }))
@@ -614,7 +804,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       sessions: s.sessions.map((sess) => {
         if (sess.id !== id) return sess
         if (!(path in sess.files)) return sess
-        const { [path]: _omit, ...rest } = sess.files
+        const rest = { ...sess.files }
+        delete rest[path]
         return { ...sess, files: rest, versionId: sess.versionId + 1 }
       }),
     }))

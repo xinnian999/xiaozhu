@@ -92,7 +92,7 @@ const distCache = new Map<string, BuiltFile[]>()
 const DIST_CACHE_MAX = 12  // 最多缓存几份 dist，超了按最久未用淘汰，防内存无限涨
 // 缓存格式版本：并进 key 前缀。dist 读写逻辑 / bridge 注入这类「会改变产物」的东西变动时
 // +1，旧持久化缓存自然失配作废（IDB 里的旧条目会被淘汰逻辑慢慢清掉）。
-const DIST_CACHE_VERSION = 'v2'  // v1→v2：修复注入桥的消息类型(vibuild→xiaozhu)，旧缓存的 dist 带的是坏桥，作废重建
+const DIST_CACHE_VERSION = 'v3'  // v2→v3：加入浏览器端布局验收桥，旧 dist 未注入该桥，作废重建
 
 /** 写入 dist 缓存（近似 LRU：重新插到末尾刷新最近使用，超量淘汰最老的）。 */
 function putDistCache(key: string, dist: BuiltFile[]): void {
@@ -361,6 +361,86 @@ const NAV_BRIDGE_SCRIPT = `<script>(function(){
   }
 })();</script>`
 
+// ── 基础布局验收桥接脚本 ──────────────────────────────────────
+// agent 看不到真实画面，因此在 iframe 内用浏览器实际布局数据做一层确定性检查：
+// 横向溢出、桌面仍被锁成手机窄画布、fixed 元素逃出应用壳都直接回报父页面。
+// 明确的手机模拟器可以在根壳加 data-preview-mode="mobile" 跳过「桌面窄壳」规则，
+// 但横向溢出和 fixed 越界仍然必须修复。
+const LAYOUT_BRIDGE_SCRIPT = `<script>(function(){
+  if (window.__xiaozhuLayoutBridged) return;
+  window.__xiaozhuLayoutBridged = true;
+  var timer = 0;
+  function add(issues, message) {
+    if (issues.indexOf(message) === -1) issues.push(message);
+  }
+  function inspect() {
+    var vw = window.innerWidth || document.documentElement.clientWidth || 0;
+    var vh = window.innerHeight || document.documentElement.clientHeight || 0;
+    if (!vw || !vh) return;
+    var issues = [];
+    var doc = document.documentElement;
+    var body = document.body;
+    var pageWidth = Math.max(doc.scrollWidth, body ? body.scrollWidth : 0);
+    if (pageWidth > vw + 8) {
+      add(issues, '[布局验收] 页面横向溢出 ' + Math.round(pageWidth - vw) + 'px；请移除超宽固定尺寸，并让内容在当前宽度内换行或收缩。');
+    }
+
+    var root = document.getElementById('root');
+    var shell = root && root.firstElementChild;
+    var shellRect = shell && shell.getBoundingClientRect();
+    var mobileMode = shell && shell.getAttribute('data-preview-mode') === 'mobile';
+    if (!mobileMode && vw >= 960 && shellRect &&
+        shellRect.height >= vh * 0.75 && shellRect.width < vw * 0.65) {
+      add(issues, '[布局验收] 桌面预览宽 ' + vw + 'px，但根应用仅占 ' + Math.round(shellRect.width) + 'px，呈现为手机窄画布；请让根应用铺满视口并用响应式断点重排。');
+    }
+
+    if (shellRect && shellRect.width < vw * 0.82) {
+      var nodes = document.querySelectorAll('body *');
+      for (var i = 0; i < nodes.length && i < 5000; i++) {
+        var node = nodes[i];
+        var style = window.getComputedStyle(node);
+        if (style.position !== 'fixed') continue;
+        var rect = node.getBoundingClientRect();
+        if (rect.width > shellRect.width + 16) {
+          add(issues, '[布局验收] fixed 元素宽 ' + Math.round(rect.width) + 'px，已逃出 ' + Math.round(shellRect.width) + 'px 的应用内容壳；请让固定底栏/浮层与内容壳同宽并居中。');
+          break;
+        }
+      }
+    }
+
+    var fixedNodes = document.querySelectorAll('body *');
+    for (var j = 0; j < fixedNodes.length && j < 5000; j++) {
+      var fixedNode = fixedNodes[j];
+      if (window.getComputedStyle(fixedNode).position !== 'fixed') continue;
+      var fixedRect = fixedNode.getBoundingClientRect();
+      if (fixedRect.left < -4 || fixedRect.right > vw + 4) {
+        add(issues, '[布局验收] fixed 元素越出可视区域；请检查 left/right/width 与响应式约束。');
+        break;
+      }
+    }
+
+    try {
+      window.parent.postMessage({
+        type: 'xiaozhu-layout',
+        issues: issues.slice(0, 6),
+        viewport: { width: vw, height: vh }
+      }, '*');
+    } catch(e) {}
+  }
+  function schedule() {
+    clearTimeout(timer);
+    timer = setTimeout(inspect, 220);
+  }
+  window.addEventListener('load', schedule);
+  window.addEventListener('resize', schedule);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', schedule);
+  } else {
+    schedule();
+  }
+  setTimeout(inspect, 900);
+})();</script>`
+
 /** 把一段脚本注入 index.html 的 <head> 末尾（没有 </head> 就放 <body> 前）。
  *  flag 用于幂等判断：html 里已含该标记就跳过，避免重复注入。 */
 function injectScript(files: FileMap, script: string, flag: string): FileMap {
@@ -373,11 +453,12 @@ function injectScript(files: FileMap, script: string, flag: string): FileMap {
   return { ...files, 'index.html': next }
 }
 
-/** 把 console 桥 + 路由导航桥都注入到 index.html（幂等）。
- *  两处脚本互相独立，分别用各自的旗标判断是否已注入。 */
+/** 把 console、路由导航、布局验收桥都注入到 index.html（幂等）。
+ *  三处脚本互相独立，分别用各自的旗标判断是否已注入。 */
 function injectConsoleBridge(files: FileMap): FileMap {
   let next = injectScript(files, CONSOLE_BRIDGE_SCRIPT, '__vibuildConsoleBridged')
   next = injectScript(next, NAV_BRIDGE_SCRIPT, '__vibuildNavBridged')
+  next = injectScript(next, LAYOUT_BRIDGE_SCRIPT, '__xiaozhuLayoutBridged')
   return next
 }
 

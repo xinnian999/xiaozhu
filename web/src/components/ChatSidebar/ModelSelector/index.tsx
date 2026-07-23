@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react'
-import { ChevronDown, Check, Bot } from 'lucide-react'
+import { ChevronDown, Check, Bot, BrainCircuit } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
 import { useClickOutside } from '@/hooks/useClickOutside'
 import { ModelIcon } from '@/lib/lobeIcon'
@@ -10,7 +10,17 @@ import styles from './index.module.scss'
 // ============================================
 // 放在聊天输入框工具栏里。模型清单由 App 启动时 loadModels 拉好存进 store，
 // 这里只负责「展示 + 选择」。选中的模型存 store.selectedModel，发消息时带上。
-export default function ModelSelector() {
+type ModelSelectorProps = {
+  thinkingEnabled: boolean
+  thinkingDisabled: boolean
+  onThinkingChange: (enabled: boolean) => void
+}
+
+export default function ModelSelector({
+  thinkingEnabled,
+  thinkingDisabled,
+  onThinkingChange,
+}: ModelSelectorProps) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
 
@@ -28,6 +38,32 @@ export default function ModelSelector() {
 
   // 当前选中模型的元信息，用来在触发按钮上显示图标 + 名字
   const current = models.find((m) => m.id === selectedModel)
+  const thinkingSupported = current?.thinking ?? false
+  const thinkingToggleable = current?.thinking_toggle ?? false
+  const thinkingStatus =
+    !thinkingSupported
+      ? current?.thinking_status === 'unknown'
+        ? '能力待探测'
+        : current?.thinking_status === 'failed'
+          ? '探测失败'
+          : '当前模型不支持'
+      : !thinkingToggleable
+        ? '当前模型始终开启'
+        : thinkingEnabled
+          ? '已开启'
+          : '已关闭'
+  const thinkingTitle =
+    !thinkingSupported
+      ? current?.thinking_status === 'unknown'
+        ? '当前模型尚未探测思考能力，请先在后台运行全面测试'
+        : current?.thinking_status === 'failed'
+          ? '当前模型思考能力探测失败，请在后台重试'
+          : '当前模型不支持深度思考'
+      : !thinkingToggleable
+        ? '当前模型支持思考，但无法关闭'
+        : thinkingEnabled
+          ? '已开启深度思考'
+          : '已关闭深度思考'
 
   // 模型清单还没加载出来时不渲染，避免出现空按钮
   if (models.length === 0) return null
@@ -56,8 +92,8 @@ export default function ModelSelector() {
       </button>
 
       {open && (
-        <div className={styles.panel} role="menu" aria-label="选择模型">
-          <ul className={styles.list}>
+        <div className={styles.panel}>
+          <ul className={styles.list} role="menu" aria-label="选择模型">
             {models.map((m) => (
               <li key={m.id}>
                 <button
@@ -75,6 +111,30 @@ export default function ModelSelector() {
               </li>
             ))}
           </ul>
+          <div className={styles.panelFooter}>
+            <label
+              className={`${styles.thinkingControl} ${thinkingEnabled ? styles.thinkingControlActive : ''} ${!thinkingToggleable || thinkingDisabled ? styles.thinkingControlDisabled : ''}`}
+              title={thinkingTitle}
+            >
+              <input
+                type="checkbox"
+                checked={thinkingEnabled}
+                disabled={!thinkingToggleable || thinkingDisabled}
+                onChange={(event) => onThinkingChange(event.target.checked)}
+                aria-label="开启深度思考"
+              />
+              <span className={styles.thinkingIcon} aria-hidden>
+                <BrainCircuit size={15} />
+              </span>
+              <span className={styles.thinkingMeta}>
+                <strong>深度思考</strong>
+                <small>{thinkingStatus}</small>
+              </span>
+              <span className={styles.thinkingCheck} aria-hidden>
+                {thinkingEnabled && <Check size={10} strokeWidth={3} />}
+              </span>
+            </label>
+          </div>
         </div>
       )}
     </div>

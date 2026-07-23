@@ -36,7 +36,7 @@ from app.agents.loop import (
 )
 from app.db import get_db
 from app.deps import get_owned_session
-from app.llm import allowed_model_ids, default_model_id
+from app.llm import allowed_model_ids, default_model_id, validate_thinking_option
 from app.models.message import Message as DBMessage
 from app.models.session import Session
 
@@ -54,6 +54,7 @@ class ResumeStart(BaseModel):
     """
 
     model: str | None = None
+    thinking: bool | None = None
 
 
 @router.get("-state")
@@ -99,6 +100,7 @@ async def _resume_stream(session_id: str, body: ResumeStart, db: AsyncSession, u
             model = default_model_id()
         elif model not in allowed_model_ids():
             raise HTTPException(status_code=400, detail=f"不支持的模型：{model}")
+        validate_thinking_option(model, body.thinking)
 
         thread_id = await latest_round_thread_id(db, session_id)
         if thread_id is None:
@@ -106,7 +108,14 @@ async def _resume_stream(session_id: str, body: ResumeStart, db: AsyncSession, u
 
         db_lock = asyncio.Lock()
         tree_note = await _file_tree_note(db, session_id)
-        agent = build_round_agent(db, session_id, model, db_lock, tree_note)
+        agent = build_round_agent(
+            db,
+            session_id,
+            model,
+            db_lock,
+            tree_note,
+            thinking=body.thinking,
+        )
 
         # 再校验一次可续（并发/重复点击兜底）：有检查点、有待跑节点、且不是 ask_user 暂停。
         state = await agent.aget_state({"configurable": {"thread_id": thread_id}})
@@ -143,6 +152,7 @@ async def _resume_stream(session_id: str, body: ResumeStart, db: AsyncSession, u
             db_lock=db_lock,
             user_id=user_id,
             initial_pending=initial_pending,
+            emit_reasoning=body.thinking is not False,
         ):
             yield event
     except HTTPException as e:

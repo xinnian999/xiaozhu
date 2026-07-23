@@ -29,6 +29,11 @@ from app.agents.prompts import SYSTEM_PROMPT
 from app.agents.tools import build_tools
 from app.checkpointer import get_checkpointer
 from app.llm import build_llm, models_by_id
+from app.model_providers import (
+    reasoning_delta_text,
+    reasoning_observation,
+    split_inline_thinking,
+)
 from app.models.file import File
 # 起别名 DBMessage 避免和 langchain_core.messages 概念混淆
 # （那边的 SystemMessage/HumanMessage 是 LLM 对话消息,这里的是数据库行）
@@ -54,6 +59,8 @@ class ChatRequest(BaseModel):
     # 随本条消息附带的图片（多模态识图）。data URL 列表,缺省空列表 = 纯文本。
     # 「模型是否支持识图、张数 / 格式是否合法」的校验同样放路由层（见 chat 函数）。
     images: list[str] = []
+    # 是否开启深度思考。None 保留厂商默认；布尔值只允许用于后台已探测到思考能力的模型。
+    thinking: bool | None = None
     # 重试标记。为 True 时:不新存用户消息,而是复用「最新一轮的用户消息」当 prompt
     # 重新生成一遍,并把喂给 LLM 的历史截到那条消息为止 —— 丢掉它之后的旧回复,
     # 让模型重新作答而不是接着自己已答的内容往下说。重生成和普通一轮一样,
@@ -104,29 +111,53 @@ def extract_text(response) -> str:
     """
     content = response.content
     if isinstance(content, str):
-        return content
-    return "".join(
-        block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "")
-        for block in content
-    )
+        return split_inline_thinking(content)[0]
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, dict):
+            if str(block.get("type", "")).lower() in {
+                "thinking",
+                "reasoning",
+                "reasoning_content",
+            }:
+                continue
+            text = block.get("text", "")
+        else:
+            text = getattr(block, "text", "")
+        if text:
+            parts.append(split_inline_thinking(str(text))[0])
+    return "".join(parts)
+
+
+def _is_truncation_reason(reason: object) -> bool:
+    """兼容 OpenAI、Anthropic 与 Google 的输出上限结束标记。"""
+    normalized = str(reason).strip().lower().replace("-", "_")
+    return normalized in {
+        "length",
+        "max_tokens",
+        "max_output_tokens",
+    } or normalized.endswith(".max_tokens")
 
 
 def build_human_content(text: str, images: list[str] | None) -> str | list[dict]:
     """把「文本 + 图片」拼成 LLM 的 HumanMessage content。
 
     没图片就直接返回纯字符串 —— 最省事、最省 token,行为和以前完全一样。
-    有图片才用 OpenAI 风格的多模态 block 列表（中转站走 OpenAI 兼容协议,
-    识图模型认这个格式）:
-        [{"type": "text", "text": "..."},
-         {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}]
-    data URL 可直接当 image_url.url 传,不用先上传换成 http 链接。
+    有图片时使用 LangChain 标准内容块，由各厂商适配器转换成自己的 wire format。
+    这样 Anthropic / Gemini 不会再收到硬编码的 OpenAI ``image_url`` 结构。
     """
     if not images:
         return text
     blocks: list[dict] = []
     if text:
         blocks.append({"type": "text", "text": text})
-    blocks += [{"type": "image_url", "image_url": {"url": url}} for url in images]
+    for url in images:
+        if url.startswith("data:") and ";base64," in url:
+            header, data = url.split(",", 1)
+            mime_type = header[5:].split(";", 1)[0] or "image/png"
+            blocks.append({"type": "image", "base64": data, "mime_type": mime_type})
+        else:
+            blocks.append({"type": "image", "url": url})
     return blocks
 
 
@@ -142,6 +173,33 @@ RECURSION_LIMIT = 75
 # 工具结果落库 / 下发前的截断上限。多数工具结果很短（"已写入 X"、报错列表），
 # 但 read_file 会返回整文件，可能上万字 —— 截断防止把消息行和 SSE 帧撑爆。
 TOOL_RESULT_CAP = 4000
+
+# 单个思考卡最多持久化 / 下发的字符数。保留完整可读过程的同时，避免极端模型
+# 把数万字隐藏推理塞进一条 messages 记录和 SSE 帧。
+REASONING_CONTENT_CAP = 20_000
+
+
+def _reasoning_payload(response: object) -> dict:
+    """把任意厂商响应归一成前端可直接渲染的思考事件。"""
+    observation = reasoning_observation(response)
+    content = observation.content.strip()
+    truncated = len(content) > REASONING_CONTENT_CAP
+    if truncated:
+        content = content[:REASONING_CONTENT_CAP] + "\n\n…（思考过程过长，已截断）"
+
+    fallback = not content
+    if fallback and observation.tokens:
+        content = "模型已完成思考，但当前接口只返回推理 token 数，没有返回可展示的思考过程。"
+    elif fallback:
+        content = "当前模型或接口没有返回可展示的思考过程。"
+
+    return {
+        "type": "reasoning",
+        "text": content,
+        "tokens": observation.tokens or None,
+        "fallback": fallback,
+        "truncated": truncated,
+    }
 
 # 从（可能还没写完的）工具参数 JSON 片段里抠出 path 值。
 # 用途：write_file 的整个文件内容是作为 content 参数被逐 token 生成的，要等它全写完
@@ -176,6 +234,16 @@ async def _charge_user(db: AsyncSession, user_id: str, model: str) -> None:
         print(f"[扣费失败] user={user_id} model={model}: {type(e).__name__}: {e}")
 
 
+async def _delete_thread_checkpoint(thread_id: str) -> None:
+    """严格删除一轮的 LangGraph 状态。
+
+    与正常收尾时的 best-effort 清理不同，重新生成必须先确保旧 checkpoint 已删除；
+    否则同一个 ``session_id:last_user_id`` 会从 ask_user 的 interrupt 处继续执行，
+    模型就会把“重新生成”误认为用户跳过了问题。
+    """
+    await get_checkpointer().adelete_thread(thread_id)
+
+
 async def _prepare_retry(
     req: ChatRequest, db: AsyncSession
 ) -> tuple[DBMessage, list[dict]] | None:
@@ -185,14 +253,16 @@ async def _prepare_retry(
     于是什么都不改、也不产新版本 —— 表现就是"重试没反应"。所以必须先把文件回退到
     「这一轮开始前」的状态,AI 才会从头再写一遍。
 
-    具体做四件事:
+    具体做五件事:
       1. 捞「最新一轮的用户消息」当本轮 prompt(回填到 req.message,供版本快照 summary 用);
-      2. 把文件回退到这一轮开始前的状态 —— 即它的版本卡之前最近一张版本卡对应的快照;
+      2. 严格删除这轮可能遗留的 LangGraph checkpoint，确保从原始 prompt 重新开始，
+         而不是从 ask_user 的 interrupt 暂停点继续;
+      3. 把文件回退到这一轮开始前的状态 —— 即它的版本卡之前最近一张版本卡对应的快照;
          若它之前没有任何版本卡(这是第一轮),就回退到初始模板;
-      3. 删掉这条用户消息之后的所有对话消息(旧回复 / 工具卡 / 版本卡),让对话看起来像
+      4. 删掉这条用户消息之后的所有对话消息(旧回复 / 工具卡 / 版本卡),让对话看起来像
          把这条消息重新发了一遍。注意只删 messages,versions / version_files 快照一律不动,
          所以生成过的版本全部保留、仍能在「版本历史」里回滚;
-      4. 算出「回退后该同步给前端的文件事件」并返回,调用方负责 yield 出去。
+      5. 算出「回退后该同步给前端的文件事件」并返回,调用方负责 yield 出去。
 
     返回 (最新一轮的用户消息, 文件同步事件列表);若一条用户消息都没有则返回 None。
     """
@@ -212,11 +282,15 @@ async def _prepare_retry(
         return None
     req.message = last_user.text
 
-    # 2a. 当前文件(= 旧的最后一轮结束后的状态),用来和回退目标做 diff,算出哪些要删
+    # 2. retry 会复用同一条 user 消息，因此 thread_id 也完全相同。必须先严格清掉
+    # ask_user / 断连留下的旧图状态，否则 create_agent 会直接从旧 checkpoint 续跑。
+    await _delete_thread_checkpoint(f"{req.session_id}:{last_user.id}")
+
+    # 3a. 当前文件(= 旧的最后一轮结束后的状态),用来和回退目标做 diff,算出哪些要删
     res = await db.execute(select(File).where(File.session_id == req.session_id))
     old_contents = {f.path: f.content for f in res.scalars().all()}
 
-    # 2b. 找「这一轮开始前」的版本:版本卡在 last_user 之前的最后一张。
+    # 3b. 找「这一轮开始前」的版本:版本卡在 last_user 之前的最后一张。
     #     版本卡和版本快照一一对应(见 versioning.snapshot_current_files),
     #     从卡的 tool_args 里取 version_id 就能定位到要回退的那份快照。
     res = await db.execute(
@@ -231,7 +305,7 @@ async def _prepare_retry(
     )
     prev_card = res.scalar_one_or_none()
 
-    # 2c. 算出回退目标的文件状态 pre_round（path -> content）
+    # 3c. 算出回退目标的文件状态 pre_round（path -> content）
     target_vid = prev_card.tool_args.get("version_id") if (prev_card and prev_card.tool_args) else None
     if target_vid is not None:
         res = await db.execute(
@@ -242,14 +316,14 @@ async def _prepare_retry(
         # 它之前没有任何版本 = 这是第一轮,回到初始模板（和新建会话时预置的一致）
         pre_round = load_template("vite-react")
 
-    # 3a. 用 pre_round 整体覆盖 files 表（删旧建新,和 versions.restore_version 同款写法）
+    # 4a. 用 pre_round 整体覆盖 files 表（删旧建新,和 versions.restore_version 同款写法）
     await db.execute(delete(File).where(File.session_id == req.session_id))
     db.add_all([
         File(session_id=req.session_id, path=path, content=content)
         for path, content in pre_round.items()
     ])
 
-    # 3b. 删掉 last_user 之后的所有对话消息（versions/version_files 不动）
+    # 4b. 删掉 last_user 之后的所有对话消息（versions/version_files 不动）
     await db.execute(
         delete(DBMessage).where(
             DBMessage.session_id == req.session_id,
@@ -258,7 +332,7 @@ async def _prepare_retry(
     )
     await db.commit()
 
-    # 4. 算出回退后要同步给前端的文件事件：旧有新无的删、内容变了的重发。
+    # 5. 算出回退后要同步给前端的文件事件：旧有新无的删、内容变了的重发。
     #    （这些事件由调用方在流里 yield；前端用现成的 file_write / file_delete 处理逻辑消费。）
     file_sync_events: list[dict] = []
     for path in old_contents:
@@ -302,6 +376,28 @@ async def _save_message(
         db.add(msg)
         await db.commit()
     return msg
+
+
+async def _save_reasoning_message(
+    db: AsyncSession,
+    db_lock: asyncio.Lock,
+    session_id: str,
+    payload: dict,
+) -> DBMessage:
+    """持久化思考卡；正文与展示元数据分开存，刷新后可无损还原。"""
+    return await _save_message(
+        db,
+        db_lock,
+        session_id,
+        "assistant",
+        str(payload["text"]),
+        kind="reasoning",
+        tool_args={
+            "tokens": payload.get("tokens"),
+            "fallback": bool(payload.get("fallback")),
+            "truncated": bool(payload.get("truncated")),
+        },
+    )
 
 
 async def _early_file_write(
@@ -361,7 +457,7 @@ async def _cleanup_thread(thread_id: str) -> None:
     自己吞掉异常,理由同 _charge_user:清理失败不该污染已经成功 / 已经报错收尾的 SSE 流。
     """
     try:
-        await get_checkpointer().adelete_thread(thread_id)
+        await _delete_thread_checkpoint(thread_id)
     except Exception as e:
         print(f"[checkpoint 清理失败] thread_id={thread_id}: {type(e).__name__}: {e}")
 
@@ -412,13 +508,20 @@ async def latest_round_thread_id(db: AsyncSession, session_id: str) -> str | Non
     return f"{session_id}:{last_user.id}" if last_user is not None else None
 
 
-def build_round_agent(db: AsyncSession, session_id: str, model: str, db_lock: asyncio.Lock, tree_note: str):
+def build_round_agent(
+    db: AsyncSession,
+    session_id: str,
+    model: str,
+    db_lock: asyncio.Lock,
+    tree_note: str,
+    thinking: bool | None = None,
+):
     """按本轮选的模型重建 llm/tools/agent（含 checkpointer + NoBluffMiddleware）。
 
     与 agent_loop 首次创建 agent 的装配方式完全一致，供 resume / ask_result 复用。
     调用方负责先算好 tree_note（当下真实文件状态）和 db_lock。
     """
-    llm = build_llm(model)
+    llm = build_llm(model, thinking=thinking)
     tools = build_tools(db, session_id, db_lock)
     agent = create_agent(
         llm,
@@ -503,6 +606,7 @@ async def _consume(
     db_lock: asyncio.Lock,
     user_id: str,
     initial_pending: dict[str, tuple[str, dict, DBMessage]] | None = None,
+    emit_reasoning: bool = True,
 ) -> AsyncGenerator[str, None]:
     """消费 agent.astream(...) 的事件流,翻译成 SSE + 落库副作用。
 
@@ -516,8 +620,15 @@ async def _consume(
     resume 后 "tools" 节点回传的 ToolMessage 会因为按 tool_call_id 查不到而被静默丢弃
     (答案存不进 DB、前端也收不到 tool_result)。调用方(ask_result)负责从 DB 查出那条
     待回填的 kind='tool' 消息,连同 tool_call_id 一并传进来。
+
+    emit_reasoning=False 表示本轮显式关闭思考：即使厂商仍返回推理字段，也不下发
+    reasoning SSE、不生成兜底卡，并且不把 reasoning 消息持久化到数据库。
     """
     final_assistant_text = ""
+    final_reasoning_payload: dict | None = None
+    reasoning_seq = 0
+    active_reasoning_id: str | None = None
+    active_reasoning_text = ""
     wrote_files = False
     truncated = False
     pending: dict[str, tuple[str, dict, DBMessage]] = dict(initial_pending or {})
@@ -534,6 +645,35 @@ async def _consume(
 
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": RECURSION_LIMIT}
 
+    def ensure_reasoning_id() -> str:
+        """为当前模型调用分配稳定 id，增量帧与完成帧用它更新同一张卡。"""
+        nonlocal reasoning_seq, active_reasoning_id
+        if active_reasoning_id is None:
+            reasoning_seq += 1
+            active_reasoning_id = f"{thread_id}:reasoning:{reasoning_seq}"
+        return active_reasoning_id
+
+    def reset_active_reasoning() -> None:
+        nonlocal active_reasoning_id, active_reasoning_text
+        active_reasoning_id = None
+        active_reasoning_text = ""
+
+    def reasoning_delta(raw: str) -> str:
+        """兼容厂商返回真正增量或「截至当前的累计文本」两种流形态。"""
+        nonlocal active_reasoning_text
+        if not raw or len(active_reasoning_text) >= REASONING_CONTENT_CAP:
+            return ""
+        if raw.startswith(active_reasoning_text):
+            delta = raw[len(active_reasoning_text) :]
+        elif active_reasoning_text.endswith(raw):
+            delta = ""
+        else:
+            delta = raw
+        remaining = REASONING_CONTENT_CAP - len(active_reasoning_text)
+        delta = delta[:remaining]
+        active_reasoning_text += delta
+        return delta
+
     try:
         # 同时开 updates(节点边界,做副作用)+ messages(token 流)。
         #
@@ -549,17 +689,38 @@ async def _consume(
         # 时机才整段一次性下发 ——①这条消息带了 tool_calls（tool_calls 存在本身就是
         # NoBluffMiddleware 判定"不算嘴炮"的充分条件，见 middleware.aafter_model 的
         # 第一行判断，可以立刻放行）；②真正跑到收尾阶段（本轮不会再回 model 节点了）。
-        # messages 模式这里只留 tool_call_chunks 的早出卡逻辑（和嘴炮风险无关,write_file
-        # 的参数早到早展示,不用等文字/整轮结束）。
+        # 普通回答正文继续等待节点确认后再发；推理字段则用 reasoning_delta 实时下发。
+        # 若 NoBluffMiddleware 把这次候选打回，下一次 model 流开始时会发
+        # reasoning_discard 删除旧临时卡，避免把被否决候选的思路留在时间线上。
         async for mode, chunk in agent.astream(
             graph_input,
             stream_mode=["updates", "messages"],
             config=config,
         ):
-            # ── messages 模式:LLM 的 token 增量,只用来做工具卡早出卡 ──
+            # ── messages 模式：推理正文 + 工具参数都按 token 尽早下发 ──
             if mode == "messages":
                 msg, meta = chunk
                 if meta.get("langgraph_node") == "model":
+                    # 上一次无工具候选若没有走到 END，而是又进入 model，说明它被
+                    # NoBluffMiddleware 否决了；移除已经流给前端的临时思考卡。
+                    if emit_reasoning and final_reasoning_payload is not None:
+                        stale_id = final_reasoning_payload.get("id")
+                        if stale_id:
+                            yield sse({"type": "reasoning_discard", "id": stale_id})
+                        final_reasoning_payload = None
+                        final_assistant_text = ""
+
+                    if emit_reasoning:
+                        delta = reasoning_delta(reasoning_delta_text(msg))
+                        if delta:
+                            yield sse(
+                                {
+                                    "type": "reasoning_delta",
+                                    "id": ensure_reasoning_id(),
+                                    "text": delta,
+                                }
+                            )
+
                     for tcc in getattr(msg, "tool_call_chunks", None) or []:
                         idx = tcc.get("index") or 0
                         cid = tcc.get("id")
@@ -604,8 +765,11 @@ async def _consume(
 
                 if node_name == "model":
                     for m in node_messages:
-                        finish_reason = m.response_metadata.get("finish_reason")
-                        if m.invalid_tool_calls or finish_reason == "length":
+                        response_metadata = m.response_metadata or {}
+                        finish_reason = response_metadata.get(
+                            "finish_reason"
+                        ) or response_metadata.get("stop_reason")
+                        if m.invalid_tool_calls or _is_truncation_reason(finish_reason):
                             print(
                                 f"[截断] finish_reason={finish_reason} "
                                 f"invalid_tool_calls={m.invalid_tool_calls}"
@@ -614,9 +778,22 @@ async def _consume(
                                 "type": "error",
                                 "message": "模型输出超长被截断,文件没写完。请把需求拆小,或分多次生成。",
                             })
+                            if active_reasoning_id:
+                                yield sse(
+                                    {
+                                        "type": "reasoning_discard",
+                                        "id": active_reasoning_id,
+                                    }
+                                )
+                                reset_active_reasoning()
+                            final_reasoning_payload = None
                             truncated = True
                             break
 
+                        reasoning_payload = None
+                        if emit_reasoning:
+                            reasoning_payload = _reasoning_payload(m)
+                            reasoning_payload["id"] = ensure_reasoning_id()
                         text = extract_text(m)
                         if m.tool_calls:
                             # 这一轮又调了工具,说明之前(若有)攒着没发的
@@ -624,6 +801,22 @@ async def _consume(
                             # 真调用工具证明它不是"这一轮的最终回复",作废丢弃,
                             # 避免收尾时把这段旧文字和这次真实工作的回复一起冒出来。
                             final_assistant_text = ""
+                            if final_reasoning_payload and final_reasoning_payload.get(
+                                "id"
+                            ):
+                                yield sse(
+                                    {
+                                        "type": "reasoning_discard",
+                                        "id": final_reasoning_payload["id"],
+                                    }
+                                )
+                            final_reasoning_payload = None
+                            if reasoning_payload:
+                                yield sse(reasoning_payload)
+                                await _save_reasoning_message(
+                                    db, db_lock, session_id, reasoning_payload
+                                )
+                            reset_active_reasoning()
                             if text:
                                 print(f"[response] content={text} (同轮调用了工具)")
                                 # 带 tool_calls 的消息不可能被 NoBluffMiddleware 判定为嘴炮
@@ -669,8 +862,9 @@ async def _consume(
                             # astream() 循环会自然走完(图到 END,不会再有新的 model 节点
                             # 更新了)——只有到那时候(见收尾处)才是"确认不会再被打回"的
                             # 唯一时机,才第一次把它下发给前端 + 存库。
-                            if text:
-                                final_assistant_text = text
+                            final_assistant_text = text
+                            final_reasoning_payload = reasoning_payload
+                            reset_active_reasoning()
                             print(f"[最终回复候选] content={text}")
                     if truncated:
                         break
@@ -733,6 +927,11 @@ async def _consume(
         # 到这里 astream() 已经自然走完、图不会再跳回 model 节点重新生成了 ——
         # 也就是说如果 final_assistant_text 有值,它已经【确认】不是嘴炮(没被
         # NoBluffMiddleware 打回),现在才是第一次把这段话下发给前端的时机。
+        if final_reasoning_payload:
+            yield sse(final_reasoning_payload)
+            await _save_reasoning_message(
+                db, db_lock, session_id, final_reasoning_payload
+            )
         if final_assistant_text:
             yield sse({"type": "message_delta", "text": final_assistant_text})
             await _save_message(db, db_lock, session_id, "assistant", final_assistant_text)
@@ -752,6 +951,11 @@ async def _consume(
         yield sse({"type": "done"})
 
     except GraphRecursionError:
+        unfinished_id = active_reasoning_id or (
+            final_reasoning_payload.get("id") if final_reasoning_payload else None
+        )
+        if unfinished_id:
+            yield sse({"type": "reasoning_discard", "id": unfinished_id})
         yield sse({
             "type": "error",
             "message": "已达最大轮次,自动停止以防死循环。",
@@ -759,6 +963,11 @@ async def _consume(
         await _cleanup_thread(thread_id)
         yield sse({"type": "done"})
     except Exception as e:
+        unfinished_id = active_reasoning_id or (
+            final_reasoning_payload.get("id") if final_reasoning_payload else None
+        )
+        if unfinished_id:
+            yield sse({"type": "reasoning_discard", "id": unfinished_id})
         yield sse({"type": "error", "message": str(e)})
         await _cleanup_thread(thread_id)
         yield sse({"type": "done"})
@@ -791,7 +1000,15 @@ async def agent_loop(
     #    - 重试:见下面 _prepare_retry 的详细说明。它负责"把这一轮当作从没发生过":
     #      回退文件、删掉旧对话、并把回退后的文件状态同步给前端。
     if req.retry:
-        prepared = await _prepare_retry(req, db)
+        try:
+            prepared = await _prepare_retry(req, db)
+        except Exception as e:
+            # retry 的 checkpoint 清理是正确性的前置条件，不能像正常收尾那样吞错继续；
+            # 否则会再次从 ask_user 暂停点续跑。转成完整 SSE 错误帧，避免前端只看到断流。
+            print(f"[重新生成准备失败] {type(e).__name__}: {e}")
+            yield sse({"type": "error", "message": "重新生成准备失败，请稍后重试。"})
+            yield sse({"type": "done"})
+            return
         if prepared is None:
             # 一条用户消息都没有 —— 没什么可重试的,直接收尾
             yield sse({"type": "error", "message": "没有可重试的消息"})
@@ -837,7 +1054,14 @@ async def agent_loop(
     # 这一步理论上不太会失败,但和上面构造 llm/tools 一样做同款 error+done 兜底,
     # 避免任何异常在 StreamingResponse 内部裸抛,把前端卡在「思考中」出不来。
     try:
-        agent = build_round_agent(db, req.session_id, req.model, db_lock, tree_note)
+        agent = build_round_agent(
+            db,
+            req.session_id,
+            req.model,
+            db_lock,
+            tree_note,
+            thinking=req.thinking,
+        )
     except HTTPException as e:
         yield sse({"type": "error", "message": str(e.detail)})
         yield sse({"type": "done"})
@@ -864,5 +1088,6 @@ async def agent_loop(
         db=db,
         db_lock=db_lock,
         user_id=user_id,
+        emit_reasoning=req.thinking is not False,
     ):
         yield event

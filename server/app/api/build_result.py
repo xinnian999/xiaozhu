@@ -24,15 +24,17 @@ router = APIRouter(
 class BuildResult(BaseModel):
     """前端报回的构建结果。
 
-    覆盖编译 + 运行时两类报错（前端在 vite build 后、iframe 重载渲染收集完一并回报）：
+    覆盖编译、运行时与布局验收三类报错（前端在 vite build 后、iframe 重载渲染收集完一并回报）：
     - 编译没过：ok=false, runtime=false
     - 编译过但渲染时崩：ok=false, runtime=true
+    - 编译运行正常但布局溢出 / 只适配手机画布：ok=false, visual=true
     - 都没问题：ok=true
     """
 
-    ok: bool  # 构建 + 运行是否都没报错
+    ok: bool  # 构建、运行和基础布局验收是否都通过
     errors: str = ""  # 报错摘要；ok=true 时空串
     runtime: bool = False  # 报错是「运行时」还是「编译期」—— 供 check_build 区分文案
+    visual: bool = False  # 是否命中浏览器端布局完整性检查
 
 
 @router.post("", status_code=204)
@@ -44,5 +46,10 @@ async def report_build_result(session_id: str, body: BuildResult) -> None:
     """
     build_store.report(
         session_id,
-        {"ok": body.ok, "errors": body.errors, "runtime": body.runtime},
+        {
+            "ok": body.ok,
+            "errors": body.errors,
+            "runtime": body.runtime,
+            "visual": body.visual,
+        },
     )

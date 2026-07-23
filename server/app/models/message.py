@@ -8,6 +8,7 @@ messages 表是 sessions 的子表，记录一次会话里**按发生顺序**的
 靠 kind 字段区分一行是普通文本还是工具卡：
   - kind='text'：用户输入 / assistant 说的话（包括调工具前的过场叙述、最终回复）
   - kind='tool'：一次工具调用，额外带 tool_name / tool_args
+  - kind='reasoning'：一次模型思考过程；text 存正文或兜底说明，tool_args 存 token 等元数据
 
 kind 还有第二个用途：加载历史喂给 LLM 当上下文时，只取 kind='text' 的，
 把工具行过滤掉 —— 工具的效果已经落在 files 表的现状里，重放反而会误导模型。
@@ -40,14 +41,15 @@ class Message(Base):
     # 消息正文。工具行没有正文，存空字符串
     text: Mapped[str] = mapped_column(Text, nullable=False)
 
-    # 消息种类：'text'（普通对话）、'tool'（工具调用卡）或 'version'（版本卡）。
+    # 消息种类：text / reasoning / tool / version。
     # server_default='text' 让旧数据 / 迁移时自动补成普通文本，向后兼容
     kind: Mapped[str] = mapped_column(String, nullable=False, server_default="text")
 
     # 仅 kind='tool' 时有值：工具名（write_file / read_files / ...）
     tool_name: Mapped[str | None] = mapped_column(String, nullable=True)
 
-    # kind='tool' 时存工具参数；kind='version' 时存版本卡负载 {version_id, seq}。
+    # kind='tool' 时存工具参数；kind='version' 时存版本卡负载；
+    # kind='reasoning' 时存 {tokens, fallback, truncated}。
     # 用 SQLAlchemy 的 JSON 类型 —— 写入时自动把 dict 序列化成 JSON 字符串存进 SQLite，读出时自动反序列化回 dict
     tool_args: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
@@ -74,8 +76,8 @@ class MessageRead(BaseModel):
     role: Literal["user", "assistant"]
     text: str
     # 下面三个带默认值：旧数据 / 普通文本消息不带工具信息时也能正常序列化。
-    # kind='version' 是「版本卡」：tool_args 里存 {version_id, seq}，前端渲染成带回滚按钮的卡片
-    kind: Literal["text", "tool", "version"] = "text"
+    # kind='version' 是版本卡；kind='reasoning' 是可折叠思考过程。
+    kind: Literal["text", "reasoning", "tool", "version"] = "text"
     tool_name: str | None = None
     tool_args: dict | None = None
     # 随消息附带的图片 data URL 列表；纯文本消息为 None
@@ -94,4 +96,3 @@ class MessageRead(BaseModel):
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.isoformat()
-

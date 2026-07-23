@@ -1,6 +1,18 @@
-import { useCallback, useRef, useState } from 'react'
-import { ArrowUp, Square, Mic, Image as ImageIcon, X, Plus } from 'lucide-react'
-import { useSessionStore, makeMessage, makeVersionCard, makeErrorCard } from '@/store/session'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  ArrowUp,
+  Square,
+  Mic,
+  Image as ImageIcon,
+  X,
+  Plus,
+} from 'lucide-react'
+import {
+  useSessionStore,
+  makeMessage,
+  makeVersionCard,
+  makeErrorCard,
+} from '@/store/session'
 import { useUIStore } from '@/store/ui'
 import { streamChat, streamAskResult, streamResume, type SSEEvent } from '@/lib/api'
 import { toast } from '@/lib/toast'
@@ -14,6 +26,28 @@ import styles from './index.module.scss'
 const MAX_IMAGES = 6
 // 单张图大小上限（5MB）。data URL 是 base64，会比原图大 ~33%，太大既费 token 又可能超请求体限制
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024
+// 每个模型分别记住用户上次选择的深度思考状态，刷新页面 / 重开标签页后仍然生效。
+const THINKING_OVERRIDES_STORAGE_KEY = 'xiaozhu:thinkingOverrides'
+
+function getInitialThinkingOverrides(): Record<string, boolean> {
+  if (typeof window === 'undefined') return {}
+
+  try {
+    const saved = window.localStorage.getItem(THINKING_OVERRIDES_STORAGE_KEY)
+    if (!saved) return {}
+
+    const parsed: unknown = JSON.parse(saved)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
+
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, boolean] => (
+        typeof entry[1] === 'boolean'
+      )),
+    )
+  } catch {
+    return {}
+  }
+}
 
 /** 把本地图片文件读成 data URL（"data:image/png;base64,..."），失败则 reject。 */
 function fileToDataUrl(file: File): Promise<string> {
@@ -33,6 +67,9 @@ export default function ChatSidebar() {
   const activeId = useSessionStore((s) => s.activeId)
   const createNew = useSessionStore((s) => s.createNew)
   const appendMessage = useSessionStore((s) => s.appendMessage)
+  const appendReasoningDelta = useSessionStore((s) => s.appendReasoningDelta)
+  const finalizeReasoning = useSessionStore((s) => s.finalizeReasoning)
+  const discardReasoning = useSessionStore((s) => s.discardReasoning)
   const truncateAfterLastUserMessage = useSessionStore((s) => s.truncateAfterLastUserMessage)
   const setToolResult = useSessionStore((s) => s.setToolResult)
   const upsertToolCall = useSessionStore((s) => s.upsertToolCall)
@@ -70,6 +107,20 @@ export default function ChatSidebar() {
   // 输入框工具栏的「加号」展开态：图片 / 语音等次要输入方式收进这个菜单里。
   // 点菜单外的任意处自动收起（复用和 ModelSelector 同一套 useClickOutside）。
   const [toolsOpen, setToolsOpen] = useState(false)
+  // 每个模型各记一份持久化偏好；支持思考的模型首次出现时默认开启。
+  const [thinkingOverrides, setThinkingOverrides] = useState<Record<string, boolean>>(
+    getInitialThinkingOverrides,
+  )
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        THINKING_OVERRIDES_STORAGE_KEY,
+        JSON.stringify(thinkingOverrides),
+      )
+    } catch {
+      // 隐私模式或存储空间不足时退化为仅当前页面有效，不影响开关正常使用。
+    }
+  }, [thinkingOverrides])
   const toolsRef = useRef<HTMLDivElement>(null)
   const closeTools = useCallback(() => setToolsOpen(false), [])
   useClickOutside(toolsRef, closeTools)
@@ -82,7 +133,19 @@ export default function ChatSidebar() {
   // 当前选中模型是否支持识图（多模态）。由后端实测标定的 vision 字段决定。
   // 不支持时把「添加图片」置灰：清单还没加载好（找不到当前模型）也按不支持处理，
   // 避免在不确定时放开传图。
-  const visionSupported = models.find((m) => m.id === selectedModel)?.vision ?? false
+  const currentModel = models.find((m) => m.id === selectedModel)
+  const visionSupported = currentModel?.vision ?? false
+  const thinkingSupported = currentModel?.thinking ?? false
+  const thinkingToggleable = currentModel?.thinking_toggle ?? false
+  const thinkingEnabled = thinkingSupported
+    ? (!thinkingToggleable
+        ? true
+        : selectedModel
+          ? (thinkingOverrides[selectedModel] ?? true)
+          : true)
+    : false
+  // 支持但不可关闭的模型仍显式请求开启；完全不支持时不发送参数，保留厂商默认。
+  const thinkingForRequest = thinkingSupported ? thinkingEnabled : undefined
 
   // 点「添加图片」：触发隐藏 file input 的原生选择框
   const openImagePicker = () => {
@@ -149,7 +212,10 @@ export default function ChatSidebar() {
   // 返回值：这次流是否「正常收场」（收到 done / error / awaiting_answer 之一）。
   // 返回 false 说明 for-await 是因为连接中途断掉才结束的（网络抖动等）——调用方据此把
   // 会话标记为可续跑，让用户点「继续生成」从断点接着跑，而不用从头重来。
-  const consumeStream = async (stream: AsyncGenerator<SSEEvent>): Promise<boolean> => {
+  const consumeStream = async (
+    stream: AsyncGenerator<SSEEvent>,
+    showReasoning = true,
+  ): Promise<boolean> => {
     // 逐 token 累积到本地变量，再统一冲刷给 store
     let accumulated = ''
     // 是否正常收到了终止事件（done/error/awaiting_answer）。没收到就断流 = 被中断。
@@ -158,6 +224,34 @@ export default function ChatSidebar() {
       if (event.type === 'message_delta') {
         accumulated += event.text
         setStreamingText(accumulated)
+      } else if (event.type === 'reasoning_delta') {
+        if (!showReasoning) continue
+        // 推理正文按厂商 token/chunk 实时追加到同一张思考卡。若上一轮已有过场文字，
+        // 先固化它，再开始下一次模型调用的思考，保持时间线顺序。
+        if (accumulated) {
+          commitStreaming()
+          accumulated = ''
+        }
+        appendReasoningDelta(event.id, event.text)
+      } else if (event.type === 'reasoning') {
+        if (!showReasoning) continue
+        // 思考过程是独立的时间线卡片。若前一轮模型已输出过场文字，先固化正文，
+        // 再插入下一次模型调用的思考卡，保持「正文 → 思考 → 工具」的真实顺序。
+        if (accumulated) {
+          commitStreaming()
+          accumulated = ''
+        }
+        finalizeReasoning(
+          event.id,
+          event.text,
+          event.tokens,
+          event.fallback,
+          event.truncated,
+        )
+      } else if (event.type === 'reasoning_discard') {
+        if (!showReasoning) continue
+        // NoBluffMiddleware 否决了一次候选回复：它的临时推理流也随候选一起撤回。
+        discardReasoning(event.id)
       } else if (event.type === 'tool_call') {
         // 工具调用前，先把本轮已累积的叙述（模型在调工具前说的话，
         // 如「好的，我先看看结构」）固化成一条独立气泡，再插工具卡。
@@ -198,7 +292,6 @@ export default function ChatSidebar() {
         // 再在对话流里就地插一张错误卡 —— 比一闪而过的 toast 更醒目、可回看。
         if (accumulated) {
           commitStreaming()
-          accumulated = ''
         }
         appendMessage(makeErrorCard(event.message))
         settled = true
@@ -212,7 +305,6 @@ export default function ChatSidebar() {
         // 继续禁用，直到用户提交回答后的 resume 流真正推来 done/error 为止。
         if (accumulated) {
           commitStreaming()
-          accumulated = ''
         }
         beginAwaitingAnswer()
         settled = true
@@ -273,7 +365,16 @@ export default function ChatSidebar() {
     // 3. 流式消费 SSE
     try {
       const settled = await consumeStream(
-        streamChat(text, targetSessionId, selectedModel, controller.signal, images),
+        streamChat(
+          text,
+          targetSessionId,
+          selectedModel,
+          controller.signal,
+          images,
+          false,
+          thinkingForRequest,
+        ),
+        thinkingForRequest !== false,
       )
       // 流没正常收场（既非 done/error，也非 ask_user 暂停）= 连接中途断了。
       // 同会话内直接标记可续跑，用户点「继续生成」即可从断点接着跑，无需刷新页面。
@@ -295,7 +396,12 @@ export default function ChatSidebar() {
   // （比如最后一轮生成的是 v3，期间手动改到了 v7，重试就在 v7 之上生成 v8，不动 v3）。
   // 不新增用户气泡 —— prompt 由后端复用最后一条用户消息，旧回复 / 旧版本都保留。
   const handleRetry = async () => {
-    if (!session || isStreaming || creating || awaitingAnswer) return
+    if (!session || isStreaming || creating) return
+
+    // ask_user 暂停态也允许重新生成：用户点这个按钮代表放弃回答当前问题，
+    // 从上一条用户需求重新跑整轮。先解除前端等待态；后端 _prepare_retry 会同步
+    // 删除这一轮的 LangGraph checkpoint，避免从旧提问断点继续执行。
+    if (awaitingAnswer) endAwaitingAnswer()
 
     // 先把最新一轮用户消息之后的旧内容从对话里截掉 —— 看起来像把这条消息重新发出去。
     // 后端会同步删掉这些消息行（但保留版本快照），两边对「最后一条用户消息」的判定一致。
@@ -311,7 +417,16 @@ export default function ChatSidebar() {
     try {
       // message 传空串、retry=true：真正的 prompt 由后端取最后一条用户消息
       const settled = await consumeStream(
-        streamChat('', session.id, selectedModel, controller.signal, [], true),
+        streamChat(
+          '',
+          session.id,
+          selectedModel,
+          controller.signal,
+          [],
+          true,
+          thinkingForRequest,
+        ),
+        thinkingForRequest !== false,
       )
       if (!settled) setResumable(session.id, true)
     } finally {
@@ -335,7 +450,8 @@ export default function ChatSidebar() {
 
     try {
       const settled = await consumeStream(
-        streamResume(session.id, selectedModel, controller.signal),
+        streamResume(session.id, selectedModel, controller.signal, thinkingForRequest),
+        thinkingForRequest !== false,
       )
       if (!settled) setResumable(session.id, true)
     } finally {
@@ -362,15 +478,33 @@ export default function ChatSidebar() {
   const handleAskUserAnswer = async (msg: Message, answer: string) => {
     const live = awaitingAnswer && !!msg.toolCallId && !msg.toolResult
     if (live && session) {
+      const toolCallId = msg.toolCallId as string
+      // 用户点击提交后先乐观写入问答卡：不必等后端首个 tool_result 才看到“已回答”。
+      // 这也会解除 MessageList 对运行中工具卡 loading 的抑制，使“正在处理回答”
+      // 能在请求建立连接前立即出现，填平模型首个事件到达前的静默空窗。
+      setToolResult(toolCallId, answer)
       endAwaitingAnswer()
       beginStreaming()
       const controller = new AbortController()
       abortRef.current = controller
       try {
         const settled = await consumeStream(
-          streamAskResult(session.id, msg.toolCallId as string, answer, selectedModel, controller.signal),
+          streamAskResult(
+            session.id,
+            toolCallId,
+            answer,
+            selectedModel,
+            controller.signal,
+            thinkingForRequest,
+          ),
+          thinkingForRequest !== false,
         )
         if (!settled) setResumable(session.id, true)
+      } catch (error) {
+        // 请求尚未建立就失败时撤销乐观答案，并恢复等待回答态，让用户可以直接重试。
+        setToolResult(toolCallId, '')
+        beginAwaitingAnswer()
+        throw error
       } finally {
         abortRef.current = null
         endStreaming()
@@ -482,7 +616,15 @@ export default function ChatSidebar() {
                         role="menuitem"
                         className={`${styles.moreItem} ${visionSupported ? '' : styles.moreItemDisabled}`}
                         disabled={!visionSupported}
-                        title={visionSupported ? undefined : '当前模型不支持识图，请切换到支持识图的模型'}
+                        title={
+                          visionSupported
+                            ? undefined
+                            : currentModel?.vision_status === 'unknown'
+                              ? '当前模型尚未探测识图能力，请先在后台运行全面测试'
+                              : currentModel?.vision_status === 'failed'
+                                ? '当前模型识图能力探测失败，请在后台重试'
+                                : '当前模型不支持识图，请切换模型'
+                        }
                         onClick={openImagePicker}
                       >
                         <ImageIcon size={16} className={styles.moreItemIcon} />
@@ -504,7 +646,17 @@ export default function ChatSidebar() {
                   )}
                 </div>
 
-                <ModelSelector />
+                <ModelSelector
+                  thinkingEnabled={thinkingEnabled}
+                  thinkingDisabled={composerDisabled}
+                  onThinkingChange={(enabled) => {
+                    if (!selectedModel) return
+                    setThinkingOverrides((prev) => ({
+                      ...prev,
+                      [selectedModel]: enabled,
+                    }))
+                  }}
+                />
               </div>
 
               {isStreaming ? (
@@ -527,10 +679,6 @@ export default function ChatSidebar() {
                 </button>
               )}
             </div>
-          </div>
-
-          <div className={styles.composerHint}>
-            <span>Shift + Enter 换行</span>
           </div>
         </footer>
     </aside>

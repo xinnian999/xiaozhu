@@ -1,8 +1,7 @@
-import { useState } from 'react'
-import { FileText, FilePlus, FilePen, FolderOpen, Wrench, Bug, ChevronRight, GitCommit, RotateCcw, Loader2, Check, AlertCircle, HelpCircle } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { FileText, FilePlus, FilePen, FolderOpen, Wrench, Bug, ChevronRight, GitCommit, RotateCcw, Loader2, Check, AlertCircle, HelpCircle, BrainCircuit } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { formatClock } from '@/lib/format'
 import { useSessionStore } from '@/store/session'
 import { useUIStore } from '@/store/ui'
 import { toast } from '@/lib/toast'
@@ -13,11 +12,6 @@ type Props = {
   message: Message
   /** 是否正在流式输出（显示光标动画，隐藏时间戳） */
   isStreaming?: boolean
-  /** 是否是对话里最后一条文本消息 —— 只有它才显示时间，作为本轮结束的标记 */
-  isLast?: boolean
-  /** 重试回调。仅传给「最终回复」那条 AI 文本消息 —— 传了就在时间同行右侧渲染「重新生成」，
-   *  这样按钮落在版本卡之前（最终回复在 DOM 上排在版本卡前面），而不是堆到所有版本卡下方。 */
-  onRetry?: () => void
   /** ask_user 交互卡片答完（单个问题或多问题 Tab 全部答完）时的回调，只传给 kind='tool'
    *  且 toolName='ask_user' 的消息。answer 是 AskUserChip 内部已经汇总格式化好的文本。 */
   onAskUserAnswer?: (message: Message, answer: string) => Promise<void>
@@ -30,7 +24,7 @@ type Props = {
 //   （toolName === 'ask_user' 走独立的 AskUserChip，其余走 ToolCallChip）
 // - kind === 'version'：渲染成"版本卡"，附带回滚按钮
 // - 其余情况：渲染成普通文本气泡
-export default function MessageBubble({ message, isStreaming = false, isLast = false, onRetry, onAskUserAnswer }: Props) {
+export default function MessageBubble({ message, isStreaming = false, onAskUserAnswer }: Props) {
   // 必须在任何条件 return 之前调用 hook（Hooks 规则）
   const openImagePreview = useUIStore((s) => s.openImagePreview)
 
@@ -42,6 +36,9 @@ export default function MessageBubble({ message, isStreaming = false, isLast = f
   }
   if (message.kind === 'version') {
     return <VersionCard message={message} />
+  }
+  if (message.kind === 'reasoning') {
+    return <ReasoningCard message={message} />
   }
   if (message.kind === 'error') {
     return <ErrorCard message={message} />
@@ -71,25 +68,6 @@ export default function MessageBubble({ message, isStreaming = false, isLast = f
           {isStreaming && <span className={styles.cursor} aria-hidden />}
         </div>
 
-        {!isStreaming && isLast && (
-          // 时间 + 「重新生成」同一行：时间在左，按钮在右（onRetry 传了才显示）。
-          <div className={styles.metaRow}>
-            <time className={styles.time} dateTime={new Date(message.createdAt).toISOString()}>
-              {formatClock(message.createdAt)}
-            </time>
-            {onRetry && (
-              <button
-                type="button"
-                className={styles.retryBtn}
-                onClick={onRetry}
-                title="用当前项目状态重新生成这一轮（会追加一个新版本）"
-              >
-                <RotateCcw size={13} className={styles.retryIcon} />
-                <span>重新生成</span>
-              </button>
-            )}
-          </div>
-        )}
       </div>
     )
   }
@@ -116,13 +94,97 @@ export default function MessageBubble({ message, isStreaming = false, isLast = f
         {/* 只发图片没文字时不渲染空段落 */}
         {message.text && <p className={styles.text}>{message.text}</p>}
 
-        {isLast && (
-          <time className={styles.time} dateTime={new Date(message.createdAt).toISOString()}>
-            {formatClock(message.createdAt)}
-          </time>
-        )}
       </div>
     </article>
+  )
+}
+
+// ============================================
+// 思考过程：真实正文可展开；仅有 token / 无正文时显示低噪声兜底状态
+// ============================================
+function ReasoningCard({ message }: { message: Message }) {
+  const streaming = message.reasoningStreaming === true
+  const fallback = message.reasoningFallback === true
+  const expandable = !fallback && message.text.trim().length > 0
+  const [expanded, setExpanded] = useState(streaming)
+  const bodyRef = useRef<HTMLDivElement>(null)
+  const preview = message.text.replace(/\s+/g, ' ').trim()
+  const previewText = preview.length > 72 ? `${preview.slice(0, 72)}…` : preview
+
+  // 流式期间保持展开；完成帧到达后自动收起。用异步状态更新避免在 effect 内
+  // 同步 setState 造成额外级联渲染；完成后用户仍可手动再次展开。
+  useEffect(() => {
+    if (streaming) return
+    const timer = setTimeout(() => setExpanded(false), 0)
+    return () => clearTimeout(timer)
+  }, [streaming])
+
+  // 长推理超过卡片最大高度后，跟随最新分片滚到底部。
+  useEffect(() => {
+    if (!streaming || !bodyRef.current) return
+    bodyRef.current.scrollTop = bodyRef.current.scrollHeight
+  }, [message.text, streaming])
+
+  const header = (
+    <>
+      <span className={styles.reasoningIcon} aria-hidden>
+        <BrainCircuit size={14} />
+      </span>
+      <span className={styles.reasoningHeading}>
+        <strong>{streaming ? '正在思考' : fallback ? '已完成思考' : '思考过程'}</strong>
+        <small>
+          {streaming
+            ? '推理内容正在实时输出'
+            : fallback
+              ? message.text
+              : expanded
+                ? '收起推理内容'
+                : previewText}
+        </small>
+      </span>
+      {!streaming && message.reasoningTokens !== undefined && (
+        <span className={styles.reasoningTokens}>{message.reasoningTokens} tokens</span>
+      )}
+      {!streaming && expandable && (
+        <ChevronRight
+          size={13}
+          className={`${styles.reasoningChevron} ${expanded ? styles.reasoningChevronOpen : ''}`}
+          aria-hidden
+        />
+      )}
+    </>
+  )
+
+  return (
+    <section
+      className={`${styles.reasoningCard} ${fallback ? styles.reasoningFallback : ''} ${streaming ? styles.reasoningStreaming : ''}`}
+    >
+      {!streaming && expandable ? (
+        <button
+          type="button"
+          className={styles.reasoningHeader}
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+        >
+          {header}
+        </button>
+      ) : (
+        <div className={styles.reasoningHeader}>{header}</div>
+      )}
+
+      {expanded && (
+        <div
+          ref={bodyRef}
+          className={`${styles.reasoningBody} ${streaming ? styles.reasoningBodyLive : ''}`}
+          aria-live={streaming ? 'polite' : undefined}
+        >
+          <Markdown remarkPlugins={[remarkGfm]}>{message.text}</Markdown>
+          {message.reasoningTruncated && (
+            <span className={styles.reasoningTruncated}>内容已由服务端截断</span>
+          )}
+        </div>
+      )}
+    </section>
   )
 }
 
@@ -207,7 +269,31 @@ function ToolCallChip({ message }: { message: Message }) {
 // 数据来自通用的 tool_call 事件（message.toolArgs.questions），不是独立的 SSE 事件类型。
 // 每个问题各自单选或多选，点「提交/确认」后才切到下一题，全部答完才一次性提交
 // （见 onAnswer：内部会 POST /ask-result 唤醒后端，或降级为发一条新消息）。
-type AskQuestion = { question: string; options: string[]; multi?: boolean }
+type AskOption = string | { label: string; description?: string }
+type AskQuestion = {
+  header?: string
+  question: string
+  options: AskOption[]
+  multi?: boolean
+}
+
+function isAskOption(v: unknown): v is AskOption {
+  if (typeof v === 'string') return true
+  if (!v || typeof v !== 'object') return false
+  const option = v as { label?: unknown; description?: unknown }
+  return (
+    typeof option.label === 'string' &&
+    (option.description === undefined || typeof option.description === 'string')
+  )
+}
+
+function askOptionLabel(option: AskOption): string {
+  return typeof option === 'string' ? option : option.label
+}
+
+function askOptionDescription(option: AskOption): string | undefined {
+  return typeof option === 'string' ? undefined : option.description
+}
 
 function isAskQuestions(v: unknown): v is AskQuestion[] {
   return (
@@ -218,7 +304,10 @@ function isAskQuestions(v: unknown): v is AskQuestion[] {
         !!q &&
         typeof q === 'object' &&
         typeof (q as { question?: unknown }).question === 'string' &&
-        Array.isArray((q as { options?: unknown }).options),
+        ((q as { header?: unknown }).header === undefined ||
+          typeof (q as { header?: unknown }).header === 'string') &&
+        Array.isArray((q as { options?: unknown }).options) &&
+        (q as { options: unknown[] }).options.every(isAskOption),
     )
   )
 }
@@ -258,7 +347,7 @@ function parseSingleAskAnswer(
   if (answer === ASK_FALLBACK_ANSWER) {
     return { selectedIndex: null, isFallback: true, customText: '', isCustom: false }
   }
-  const idx = question.options.findIndex((opt) => opt === answer)
+  const idx = question.options.findIndex((opt) => askOptionLabel(opt) === answer)
   if (idx !== -1) return { selectedIndex: idx, isFallback: false, customText: '', isCustom: false }
   return { selectedIndex: null, isFallback: false, customText: answer, isCustom: true }
 }
@@ -275,7 +364,7 @@ function parseMultiAskAnswer(
   if (!match) return { checked: new Set(), customText: answer, isCustom: true }
   const checked = new Set<number>()
   for (const label of match[1].split('、')) {
-    const idx = question.options.findIndex((opt) => opt === label)
+    const idx = question.options.findIndex((opt) => askOptionLabel(opt) === label)
     if (idx !== -1) checked.add(idx)
   }
   const customText = match[2]?.trim() ?? ''
@@ -403,7 +492,7 @@ function AskUserChip({
               onClick={() => setActiveIndex(i)}
             >
               {answers[i] != null && <Check size={11} className={styles.askChipTabCheck} aria-hidden />}
-              <span className={styles.askChipTabLabel}>问题{i + 1}</span>
+              <span className={styles.askChipTabLabel}>{q.header || `问题${i + 1}`}</span>
             </button>
           ))}
         </div>
@@ -480,7 +569,9 @@ function AskQuestionBody({
   // （这就是「不强制选择」的落点）；「说说其他想法」有内容则一并/单独拼进去。
   const confirmMulti = () => {
     const text = customText.trim()
-    const picked = question.options.filter((_, i) => checked.has(i))
+    const picked = question.options
+      .filter((_, i) => checked.has(i))
+      .map(askOptionLabel)
     if (isCustomSelected && text) {
       if (picked.length === 0) {
         onFinalize(text)
@@ -505,7 +596,7 @@ function AskQuestionBody({
       return
     }
     if (selectedIndex !== null) {
-      onFinalize(question.options[selectedIndex])
+      onFinalize(askOptionLabel(question.options[selectedIndex]))
       return
     }
     if (isFallbackSelected) {
@@ -531,20 +622,26 @@ function AskQuestionBody({
 
       {multi ? (
         <div className={styles.askChipOptions}>
-          {question.options.map((opt, i) => (
-            <label
-              key={i}
-              className={`${styles.askChipCheckbox} ${checked.has(i) ? styles.askChipCheckboxSelected : ''}`}
-            >
-              <input
-                type="checkbox"
-                checked={checked.has(i)}
-                disabled={disabled}
-                onChange={() => toggleOption(i)}
-              />
-              <span>{opt}</span>
-            </label>
-          ))}
+          {question.options.map((opt, i) => {
+            const description = askOptionDescription(opt)
+            return (
+              <label
+                key={i}
+                className={`${styles.askChipCheckbox} ${checked.has(i) ? styles.askChipCheckboxSelected : ''}`}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked.has(i)}
+                  disabled={disabled}
+                  onChange={() => toggleOption(i)}
+                />
+                <span className={styles.askChipOptionCopy}>
+                  <strong>{askOptionLabel(opt)}</strong>
+                  {description && <small>{description}</small>}
+                </span>
+              </label>
+            )
+          })}
           <label
             className={`${styles.askChipCheckbox} ${isCustomSelected ? styles.askChipCheckboxSelected : ''}`}
           >
@@ -559,21 +656,27 @@ function AskQuestionBody({
         </div>
       ) : (
         <div className={styles.askChipOptions}>
-          {question.options.map((opt, i) => (
-            <button
-              key={i}
-              type="button"
-              className={`${styles.askChipOptionBtn} ${selectedIndex === i ? styles.askChipOptionBtnSelected : ''}`}
-              disabled={disabled}
-              onClick={() => {
-                setSelectedIndex(i)
-                setIsFallbackSelected(false)
-                setIsCustomSelected(false)
-              }}
-            >
-              {opt}
-            </button>
-          ))}
+          {question.options.map((opt, i) => {
+            const description = askOptionDescription(opt)
+            return (
+              <button
+                key={i}
+                type="button"
+                className={`${styles.askChipOptionBtn} ${selectedIndex === i ? styles.askChipOptionBtnSelected : ''}`}
+                disabled={disabled}
+                onClick={() => {
+                  setSelectedIndex(i)
+                  setIsFallbackSelected(false)
+                  setIsCustomSelected(false)
+                }}
+              >
+                <span className={styles.askChipOptionCopy}>
+                  <strong>{askOptionLabel(opt)}</strong>
+                  {description && <small>{description}</small>}
+                </span>
+              </button>
+            )
+          })}
           <button
             type="button"
             className={`${styles.askChipOptionBtn} ${styles.askChipFallbackBtn} ${isFallbackSelected ? styles.askChipOptionBtnSelected : ''}`}

@@ -23,9 +23,6 @@
       color: var(--color-text);
     }
 
-    .time {
-      text-align: right;
-    }
   }
 
   .content {
@@ -63,11 +60,6 @@
     word-break: break-word;
   }
 
-  .time {
-    font-family: var(--font-mono);
-    font-size: $fs-10;
-    color: var(--color-text-faint);
-  }
 }
 
 // ============================================
@@ -78,47 +70,6 @@
   flex-direction: column;
   gap: $space-1;
   margin-bottom: $space-4;
-
-  // 时间 + 「重新生成」一行：时间贴左，按钮推到右端
-  .metaRow {
-    display: flex;
-    align-items: center;
-    gap: $space-2;
-  }
-
-  .time {
-    font-family: var(--font-mono);
-    font-size: $fs-10;
-    color: var(--color-text-faint);
-  }
-
-  // 「重新生成」幽灵按钮：低调，推到时间行最右侧
-  .retryBtn {
-    @include button-reset;
-    margin-left: auto;
-    display: inline-flex;
-    align-items: center;
-    gap: $space-1;
-    padding: $space-1 $space-2;
-    border-radius: $radius-sm;
-    color: var(--color-text-mute);
-    font-size: $fs-12;
-    transition: color $dur-base $ease-out, background $dur-base $ease-out;
-
-    // 图标 hover 时轻轻逆时针转一下，呼应「重新生成」的语义
-    .retryIcon {
-      transition: transform $dur-base $ease-out;
-    }
-
-    &:hover {
-      color: var(--color-text);
-      background: var(--color-bg-hover);
-
-      .retryIcon {
-        transform: rotate(-45deg);
-      }
-    }
-  }
 }
 
 // markdown 排版：贴合现有文本风格，元素间距收紧；首尾元素不留外边距
@@ -249,6 +200,172 @@
 @keyframes blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
+}
+
+// ============================================
+// 思考过程：时间线中的低噪声「认知轨迹」，真实正文按需展开
+// ============================================
+.reasoningCard {
+  width: 100%;
+  margin-bottom: $space-3;
+  border-left: 2px solid color-mix(in srgb, var(--color-accent) 68%, transparent);
+  border-radius: 0 $radius-sm $radius-sm 0;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--color-accent) 7%, transparent),
+    transparent 72%
+  );
+  overflow: hidden;
+  animation: tool-chip-in $dur-base $ease-out;
+
+  .reasoningHeader {
+    @include button-reset;
+    display: flex;
+    align-items: center;
+    gap: $space-2;
+    width: 100%;
+    min-height: 38px;
+    padding: $space-2 $space-3;
+    color: inherit;
+    text-align: left;
+  }
+
+  button.reasoningHeader {
+    cursor: pointer;
+    transition: background $dur-base $ease-out;
+
+    &:hover {
+      background: color-mix(in srgb, var(--color-accent) 6%, transparent);
+    }
+  }
+
+  .reasoningIcon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 26px;
+    width: 26px;
+    height: 26px;
+    border: 1px solid color-mix(in srgb, var(--color-accent) 24%, transparent);
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+    color: var(--color-accent);
+  }
+
+  .reasoningHeading {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    flex-direction: column;
+    gap: 1px;
+
+    strong {
+      color: var(--color-text-dim);
+      font-size: $fs-12;
+      font-weight: $fw-medium;
+    }
+
+    small {
+      @include truncate;
+      color: var(--color-text-mute);
+      font-size: $fs-11;
+      line-height: $lh-snug;
+    }
+  }
+
+  .reasoningTokens {
+    flex-shrink: 0;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: var(--color-bg-elev);
+    color: var(--color-text-faint);
+    font-family: var(--font-mono);
+    font-size: $fs-10;
+  }
+
+  .reasoningChevron {
+    flex-shrink: 0;
+    color: var(--color-text-faint);
+    transition: transform $dur-base $ease-out;
+  }
+
+  .reasoningChevronOpen {
+    transform: rotate(90deg);
+  }
+
+  .reasoningBody {
+    max-height: 300px;
+    margin: 0 $space-3 $space-3 42px;
+    padding: $space-2 $space-3;
+    overflow: auto;
+    border-top: 1px solid color-mix(in srgb, var(--color-border) 72%, transparent);
+    color: var(--color-text-mute);
+    font-size: $fs-12;
+    line-height: $lh-relaxed;
+    word-break: break-word;
+
+    > :first-child { margin-top: 0; }
+    > :last-child { margin-bottom: 0; }
+
+    p,
+    pre,
+    ul,
+    ol {
+      margin: $space-2 0;
+    }
+
+    pre {
+      padding: $space-2;
+      border-radius: $radius-xs;
+      background: var(--color-bg);
+      white-space: pre-wrap;
+    }
+  }
+
+  .reasoningBodyLive::after {
+    display: inline-block;
+    width: 5px;
+    height: 13px;
+    margin-left: 3px;
+    border-radius: 1px;
+    background: var(--color-accent);
+    content: '';
+    vertical-align: -2px;
+    animation: blink 0.9s steps(1, end) infinite;
+  }
+
+  .reasoningTruncated {
+    display: inline-block;
+    margin-top: $space-2;
+    color: var(--color-text-faint);
+    font-size: $fs-10;
+  }
+}
+
+.reasoningStreaming {
+  .reasoningIcon {
+    animation: reasoning-pulse 1.6s ease-in-out infinite;
+  }
+}
+
+@keyframes reasoning-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-accent) 20%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 4px transparent;
+  }
+}
+
+.reasoningFallback {
+  border-left-color: var(--color-border-strong);
+  background: linear-gradient(90deg, var(--color-bg-soft), transparent 72%);
+
+  .reasoningIcon {
+    border-color: var(--color-border);
+    background: var(--color-bg-soft);
+    color: var(--color-text-mute);
+  }
 }
 
 // ============================================
@@ -640,6 +757,8 @@
 
   .askChipOptionBtn {
     @include button-reset;
+    display: inline-flex;
+    align-items: center;
     padding: $space-1 $space-3;
     border: 1px solid var(--color-border);
     border-radius: $radius-full;
@@ -659,6 +778,32 @@
     }
   }
 
+  // 新版 ask_user 允许选项同时携带 label + description；旧版字符串选项继续只显示一行。
+  .askChipOptionCopy {
+    display: inline-flex;
+    min-width: 0;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+    text-align: left;
+
+    strong {
+      color: inherit;
+      font: inherit;
+      font-weight: $fw-medium;
+      line-height: $lh-snug;
+    }
+
+    small {
+      max-width: 320px;
+      color: var(--color-text-mute);
+      font-size: $fs-10;
+      font-weight: $fw-normal;
+      line-height: $lh-snug;
+      white-space: normal;
+    }
+  }
+
   // 已选中的单选选项 / 兜底按钮
   .askChipOptionBtnSelected {
     border-color: var(--color-accent);
@@ -674,7 +819,7 @@
 
   .askChipCheckbox {
     display: inline-flex;
-    align-items: center;
+    align-items: flex-start;
     gap: $space-1;
     padding: $space-1 $space-3;
     border: 1px solid var(--color-border);

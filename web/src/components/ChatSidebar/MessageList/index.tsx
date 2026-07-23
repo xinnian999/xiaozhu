@@ -144,6 +144,9 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
       thinkingLabel = '预览等待超时'
       thinkingHint = `模型正在处理超时结果，已等待 ${genSeconds}s…`
     }
+  } else if (latestTool?.toolName === 'ask_user' && latestToolResult) {
+    thinkingLabel = '正在处理回答'
+    thinkingHint = `模型已收到你的回答，正在继续生成，已等待 ${genSeconds}s…`
   } else if (latestTool?.toolResult) {
     thinkingLabel = '继续处理'
     thinkingHint = `模型正在规划下一步，已等待 ${genSeconds}s…`

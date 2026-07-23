@@ -430,6 +430,11 @@ export default function ChatSidebar() {
   const handleAskUserAnswer = async (msg: Message, answer: string) => {
     const live = awaitingAnswer && !!msg.toolCallId && !msg.toolResult
     if (live && session) {
+      const toolCallId = msg.toolCallId as string
+      // 用户点击提交后先乐观写入问答卡：不必等后端首个 tool_result 才看到“已回答”。
+      // 这也会解除 MessageList 对运行中工具卡 loading 的抑制，使“正在处理回答”
+      // 能在请求建立连接前立即出现，填平模型首个事件到达前的静默空窗。
+      setToolResult(toolCallId, answer)
       endAwaitingAnswer()
       beginStreaming()
       const controller = new AbortController()
@@ -438,7 +443,7 @@ export default function ChatSidebar() {
         const settled = await consumeStream(
           streamAskResult(
             session.id,
-            msg.toolCallId as string,
+            toolCallId,
             answer,
             selectedModel,
             controller.signal,
@@ -446,6 +451,11 @@ export default function ChatSidebar() {
           ),
         )
         if (!settled) setResumable(session.id, true)
+      } catch (error) {
+        // 请求尚未建立就失败时撤销乐观答案，并恢复等待回答态，让用户可以直接重试。
+        setToolResult(toolCallId, '')
+        beginAwaitingAnswer()
+        throw error
       } finally {
         abortRef.current = null
         endStreaming()

@@ -149,6 +149,10 @@ def build_tools(db: AsyncSession, session_id: str, db_lock: asyncio.Lock) -> lis
         if result.get("ok"):
             return "构建通过，预览正常，没有报错。"
         errors = str(result.get("errors") or "").strip() or "（无详细错误信息）"
+        if result.get("visual") and result.get("runtime"):
+            return f"构建通过，但预览同时存在运行与布局问题，请全部修复后再次检查：\n{errors}"
+        if result.get("visual"):
+            return f"构建通过，但预览布局验收失败，请按报告修复后再次检查：\n{errors}"
         if result.get("runtime"):
             # 编译过了、但 iframe 渲染时崩（如 undefined is not a function）
             return f"构建通过，但预览运行时报错，请定位并修复：\n{errors}"

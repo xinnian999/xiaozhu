@@ -436,7 +436,7 @@ export async function getResumeState(sessionId: string): Promise<boolean> {
 // 走原生 fetch 而非 axios：best-effort 旁路数据，失败要静默，不弹 toast 骚扰用户。
 export async function postBuildResult(
   sessionId: string,
-  result: { ok: boolean; errors: string; runtime?: boolean },
+  result: { ok: boolean; errors: string; runtime?: boolean; visual?: boolean },
 ): Promise<void> {
   try {
     await fetch(`/api/sessions/${sessionId}/build-result`, {

@@ -111,6 +111,14 @@ function ReasoningCard({ message }: { message: Message }) {
   const preview = message.text.replace(/\s+/g, ' ').trim()
   const previewText = preview.length > 72 ? `${preview.slice(0, 72)}…` : preview
 
+  // 流式期间保持展开；完成帧到达后自动收起。用异步状态更新避免在 effect 内
+  // 同步 setState 造成额外级联渲染；完成后用户仍可手动再次展开。
+  useEffect(() => {
+    if (streaming) return
+    const timer = setTimeout(() => setExpanded(false), 0)
+    return () => clearTimeout(timer)
+  }, [streaming])
+
   // 长推理超过卡片最大高度后，跟随最新分片滚到底部。
   useEffect(() => {
     if (!streaming || !bodyRef.current) return

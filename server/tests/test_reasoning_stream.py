@@ -117,3 +117,46 @@ class ReasoningStreamTests(IsolatedAsyncioTestCase):
         self.assertEqual(events[3]["text"], "最终回答")
         save_reasoning.assert_awaited_once()
         save_message.assert_awaited_once()
+
+    async def test_disabled_reasoning_is_not_emitted_or_persisted(self):
+        with (
+            patch(
+                "app.agents.loop._save_reasoning_message",
+                new_callable=AsyncMock,
+            ) as save_reasoning,
+            patch(
+                "app.agents.loop._save_message",
+                new_callable=AsyncMock,
+            ) as save_message,
+            patch(
+                "app.agents.loop._charge_user",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "app.agents.loop._cleanup_thread",
+                new_callable=AsyncMock,
+            ),
+        ):
+            frames = [
+                frame
+                async for frame in _consume(
+                    _StreamingReasoningAgent(),
+                    {"messages": []},
+                    "thread-1",
+                    session_id="session-1",
+                    summary_text="关闭思考",
+                    model="test-model",
+                    db=object(),  # type: ignore[arg-type]
+                    db_lock=asyncio.Lock(),
+                    user_id="user-1",
+                    emit_reasoning=False,
+                )
+            ]
+
+        events = [_event(frame) for frame in frames]
+        self.assertEqual(
+            [event["type"] for event in events],
+            ["message_delta", "done"],
+        )
+        save_reasoning.assert_not_awaited()
+        save_message.assert_awaited_once()

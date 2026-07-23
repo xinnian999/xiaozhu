@@ -178,7 +178,10 @@ export default function ChatSidebar() {
   // 返回值：这次流是否「正常收场」（收到 done / error / awaiting_answer 之一）。
   // 返回 false 说明 for-await 是因为连接中途断掉才结束的（网络抖动等）——调用方据此把
   // 会话标记为可续跑，让用户点「继续生成」从断点接着跑，而不用从头重来。
-  const consumeStream = async (stream: AsyncGenerator<SSEEvent>): Promise<boolean> => {
+  const consumeStream = async (
+    stream: AsyncGenerator<SSEEvent>,
+    showReasoning = true,
+  ): Promise<boolean> => {
     // 逐 token 累积到本地变量，再统一冲刷给 store
     let accumulated = ''
     // 是否正常收到了终止事件（done/error/awaiting_answer）。没收到就断流 = 被中断。
@@ -188,6 +191,7 @@ export default function ChatSidebar() {
         accumulated += event.text
         setStreamingText(accumulated)
       } else if (event.type === 'reasoning_delta') {
+        if (!showReasoning) continue
         // 推理正文按厂商 token/chunk 实时追加到同一张思考卡。若上一轮已有过场文字，
         // 先固化它，再开始下一次模型调用的思考，保持时间线顺序。
         if (accumulated) {
@@ -196,6 +200,7 @@ export default function ChatSidebar() {
         }
         appendReasoningDelta(event.id, event.text)
       } else if (event.type === 'reasoning') {
+        if (!showReasoning) continue
         // 思考过程是独立的时间线卡片。若前一轮模型已输出过场文字，先固化正文，
         // 再插入下一次模型调用的思考卡，保持「正文 → 思考 → 工具」的真实顺序。
         if (accumulated) {
@@ -210,6 +215,7 @@ export default function ChatSidebar() {
           event.truncated,
         )
       } else if (event.type === 'reasoning_discard') {
+        if (!showReasoning) continue
         // NoBluffMiddleware 否决了一次候选回复：它的临时推理流也随候选一起撤回。
         discardReasoning(event.id)
       } else if (event.type === 'tool_call') {
@@ -334,6 +340,7 @@ export default function ChatSidebar() {
           false,
           thinkingForRequest,
         ),
+        thinkingForRequest !== false,
       )
       // 流没正常收场（既非 done/error，也非 ask_user 暂停）= 连接中途断了。
       // 同会话内直接标记可续跑，用户点「继续生成」即可从断点接着跑，无需刷新页面。
@@ -380,6 +387,7 @@ export default function ChatSidebar() {
           true,
           thinkingForRequest,
         ),
+        thinkingForRequest !== false,
       )
       if (!settled) setResumable(session.id, true)
     } finally {
@@ -404,6 +412,7 @@ export default function ChatSidebar() {
     try {
       const settled = await consumeStream(
         streamResume(session.id, selectedModel, controller.signal, thinkingForRequest),
+        thinkingForRequest !== false,
       )
       if (!settled) setResumable(session.id, true)
     } finally {
@@ -449,6 +458,7 @@ export default function ChatSidebar() {
             controller.signal,
             thinkingForRequest,
           ),
+          thinkingForRequest !== false,
         )
         if (!settled) setResumable(session.id, true)
       } catch (error) {

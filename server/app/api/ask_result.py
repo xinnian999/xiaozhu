@@ -147,6 +147,7 @@ async def _resume_stream(session_id: str, body: AskResult, db: AsyncSession, use
             db_lock=db_lock,
             user_id=user_id,
             initial_pending={ask_call["id"]: ("ask_user", ask_call["args"], tool_msg)},
+            emit_reasoning=body.thinking is not False,
         ):
             yield event
     except HTTPException as e:

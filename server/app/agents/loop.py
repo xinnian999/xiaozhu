@@ -606,6 +606,7 @@ async def _consume(
     db_lock: asyncio.Lock,
     user_id: str,
     initial_pending: dict[str, tuple[str, dict, DBMessage]] | None = None,
+    emit_reasoning: bool = True,
 ) -> AsyncGenerator[str, None]:
     """消费 agent.astream(...) 的事件流,翻译成 SSE + 落库副作用。
 
@@ -619,6 +620,9 @@ async def _consume(
     resume 后 "tools" 节点回传的 ToolMessage 会因为按 tool_call_id 查不到而被静默丢弃
     (答案存不进 DB、前端也收不到 tool_result)。调用方(ask_result)负责从 DB 查出那条
     待回填的 kind='tool' 消息,连同 tool_call_id 一并传进来。
+
+    emit_reasoning=False 表示本轮显式关闭思考：即使厂商仍返回推理字段，也不下发
+    reasoning SSE、不生成兜底卡，并且不把 reasoning 消息持久化到数据库。
     """
     final_assistant_text = ""
     final_reasoning_payload: dict | None = None
@@ -699,22 +703,23 @@ async def _consume(
                 if meta.get("langgraph_node") == "model":
                     # 上一次无工具候选若没有走到 END，而是又进入 model，说明它被
                     # NoBluffMiddleware 否决了；移除已经流给前端的临时思考卡。
-                    if final_reasoning_payload is not None:
+                    if emit_reasoning and final_reasoning_payload is not None:
                         stale_id = final_reasoning_payload.get("id")
                         if stale_id:
                             yield sse({"type": "reasoning_discard", "id": stale_id})
                         final_reasoning_payload = None
                         final_assistant_text = ""
 
-                    delta = reasoning_delta(reasoning_delta_text(msg))
-                    if delta:
-                        yield sse(
-                            {
-                                "type": "reasoning_delta",
-                                "id": ensure_reasoning_id(),
-                                "text": delta,
-                            }
-                        )
+                    if emit_reasoning:
+                        delta = reasoning_delta(reasoning_delta_text(msg))
+                        if delta:
+                            yield sse(
+                                {
+                                    "type": "reasoning_delta",
+                                    "id": ensure_reasoning_id(),
+                                    "text": delta,
+                                }
+                            )
 
                     for tcc in getattr(msg, "tool_call_chunks", None) or []:
                         idx = tcc.get("index") or 0
@@ -785,8 +790,10 @@ async def _consume(
                             truncated = True
                             break
 
-                        reasoning_payload = _reasoning_payload(m)
-                        reasoning_payload["id"] = ensure_reasoning_id()
+                        reasoning_payload = None
+                        if emit_reasoning:
+                            reasoning_payload = _reasoning_payload(m)
+                            reasoning_payload["id"] = ensure_reasoning_id()
                         text = extract_text(m)
                         if m.tool_calls:
                             # 这一轮又调了工具,说明之前(若有)攒着没发的
@@ -804,10 +811,11 @@ async def _consume(
                                     }
                                 )
                             final_reasoning_payload = None
-                            yield sse(reasoning_payload)
-                            await _save_reasoning_message(
-                                db, db_lock, session_id, reasoning_payload
-                            )
+                            if reasoning_payload:
+                                yield sse(reasoning_payload)
+                                await _save_reasoning_message(
+                                    db, db_lock, session_id, reasoning_payload
+                                )
                             reset_active_reasoning()
                             if text:
                                 print(f"[response] content={text} (同轮调用了工具)")
@@ -1080,5 +1088,6 @@ async def agent_loop(
         db=db,
         db_lock=db_lock,
         user_id=user_id,
+        emit_reasoning=req.thinking is not False,
     ):
         yield event

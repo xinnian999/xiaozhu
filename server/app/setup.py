@@ -99,7 +99,7 @@ def _render_form(
             f'<option value="{html.escape(item["id"], quote=True)}" '
             f'data-base-url="{html.escape(item["default_base_url"] or "", quote=True)}" '
             f'data-description="{html.escape(item["description"], quote=True)}"'
-            f"{' selected' if item['id'] == 'custom_openai' else ''}>"
+            f"{' selected' if item['id'] == 'openai' else ''}>"
             f"{html.escape(item['label'])}</option>"
         )
         for item in provider_catalog()
@@ -227,13 +227,15 @@ def _render_form(
           el.value = initial[key] == null ? '' : String(initial[key]);
         }}
       }});
-      // 已删除或未知的厂商值按兜底协议恢复，避免 select 落入空选项。
-      if (!provider.value) provider.value = 'custom_openai';
+      // 旧版 custom_openai 与未知厂商统一并入 OpenAI 兼容协议。
+      if (!provider.value) provider.value = 'openai';
     }}
-    function applyProviderDefaults(overwriteBaseUrl) {{
+    function applyProviderDefaults(fillEmptyBaseUrl) {{
       var selected = provider.options[provider.selectedIndex];
-      if (overwriteBaseUrl) baseUrl.value = selected.getAttribute('data-base-url') || '';
-      baseUrl.required = provider.value === 'custom_openai';
+      if (fillEmptyBaseUrl && !baseUrl.value.trim()) {{
+        baseUrl.value = selected.getAttribute('data-base-url') || '';
+      }}
+      baseUrl.required = false;
       providerHint.textContent = (selected.getAttribute('data-description') || '') + ' · Logo 自动匹配';
     }}
     provider.addEventListener('change', function() {{ applyProviderDefaults(true); }});
@@ -368,8 +370,6 @@ async def setup_submit(
         )
         if not (mid and k):
             return render_error("每个模型的 ID / API Key 都要填")
-        if provider == "custom_openai" and not base_url:
-            return render_error("自定义 / 中转站模型必须填写 Base URL")
         if mid in seen_ids:
             return render_error(f"模型 ID「{mid}」重复了")
         seen_ids.add(mid)

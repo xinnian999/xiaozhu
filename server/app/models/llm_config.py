@@ -24,9 +24,9 @@ class LlmModel(Base):
     # 真正传给中转的模型名，做主键，如 "qwen3-coder-next"。同时作为前端展示名。
     id: Mapped[str] = mapped_column(String, primary_key=True)
 
-    # 实际 API 厂商/协议。预制厂商走专用适配器；未知端点使用 custom_openai 兜底。
+    # 实际 API 厂商/协议。OpenAI 厂商也承载 OpenAI 兼容中转地址。
     provider: Mapped[str] = mapped_column(
-        String, nullable=False, server_default="custom_openai"
+        String, nullable=False, server_default="openai"
     )
 
     # 该模型调用的 API 地址。为空时使用所选厂商的官方默认地址。
@@ -82,7 +82,7 @@ class LlmModelAdminCreate(BaseModel):
     """POST /api/admin/models 的请求体：新增一个模型（对齐 admin.py 的 form_include_pk）。"""
 
     id: str = Field(min_length=1)
-    provider: str = "custom_openai"
+    provider: str = "openai"
     base_url: str | None = None
     api_key: str = ""
     logo: str = ""
@@ -138,7 +138,7 @@ class LlmModelExportItem(BaseModel):
     model_config = {"from_attributes": True}
 
     id: str = Field(min_length=1)
-    provider: str = "custom_openai"
+    provider: str = "openai"
     base_url: str | None = None
     api_key: str = ""
     logo: str = ""

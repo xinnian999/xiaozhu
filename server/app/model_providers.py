@@ -2,7 +2,7 @@
 
 ``provider`` 描述实际 API 厂商/协议，而不是从模型名称猜品牌。成熟的独立
 LangChain 集成优先；厂商官方推荐兼容协议时，由这里的厂商适配器负责非标准参数
-与响应字段；只有未知中转才直接回退到 ``ChatOpenAI``。
+与响应字段；OpenAI 及其兼容中转统一使用 ``ChatOpenAI``。
 """
 
 from dataclasses import asdict, dataclass
@@ -32,7 +32,14 @@ class ProviderSpec:
 
 
 PROVIDERS: tuple[ProviderSpec, ...] = (
-    ProviderSpec("openai", "OpenAI", "OpenAI", "ChatOpenAI", None, "OpenAI 官方 API"),
+    ProviderSpec(
+        "openai",
+        "OpenAI",
+        "OpenAI",
+        "ChatOpenAI",
+        None,
+        "OpenAI 官方 API 或 OpenAI 兼容中转",
+    ),
     ProviderSpec(
         "anthropic",
         "Anthropic Claude",
@@ -104,14 +111,6 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         "ChatXAI",
         "https://api.x.ai/v1",
         "xAI 独立 LangChain 集成",
-    ),
-    ProviderSpec(
-        "custom_openai",
-        "自定义 / 中转站",
-        "OpenAI",
-        "ChatOpenAI fallback",
-        None,
-        "未知厂商使用 OpenAI Chat Completions 兼容协议兜底",
     ),
 )
 
@@ -261,7 +260,10 @@ def provider_catalog() -> list[dict]:
 
 
 def normalize_provider(provider: str | None) -> str:
-    return provider if provider in _BY_ID else "custom_openai"
+    # custom_openai 是旧版本导出/数据库值，现已并入 OpenAI 厂商。
+    if provider == "custom_openai":
+        return "openai"
+    return provider if provider in _BY_ID else "openai"
 
 
 def provider_spec(provider: str | None) -> ProviderSpec:
@@ -280,7 +282,7 @@ def infer_provider(base_url: str | None) -> str:
     try:
         host = (urlparse(candidate).hostname or "").lower()
     except ValueError:
-        return "custom_openai"
+        return "openai"
     if not host:
         return "openai"
     rules = (
@@ -304,7 +306,8 @@ def infer_provider(base_url: str | None) -> str:
     for domain, provider in rules:
         if host == domain or host.endswith(f".{domain}"):
             return provider
-    return "custom_openai"
+    # 未知域名按 OpenAI 兼容接口处理，管理员仍可保留自定义 Base URL。
+    return "openai"
 
 
 def canonical_model_values(
@@ -446,7 +449,7 @@ def build_chat_model(meta: dict, *, thinking: bool | None = None) -> BaseChatMod
     kwargs: dict[str, Any] = {}
     if provider == "openai" and thinking is True:
         kwargs["reasoning_effort"] = "medium"
-    # OpenAI 官方与未知中转共用传输类，但未知中转不注入任何厂商私有参数。
+    # OpenAI 官方与兼容中转共用传输类；自定义 Base URL 会原样传给 ChatOpenAI。
     return ChatOpenAI(
         model=model,
         api_key=api_key,

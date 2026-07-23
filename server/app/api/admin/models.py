@@ -23,7 +23,6 @@ from app.model_providers import (
     canonical_model_values,
     infer_provider,
     provider_catalog,
-    provider_logo,
     provider_spec,
     supports_thinking_toggle,
     tool_choice_for_provider,
@@ -58,7 +57,9 @@ _TEST_TIMEOUT_SEC = 30
 def _to_read(model: LlmModel) -> LlmModelAdminRead:
     data = LlmModelAdminRead.model_validate(model)
     data.api_key = mask_secret(model.api_key)
-    data.logo = provider_logo(model.provider)
+    spec = provider_spec(model.provider)
+    data.provider = spec.id
+    data.logo = spec.logo
     return data
 
 
@@ -225,11 +226,6 @@ def _canonical_config(
     base_url: str | None,
 ) -> dict:
     provider_id, logo, canonical_base_url = canonical_model_values(provider, base_url)
-    if provider_id == "custom_openai" and not canonical_base_url:
-        raise HTTPException(
-            status_code=422,
-            detail="自定义 / 中转站模型必须填写 Base URL",
-        )
     data["provider"] = provider_id
     data["logo"] = logo
     data["base_url"] = canonical_base_url
@@ -251,16 +247,16 @@ def _test_error_message(exc: Exception, model: LlmModel) -> str:
     if status_code == 401:
         spec = provider_spec(model.provider)
         base_url = model.base_url or spec.default_base_url or "厂商官方默认端点"
-        if model.provider == "qwen":
+        if spec.id == "qwen":
             guidance = (
                 "阿里云官方端点必须使用同区域的 DashScope API Key；"
                 "若密钥来自中转站，请恢复对应 Base URL；"
-                "中转仅兼容通用 OpenAI 协议时再改选“自定义 / 中转站”。"
+                "中转仅兼容通用 OpenAI 协议时可选择 OpenAI 厂商。"
             )
-        elif model.provider == "minimax":
+        elif spec.id == "minimax":
             guidance = "MiniMax 中国站与国际站的 API Key 不通用，请确认 Base URL 区域。"
-        elif model.provider == "custom_openai":
-            guidance = "请确认该 Key 与中转站 Base URL 属于同一服务。"
+        elif spec.id == "openai" and model.base_url:
+            guidance = "请确认该 Key 与 OpenAI 兼容 Base URL 属于同一服务。"
         else:
             guidance = "请重新填写该厂商当前区域签发的 API Key。"
         return (
@@ -295,7 +291,9 @@ async def export_models(db: AsyncSession = Depends(get_db)) -> LlmModelExportBun
     models: list[LlmModelExportItem] = []
     for model in result.scalars().all():
         item = LlmModelExportItem.model_validate(model)
-        item.logo = provider_logo(model.provider)
+        spec = provider_spec(model.provider)
+        item.provider = spec.id
+        item.logo = spec.logo
         models.append(item)
     return LlmModelExportBundle(version=2, exported_at=datetime.now(), models=models)
 
@@ -377,11 +375,8 @@ async def update_model(
     if model is None:
         raise HTTPException(status_code=404, detail="模型不存在")
     data = body.model_dump(exclude_unset=True)
-    provider_changed = "provider" in data and data["provider"] != model.provider
     selected_provider = data.get("provider", model.provider)
-    selected_base_url = data.get(
-        "base_url", None if provider_changed else model.base_url
-    )
+    selected_base_url = data.get("base_url", model.base_url)
     data = _canonical_config(
         data,
         provider=selected_provider,

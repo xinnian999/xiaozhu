@@ -19,6 +19,7 @@ from app.model_providers import (
     build_chat_model,
     canonical_model_values,
     infer_provider,
+    normalize_provider,
     provider_logo,
 )
 from app.models.llm_config import LlmModel
@@ -60,7 +61,7 @@ async def reload_registry(session: AsyncSession) -> None:
     _MODELS_BY_ID = {
         m.id: {
             "id": m.id,
-            "provider": m.provider,
+            "provider": normalize_provider(m.provider),
             "base_url": m.base_url,
             "api_key": m.api_key,
             "logo": provider_logo(m.provider),

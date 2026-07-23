@@ -98,6 +98,11 @@ function parseImportFile(json: unknown): ModelExportItem[] {
   throw new Error('文件格式不正确，请使用本系统导出的 JSON')
 }
 
+/** 旧版“自定义 / 中转站”已并入 OpenAI 厂商。 */
+function normalizeProviderId(provider?: string): string {
+  return !provider || provider === 'custom_openai' ? 'openai' : provider
+}
+
 // ============================================
 // LLM 模型管理页（对齐 admin.py 的 LlmModelAdmin：增删改 + 启停批量）
 // ============================================
@@ -132,7 +137,8 @@ export default function Models() {
     ? providerById.get(selectedProviderId)
     : undefined
 
-  const providerForModel = (model: AdminModel) => providerById.get(model.provider)
+  const providerForModel = (model: AdminModel) =>
+    providerById.get(normalizeProviderId(model.provider))
   const logoForModel = (model: AdminModel) => providerForModel(model)?.logo || model.logo || 'OpenAI'
 
   /** 根据已有 ID 生成不冲突的复制用主键（如 foo → foo-copy，已占用则 foo-copy-2）。 */
@@ -178,7 +184,7 @@ export default function Models() {
     setIsCopy(false)
     form.resetFields()
     form.setFieldsValue({
-      provider: 'custom_openai',
+      provider: 'openai',
       vision: false,
       enabled: true,
       cost: 1,
@@ -191,7 +197,7 @@ export default function Models() {
     setIsCopy(false)
     form.setFieldsValue({
       id: model.id,
-      provider: model.provider || 'custom_openai',
+      provider: normalizeProviderId(model.provider),
       base_url: model.base_url,
       api_key: '', // 敏感值不回填脱敏串；留空表示不改
       vision: model.vision,
@@ -208,7 +214,7 @@ export default function Models() {
     form.resetFields()
     form.setFieldsValue({
       id: suggestCopyId(model.id),
-      provider: model.provider || 'custom_openai',
+      provider: normalizeProviderId(model.provider),
       base_url: model.base_url,
       api_key: '', // 列表里是脱敏值，复制后需重新填写
       vision: model.vision,
@@ -503,7 +509,7 @@ export default function Models() {
               <ModelIcon name={provider?.logo || logoForModel(row)} size={21} />
             </span>
             <span className={styles.providerMeta}>
-              <strong>{provider?.label || row.provider || '自定义 / 中转站'}</strong>
+              <strong>{provider?.label || row.provider || 'OpenAI'}</strong>
               <small>{provider?.description || 'OpenAI 兼容协议'}</small>
             </span>
           </span>
@@ -606,7 +612,7 @@ export default function Models() {
             label="模型厂商"
             name="provider"
             rules={[{ required: true, message: '请选择模型实际使用的 API 厂商' }]}
-            extra="厂商决定请求协议、能力参数与 Logo；未知中转接口请选择“自定义 / 中转站”。"
+            extra="厂商决定请求协议、能力参数与 Logo；OpenAI 兼容中转请选择 OpenAI 并填写 Base URL。"
           >
             <Select
               showSearch
@@ -655,17 +661,11 @@ export default function Models() {
           <Form.Item
             label="Base URL（空=官方）"
             name="base_url"
-            rules={[
-              {
-                required: selectedProvider?.id === 'custom_openai',
-                message: '自定义 / 中转站模型必须填写 Base URL',
-              },
-            ]}
             extra={
               selectedProvider?.default_base_url
                 ? `推荐端点：${selectedProvider.default_base_url}。切换厂商会保留当前填写的地址。`
-                : selectedProvider?.id === 'custom_openai'
-                  ? '请填写中转站或自部署服务的 OpenAI 兼容端点。'
+                : selectedProvider?.id === 'openai'
+                  ? '留空使用 OpenAI 官方端点；中转站或自部署服务可填写兼容地址。'
                   : '留空时使用该厂商 SDK 的官方端点。'
             }
           >

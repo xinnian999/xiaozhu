@@ -31,7 +31,6 @@ _PROVIDER_LOGOS = {
     "zhipu": "Zhipu.Color",
     "minimax": "Minimax.Color",
     "xai": "Grok",
-    "custom_openai": "OpenAI",
 }
 
 _OFFICIAL_DOMAINS = (
@@ -65,11 +64,12 @@ def _infer_provider(base_url: str | None) -> str:
         parsed = urlparse(candidate if "://" in candidate else f"//{candidate}")
         host = (parsed.hostname or "").lower().rstrip(".")
     except ValueError:
-        return "custom_openai"
+        return "openai"
     for domain, provider in _OFFICIAL_DOMAINS:
         if host == domain or host.endswith(f".{domain}"):
             return provider
-    return "custom_openai"
+    # 自定义域名按 OpenAI 兼容接口迁移，并保留原 Base URL。
+    return "openai"
 
 
 def _minimax_anthropic_base_url(base_url: str | None) -> str:
@@ -92,7 +92,7 @@ def upgrade() -> None:
         sa.Column(
             "provider",
             sa.String(),
-            server_default="custom_openai",
+            server_default="openai",
             nullable=False,
         ),
     )

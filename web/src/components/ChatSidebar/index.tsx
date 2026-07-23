@@ -396,7 +396,12 @@ export default function ChatSidebar() {
   // （比如最后一轮生成的是 v3，期间手动改到了 v7，重试就在 v7 之上生成 v8，不动 v3）。
   // 不新增用户气泡 —— prompt 由后端复用最后一条用户消息，旧回复 / 旧版本都保留。
   const handleRetry = async () => {
-    if (!session || isStreaming || creating || awaitingAnswer) return
+    if (!session || isStreaming || creating) return
+
+    // ask_user 暂停态也允许重新生成：用户点这个按钮代表放弃回答当前问题，
+    // 从上一条用户需求重新跑整轮。先解除前端等待态；后端 _prepare_retry 会同步
+    // 删除这一轮的 LangGraph checkpoint，避免从旧提问断点继续执行。
+    if (awaitingAnswer) endAwaitingAnswer()
 
     // 先把最新一轮用户消息之后的旧内容从对话里截掉 —— 看起来像把这条消息重新发出去。
     // 后端会同步删掉这些消息行（但保留版本快照），两边对「最后一条用户消息」的判定一致。

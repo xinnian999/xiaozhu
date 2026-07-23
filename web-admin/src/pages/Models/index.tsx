@@ -131,9 +131,6 @@ export default function Models() {
   const selectedProvider = selectedProviderId
     ? providerById.get(selectedProviderId)
     : undefined
-  const providerChanged = Boolean(
-    editing && selectedProviderId && selectedProviderId !== (editing.provider || 'custom_openai'),
-  )
 
   const providerForModel = (model: AdminModel) => providerById.get(model.provider)
   const logoForModel = (model: AdminModel) => providerForModel(model)?.logo || model.logo || 'OpenAI'
@@ -229,19 +226,11 @@ export default function Models() {
   const handleProviderChange = (providerId: string) => {
     const provider = providerById.get(providerId)
     const currentBaseUrl = String(form.getFieldValue('base_url') ?? '').trim()
-    const knownDefaultUrls = new Set(
-      providers
-        .map((item) => item.default_base_url?.trim())
-        .filter((url): url is string => Boolean(url)),
-    )
-    const shouldUseProviderDefault = !currentBaseUrl || knownDefaultUrls.has(currentBaseUrl)
-    // 厂商切换意味着鉴权端点也切换，不能沿用刚为另一厂商输入的 Key。
-    form.setFieldsValue({
-      ...(shouldUseProviderDefault
-        ? { base_url: provider?.default_base_url ?? null }
-        : {}),
-      api_key: '',
-    })
+    // 厂商只决定请求适配器与推荐配置，不应破坏用户填写的中转地址或密钥。
+    // 仅在 Base URL 尚未填写时补充推荐端点；API Key 始终原样保留。
+    if (!currentBaseUrl && provider?.default_base_url) {
+      form.setFieldValue('base_url', provider.default_base_url)
+    }
   }
 
   const submit = async () => {
@@ -674,7 +663,7 @@ export default function Models() {
             ]}
             extra={
               selectedProvider?.default_base_url
-                ? `已自动填入 ${selectedProvider.label} 的推荐端点，可按实际部署修改。`
+                ? `推荐端点：${selectedProvider.default_base_url}。切换厂商会保留当前填写的地址。`
                 : selectedProvider?.id === 'custom_openai'
                   ? '请填写中转站或自部署服务的 OpenAI 兼容端点。'
                   : '留空时使用该厂商 SDK 的官方端点。'
@@ -687,17 +676,13 @@ export default function Models() {
             name="api_key"
             rules={[
               {
-                required: !editing || providerChanged,
-                message: providerChanged
-                  ? '更换厂商/鉴权端点需新 Key'
-                  : '请填写 API Key',
+                required: !editing,
+                message: '请填写 API Key',
               },
             ]}
             extra={
-              providerChanged
-                ? '更换厂商/鉴权端点需新 Key'
-                : editing
-                ? '留空表示不修改（列表中已脱敏显示）'
+              editing
+                ? '留空表示不修改；切换厂商也会保留已保存的 Key'
                 : isCopy
                   ? '复制不会带入原 Key，请重新填写'
                   : '新建模型需要填写对应厂商的 API Key'

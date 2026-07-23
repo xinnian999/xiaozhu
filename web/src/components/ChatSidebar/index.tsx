@@ -590,42 +590,6 @@ export default function ChatSidebar() {
                 </div>
 
                 <ModelSelector />
-
-                <label
-                  className={`${styles.thinkingToggle} ${thinkingEnabled ? styles.thinkingToggleActive : ''} ${!thinkingSupported ? styles.thinkingToggleUnsupported : ''} ${thinkingSupported && !thinkingToggleable ? styles.thinkingToggleLocked : ''}`}
-                  title={
-                    !thinkingSupported
-                      ? currentModel?.thinking_status === 'unknown'
-                        ? '当前模型尚未探测思考能力，请先在后台运行全面测试'
-                        : currentModel?.thinking_status === 'failed'
-                          ? '当前模型思考能力探测失败，请在后台重试'
-                          : '当前模型不支持深度思考'
-                      : !thinkingToggleable
-                        ? '当前模型支持思考，但无法关闭'
-                        : thinkingEnabled
-                          ? '已开启深度思考'
-                          : '已关闭深度思考'
-                  }
-                >
-                  <input
-                    type="checkbox"
-                    checked={thinkingEnabled}
-                    disabled={!thinkingToggleable || composerDisabled}
-                    onChange={(event) => {
-                      if (!selectedModel) return
-                      setThinkingOverrides((prev) => ({
-                        ...prev,
-                        [selectedModel]: event.target.checked,
-                      }))
-                    }}
-                    aria-label="开启深度思考"
-                  />
-                  <span className={styles.thinkingCheck} aria-hidden>
-                    {thinkingEnabled && <Check size={10} strokeWidth={3} />}
-                  </span>
-                  <BrainCircuit size={14} aria-hidden />
-                  <span className={styles.thinkingLabel}>深度思考</span>
-                </label>
               </div>
 
               {isStreaming ? (
@@ -651,7 +615,42 @@ export default function ChatSidebar() {
           </div>
 
           <div className={styles.composerHint}>
-            <span>Shift + Enter 换行</span>
+            <label
+              className={`${styles.thinkingToggle} ${thinkingEnabled ? styles.thinkingToggleActive : ''} ${!thinkingSupported ? styles.thinkingToggleUnsupported : ''} ${thinkingSupported && !thinkingToggleable ? styles.thinkingToggleLocked : ''}`}
+              title={
+                !thinkingSupported
+                  ? currentModel?.thinking_status === 'unknown'
+                    ? '当前模型尚未探测思考能力，请先在后台运行全面测试'
+                    : currentModel?.thinking_status === 'failed'
+                      ? '当前模型思考能力探测失败，请在后台重试'
+                      : '当前模型不支持深度思考'
+                  : !thinkingToggleable
+                    ? '当前模型支持思考，但无法关闭'
+                    : thinkingEnabled
+                      ? '已开启深度思考'
+                      : '已关闭深度思考'
+              }
+            >
+              <input
+                type="checkbox"
+                checked={thinkingEnabled}
+                disabled={!thinkingToggleable || composerDisabled}
+                onChange={(event) => {
+                  if (!selectedModel) return
+                  setThinkingOverrides((prev) => ({
+                    ...prev,
+                    [selectedModel]: event.target.checked,
+                  }))
+                }}
+                aria-label="开启深度思考"
+              />
+              <span className={styles.thinkingCheck} aria-hidden>
+                {thinkingEnabled && <Check size={10} strokeWidth={3} />}
+              </span>
+              <BrainCircuit size={14} aria-hidden />
+              <span className={styles.thinkingLabel}>深度思考</span>
+            </label>
+            <span className={styles.shortcutHint}>Shift + Enter 换行</span>
           </div>
         </footer>
     </aside>

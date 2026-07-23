@@ -469,9 +469,21 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set((s) => ({
       sessions: s.sessions.map((sess) => {
         if (sess.id !== id) return sess
-        const index = sess.messages.findIndex(
-          (m) => m.kind === 'reasoning' && m.reasoningStreamId === streamId,
-        )
+        // LangGraph 从 ask_user 恢复后可能重新使用同一个 reasoning stream id。
+        // 只能续写仍处于流式态的卡片；历史卡即使 id 相同，也必须保留在原位置，
+        // 并在当前时间线末尾新建一张，避免回答后的进度跑到“已回答”上方。
+        let index = -1
+        for (let i = sess.messages.length - 1; i >= 0; i--) {
+          const message = sess.messages[i]
+          if (
+            message.kind === 'reasoning' &&
+            message.reasoningStreamId === streamId &&
+            message.reasoningStreaming
+          ) {
+            index = i
+            break
+          }
+        }
         if (index === -1) {
           return {
             ...sess,
@@ -507,9 +519,20 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set((s) => ({
       sessions: s.sessions.map((sess) => {
         if (sess.id !== id) return sess
-        const index = sess.messages.findIndex(
-          (m) => m.kind === 'reasoning' && m.reasoningStreamId === streamId,
-        )
+        // 与增量帧保持相同的“只命中当前流式卡”规则。若厂商只返回最终帧、
+        // 或恢复后的 id 与历史卡重复，则把结果作为一张新卡追加到末尾。
+        let index = -1
+        for (let i = sess.messages.length - 1; i >= 0; i--) {
+          const message = sess.messages[i]
+          if (
+            message.kind === 'reasoning' &&
+            message.reasoningStreamId === streamId &&
+            message.reasoningStreaming
+          ) {
+            index = i
+            break
+          }
+        }
         const completed = {
           text,
           reasoningStreamId: streamId,
@@ -544,16 +567,28 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const id = get().activeId
     if (!id) return
     set((s) => ({
-      sessions: s.sessions.map((sess) =>
-        sess.id === id
-          ? {
-              ...sess,
-              messages: sess.messages.filter(
-                (m) => !(m.kind === 'reasoning' && m.reasoningStreamId === streamId),
-              ),
-            }
-          : sess,
-      ),
+      sessions: s.sessions.map((sess) => {
+        if (sess.id !== id) return sess
+        // 同一个 id 可能在恢复前后各出现一次。候选被否决时只移除当前最新卡，
+        // 不能把已经完成并展示过的历史思考一并删掉。
+        let latestMatch = -1
+        let liveMatch = -1
+        for (let i = sess.messages.length - 1; i >= 0; i--) {
+          const message = sess.messages[i]
+          if (message.kind !== 'reasoning' || message.reasoningStreamId !== streamId) continue
+          if (latestMatch === -1) latestMatch = i
+          if (message.reasoningStreaming) {
+            liveMatch = i
+            break
+          }
+        }
+        const removeIndex = liveMatch !== -1 ? liveMatch : latestMatch
+        if (removeIndex === -1) return sess
+        return {
+          ...sess,
+          messages: sess.messages.filter((_, index) => index !== removeIndex),
+        }
+      }),
     }))
   },
 

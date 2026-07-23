@@ -5,6 +5,7 @@ LangChain 集成优先；厂商官方推荐兼容协议时，由这里的厂商�
 与响应字段；OpenAI 及其兼容中转统一使用 ``ChatOpenAI``。
 """
 
+import re
 from dataclasses import asdict, dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -116,6 +117,110 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
 
 _BY_ID = {item.id: item for item in PROVIDERS}
 _REASONING_FIELDS = ("reasoning_content", "reasoning", "reasoning_details")
+_INLINE_THINKING_RE = re.compile(r"<think>([\s\S]*?)</think>", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class ReasoningObservation:
+    """一次模型响应中可供能力探测和会话 UI 使用的推理信息。"""
+
+    tokens: int
+    content: str
+    has_signal: bool
+
+
+def split_inline_thinking(text: str) -> tuple[str, str]:
+    """兼容把思考正文塞进 ``<think>`` 标签的 OpenAI 中转响应。"""
+    reasoning_parts = [part.strip() for part in _INLINE_THINKING_RE.findall(text)]
+    visible_text = _INLINE_THINKING_RE.sub("", text).strip()
+    return visible_text, "\n\n".join(part for part in reasoning_parts if part)
+
+
+def _reasoning_tokens(value: object) -> int:
+    """兼容不同集成的 usage_metadata / response_metadata 嵌套结构。"""
+    best = 0
+    if isinstance(value, dict):
+        for key, child in value.items():
+            normalized = key.lower().replace("-", "_")
+            if normalized in {
+                "reasoning_tokens",
+                "reasoning_token_count",
+            } and isinstance(child, int):
+                best = max(best, child)
+            elif normalized == "reasoning" and isinstance(child, int):
+                best = max(best, child)
+            else:
+                best = max(best, _reasoning_tokens(child))
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            best = max(best, _reasoning_tokens(child))
+    return best
+
+
+def reasoning_observation(response: object) -> ReasoningObservation:
+    """归一 reasoning_content、thinking block、token 与 ``<think>`` 正文。"""
+    parts: list[str] = []
+    has_structured_signal = False
+
+    def collect(value: object) -> None:
+        nonlocal has_structured_signal
+        if isinstance(value, str):
+            if value.strip():
+                parts.append(value.strip())
+            return
+        if isinstance(value, list):
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                block_type = str(item.get("type", "")).lower()
+                if block_type in {"thinking", "reasoning", "reasoning_content"}:
+                    has_structured_signal = True
+                    collect(
+                        item.get("thinking")
+                        or item.get("reasoning")
+                        or item.get("text")
+                        or item.get("content")
+                    )
+            return
+        if isinstance(value, dict):
+            has_structured_signal = bool(value) or has_structured_signal
+            collect(
+                value.get("reasoning_content")
+                or value.get("reasoning")
+                or value.get("text")
+                or value.get("content")
+            )
+
+    content = getattr(response, "content", None)
+    if isinstance(content, str):
+        _, inline_reasoning = split_inline_thinking(content)
+        if inline_reasoning:
+            has_structured_signal = True
+            collect(inline_reasoning)
+    else:
+        collect(content if isinstance(content, list) else [])
+
+    additional = getattr(response, "additional_kwargs", {}) or {}
+    for field in _REASONING_FIELDS:
+        if value := additional.get(field):
+            has_structured_signal = True
+            collect(value)
+
+    # 新版 LangChain 会把厂商内容块统一成 content_blocks；与原 content 去重即可。
+    try:
+        collect(getattr(response, "content_blocks", []))
+    except Exception:
+        pass
+
+    usage = getattr(response, "usage_metadata", {}) or {}
+    metadata = getattr(response, "response_metadata", {}) or {}
+    tokens = max(_reasoning_tokens(usage), _reasoning_tokens(metadata))
+    reasoning_content = "\n".join(dict.fromkeys(parts)).strip()
+    return ReasoningObservation(
+        tokens=tokens,
+        content=reasoning_content,
+        has_signal=bool(reasoning_content or has_structured_signal or tokens),
+    )
 
 
 class _SerialToolsMixin:

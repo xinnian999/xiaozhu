@@ -25,10 +25,17 @@ export type Message = {
   id: string
   role: 'user' | 'assistant'
   text: string
-  /** 消息种类：'text' 正常对话气泡，'tool' 工具调用进度卡，'version' 版本卡（带回滚按钮），
+  /** 消息种类：'text' 正常对话气泡，'reasoning' 可折叠思考过程，
+   *  'tool' 工具调用进度卡，'version' 版本卡（带回滚按钮），
    *  'error' 错误卡（AI 报错时在对话流里就地展示，text 存错误说明）。
    *  缺省视为 'text'，保持向后兼容。 */
-  kind?: 'text' | 'tool' | 'version' | 'error'
+  kind?: 'text' | 'reasoning' | 'tool' | 'version' | 'error'
+  /** kind === 'reasoning'：厂商返回的推理 token 数（没有则省略） */
+  reasoningTokens?: number
+  /** kind === 'reasoning'：true 表示没有正文，text 是系统生成的兜底说明 */
+  reasoningFallback?: boolean
+  /** kind === 'reasoning'：正文超过服务端上限时为 true */
+  reasoningTruncated?: boolean
   /** kind === 'tool' 时使用：工具名（如 write_file / read_file / list_files） */
   toolName?: string
   /** kind === 'tool' 时使用：工具参数的摘要（如 { path: 'src/App.tsx' }） */

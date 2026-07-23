@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { FileText, FilePlus, FilePen, FolderOpen, Wrench, Bug, ChevronRight, GitCommit, RotateCcw, Loader2, Check, AlertCircle, HelpCircle } from 'lucide-react'
+import { FileText, FilePlus, FilePen, FolderOpen, Wrench, Bug, ChevronRight, GitCommit, RotateCcw, Loader2, Check, AlertCircle, HelpCircle, BrainCircuit } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { formatClock } from '@/lib/format'
@@ -42,6 +42,9 @@ export default function MessageBubble({ message, isStreaming = false, isLast = f
   }
   if (message.kind === 'version') {
     return <VersionCard message={message} />
+  }
+  if (message.kind === 'reasoning') {
+    return <ReasoningCard message={message} />
   }
   if (message.kind === 'error') {
     return <ErrorCard message={message} />
@@ -123,6 +126,65 @@ export default function MessageBubble({ message, isStreaming = false, isLast = f
         )}
       </div>
     </article>
+  )
+}
+
+// ============================================
+// 思考过程：真实正文可展开；仅有 token / 无正文时显示低噪声兜底状态
+// ============================================
+function ReasoningCard({ message }: { message: Message }) {
+  const fallback = message.reasoningFallback === true
+  const expandable = !fallback && message.text.trim().length > 0
+  const [expanded, setExpanded] = useState(false)
+  const preview = message.text.replace(/\s+/g, ' ').trim()
+  const previewText = preview.length > 72 ? `${preview.slice(0, 72)}…` : preview
+
+  const header = (
+    <>
+      <span className={styles.reasoningIcon} aria-hidden>
+        <BrainCircuit size={14} />
+      </span>
+      <span className={styles.reasoningHeading}>
+        <strong>{fallback ? '已完成思考' : '思考过程'}</strong>
+        <small>{fallback ? message.text : expanded ? '收起推理内容' : previewText}</small>
+      </span>
+      {message.reasoningTokens !== undefined && (
+        <span className={styles.reasoningTokens}>{message.reasoningTokens} tokens</span>
+      )}
+      {expandable && (
+        <ChevronRight
+          size={13}
+          className={`${styles.reasoningChevron} ${expanded ? styles.reasoningChevronOpen : ''}`}
+          aria-hidden
+        />
+      )}
+    </>
+  )
+
+  return (
+    <section className={`${styles.reasoningCard} ${fallback ? styles.reasoningFallback : ''}`}>
+      {expandable ? (
+        <button
+          type="button"
+          className={styles.reasoningHeader}
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+        >
+          {header}
+        </button>
+      ) : (
+        <div className={styles.reasoningHeader}>{header}</div>
+      )}
+
+      {expanded && (
+        <div className={styles.reasoningBody}>
+          <Markdown remarkPlugins={[remarkGfm]}>{message.text}</Markdown>
+          {message.reasoningTruncated && (
+            <span className={styles.reasoningTruncated}>内容已由服务端截断</span>
+          )}
+        </div>
+      )}
+    </section>
   )
 }
 

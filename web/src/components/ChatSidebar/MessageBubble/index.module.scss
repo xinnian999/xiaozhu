@@ -252,6 +252,145 @@
 }
 
 // ============================================
+// 思考过程：时间线中的低噪声「认知轨迹」，真实正文按需展开
+// ============================================
+.reasoningCard {
+  width: 100%;
+  margin-bottom: $space-3;
+  border-left: 2px solid color-mix(in srgb, var(--color-accent) 68%, transparent);
+  border-radius: 0 $radius-sm $radius-sm 0;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--color-accent) 7%, transparent),
+    transparent 72%
+  );
+  overflow: hidden;
+  animation: tool-chip-in $dur-base $ease-out;
+
+  .reasoningHeader {
+    @include button-reset;
+    display: flex;
+    align-items: center;
+    gap: $space-2;
+    width: 100%;
+    min-height: 38px;
+    padding: $space-2 $space-3;
+    color: inherit;
+    text-align: left;
+  }
+
+  button.reasoningHeader {
+    cursor: pointer;
+    transition: background $dur-base $ease-out;
+
+    &:hover {
+      background: color-mix(in srgb, var(--color-accent) 6%, transparent);
+    }
+  }
+
+  .reasoningIcon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 26px;
+    width: 26px;
+    height: 26px;
+    border: 1px solid color-mix(in srgb, var(--color-accent) 24%, transparent);
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+    color: var(--color-accent);
+  }
+
+  .reasoningHeading {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    flex-direction: column;
+    gap: 1px;
+
+    strong {
+      color: var(--color-text-dim);
+      font-size: $fs-12;
+      font-weight: $fw-medium;
+    }
+
+    small {
+      @include truncate;
+      color: var(--color-text-mute);
+      font-size: $fs-11;
+      line-height: $lh-snug;
+    }
+  }
+
+  .reasoningTokens {
+    flex-shrink: 0;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: var(--color-bg-elev);
+    color: var(--color-text-faint);
+    font-family: var(--font-mono);
+    font-size: $fs-10;
+  }
+
+  .reasoningChevron {
+    flex-shrink: 0;
+    color: var(--color-text-faint);
+    transition: transform $dur-base $ease-out;
+  }
+
+  .reasoningChevronOpen {
+    transform: rotate(90deg);
+  }
+
+  .reasoningBody {
+    max-height: 300px;
+    margin: 0 $space-3 $space-3 42px;
+    padding: $space-2 $space-3;
+    overflow: auto;
+    border-top: 1px solid color-mix(in srgb, var(--color-border) 72%, transparent);
+    color: var(--color-text-mute);
+    font-size: $fs-12;
+    line-height: $lh-relaxed;
+    word-break: break-word;
+
+    > :first-child { margin-top: 0; }
+    > :last-child { margin-bottom: 0; }
+
+    p,
+    pre,
+    ul,
+    ol {
+      margin: $space-2 0;
+    }
+
+    pre {
+      padding: $space-2;
+      border-radius: $radius-xs;
+      background: var(--color-bg);
+      white-space: pre-wrap;
+    }
+  }
+
+  .reasoningTruncated {
+    display: inline-block;
+    margin-top: $space-2;
+    color: var(--color-text-faint);
+    font-size: $fs-10;
+  }
+}
+
+.reasoningFallback {
+  border-left-color: var(--color-border-strong);
+  background: linear-gradient(90deg, var(--color-bg-soft), transparent 72%);
+
+  .reasoningIcon {
+    border-color: var(--color-border);
+    background: var(--color-bg-soft);
+    color: var(--color-text-mute);
+  }
+}
+
+// ============================================
 // 工具调用进度卡：紧凑细窄，避免抢正常气泡的视觉重量
 // 带参数的可点击展开，下方拉出参数面板
 // ============================================

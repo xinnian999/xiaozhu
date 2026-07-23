@@ -9,7 +9,6 @@ import base64
 import struct
 import time
 import zlib
-from dataclasses import dataclass
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Response
@@ -24,6 +23,8 @@ from app.model_providers import (
     infer_provider,
     provider_catalog,
     provider_spec,
+    ReasoningObservation,
+    reasoning_observation,
     supports_thinking_toggle,
     tool_choice_for_provider,
     unsupported_vision_reason,
@@ -97,101 +98,13 @@ def _solid_png_data_url(red: int, green: int, blue: int) -> str:
     return "data:image/png;base64," + base64.b64encode(png).decode()
 
 
-@dataclass(frozen=True)
-class _ReasoningObservation:
-    tokens: int
-    content: str
-    has_signal: bool
-
-
-def _reasoning_tokens(value: object) -> int:
-    """兼容不同集成的 usage_metadata / response_metadata 嵌套结构。"""
-    best = 0
-    if isinstance(value, dict):
-        for key, child in value.items():
-            normalized = key.lower().replace("-", "_")
-            if normalized in {
-                "reasoning_tokens",
-                "reasoning_token_count",
-            } and isinstance(child, int):
-                best = max(best, child)
-            elif normalized == "reasoning" and isinstance(child, int):
-                best = max(best, child)
-            else:
-                best = max(best, _reasoning_tokens(child))
-    elif isinstance(value, (list, tuple)):
-        for child in value:
-            best = max(best, _reasoning_tokens(child))
-    return best
-
-
-def _reasoning_observation(response: object) -> _ReasoningObservation:
-    """把 reasoning_content、Anthropic thinking block 等归一成一次观测。"""
-    parts: list[str] = []
-    has_structured_signal = False
-
-    def collect(value: object) -> None:
-        nonlocal has_structured_signal
-        if isinstance(value, str):
-            if value.strip():
-                parts.append(value.strip())
-            return
-        if isinstance(value, list):
-            for item in value:
-                if not isinstance(item, dict):
-                    continue
-                block_type = str(item.get("type", "")).lower()
-                if block_type in {"thinking", "reasoning", "reasoning_content"}:
-                    has_structured_signal = True
-                    collect(
-                        item.get("thinking")
-                        or item.get("reasoning")
-                        or item.get("text")
-                        or item.get("content")
-                    )
-            return
-        if isinstance(value, dict):
-            has_structured_signal = bool(value) or has_structured_signal
-            collect(
-                value.get("reasoning_content")
-                or value.get("reasoning")
-                or value.get("text")
-                or value.get("content")
-            )
-
-    content = getattr(response, "content", None)
-    collect(content if isinstance(content, list) else [])
-    additional = getattr(response, "additional_kwargs", {}) or {}
-    for field in ("reasoning_content", "reasoning", "reasoning_details"):
-        if value := additional.get(field):
-            has_structured_signal = True
-            collect(value)
-
-    # 新版 LangChain 会把厂商内容块统一成 content_blocks；与原 content 去重即可。
-    try:
-        collect(getattr(response, "content_blocks", []))
-    except Exception:
-        pass
-
-    usage = getattr(response, "usage_metadata", {}) or {}
-    metadata = getattr(response, "response_metadata", {}) or {}
-    tokens = max(_reasoning_tokens(usage), _reasoning_tokens(metadata))
-    unique_parts = list(dict.fromkeys(parts))
-    reasoning_content = "\n".join(unique_parts).strip()
-    return _ReasoningObservation(
-        tokens=tokens,
-        content=reasoning_content,
-        has_signal=bool(reasoning_content or has_structured_signal or tokens),
-    )
-
-
-async def _thinking_probe(model_id: str, *, enabled: bool) -> _ReasoningObservation:
+async def _thinking_probe(model_id: str, *, enabled: bool) -> ReasoningObservation:
     model = llm.build_llm(model_id, thinking=enabled)
     response = await _invoke_with_timeout(
         model,
         [HumanMessage(content="请认真计算 137 × 29，只回答最终数字。")],
     )
-    return _reasoning_observation(response)
+    return reasoning_observation(response)
 
 
 async def _invoke_with_timeout(

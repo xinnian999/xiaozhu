@@ -179,6 +179,16 @@ function fromApiMessage(m: ApiMessage): Message {
       toolResult: m.text || undefined,
     }
   }
+  if (m.kind === 'reasoning') {
+    const args = m.tool_args ?? {}
+    return {
+      ...base,
+      kind: 'reasoning',
+      reasoningTokens: typeof args.tokens === 'number' ? args.tokens : undefined,
+      reasoningFallback: args.fallback === true,
+      reasoningTruncated: args.truncated === true,
+    }
+  }
   if (m.kind === 'version') {
     const args = m.tool_args ?? {}
     return {
@@ -204,6 +214,21 @@ export function makeMessage(
     branchId: 'main',
     ...extra,
   }
+}
+
+/** 构造思考过程卡；真实正文和不返回正文时的兜底说明共用一种时间线消息。 */
+export function makeReasoningCard(
+  text: string,
+  tokens: number | null,
+  fallback: boolean,
+  truncated: boolean,
+): Message {
+  return makeMessage('assistant', text, {
+    kind: 'reasoning',
+    reasoningTokens: tokens ?? undefined,
+    reasoningFallback: fallback,
+    reasoningTruncated: truncated,
+  })
 }
 
 /** 构造一张「版本卡」消息（kind='version'）。AI 流 / 手动保存 / 回滚 三处共用，
@@ -614,7 +639,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       sessions: s.sessions.map((sess) => {
         if (sess.id !== id) return sess
         if (!(path in sess.files)) return sess
-        const { [path]: _omit, ...rest } = sess.files
+        const rest = { ...sess.files }
+        delete rest[path]
         return { ...sess, files: rest, versionId: sess.versionId + 1 }
       }),
     }))

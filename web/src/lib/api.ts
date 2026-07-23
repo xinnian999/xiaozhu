@@ -77,6 +77,13 @@ http.interceptors.response.use(
 
 export type SSEEvent =
   | { type: 'message_delta'; text: string }
+  | {
+      type: 'reasoning'
+      text: string
+      tokens: number | null
+      fallback: boolean
+      truncated: boolean
+    }
   | { type: 'file_write'; path: string; content: string }
   | { type: 'file_delete'; path: string }
   // AI 调 check_build 时推这个：把暂存的文件揭晓到预览并触发重新构建（无 payload，纯信号）
@@ -389,9 +396,9 @@ export type ApiMessage = {
   session_id: string
   role: 'user' | 'assistant'
   text: string
-  // 消息种类：'text' 普通对话，'tool' 工具调用卡，'version' 版本卡。缺省 'text'
-  kind?: 'text' | 'tool' | 'version'
-  // kind==='tool' 存工具参数；kind==='version' 存版本负载 {version_id, seq}
+  // 消息种类：text / reasoning / tool / version。缺省 text
+  kind?: 'text' | 'reasoning' | 'tool' | 'version'
+  // reasoning 存展示元数据；tool 存工具参数；version 存 {version_id, seq}
   tool_name?: string | null
   tool_args?: Record<string, unknown> | null
   // 用户随消息发的图片（data URL 列表）；纯文本消息为空 / null

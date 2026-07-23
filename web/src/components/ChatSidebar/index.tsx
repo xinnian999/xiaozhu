@@ -1,6 +1,12 @@
 import { useCallback, useRef, useState } from 'react'
 import { ArrowUp, Square, Mic, Image as ImageIcon, X, Plus } from 'lucide-react'
-import { useSessionStore, makeMessage, makeVersionCard, makeErrorCard } from '@/store/session'
+import {
+  useSessionStore,
+  makeMessage,
+  makeVersionCard,
+  makeErrorCard,
+  makeReasoningCard,
+} from '@/store/session'
 import { useUIStore } from '@/store/ui'
 import { streamChat, streamAskResult, streamResume, type SSEEvent } from '@/lib/api'
 import { toast } from '@/lib/toast'
@@ -158,6 +164,21 @@ export default function ChatSidebar() {
       if (event.type === 'message_delta') {
         accumulated += event.text
         setStreamingText(accumulated)
+      } else if (event.type === 'reasoning') {
+        // 思考过程是独立的时间线卡片。若前一轮模型已输出过场文字，先固化正文，
+        // 再插入下一次模型调用的思考卡，保持「正文 → 思考 → 工具」的真实顺序。
+        if (accumulated) {
+          commitStreaming()
+          accumulated = ''
+        }
+        appendMessage(
+          makeReasoningCard(
+            event.text,
+            event.tokens,
+            event.fallback,
+            event.truncated,
+          ),
+        )
       } else if (event.type === 'tool_call') {
         // 工具调用前，先把本轮已累积的叙述（模型在调工具前说的话，
         // 如「好的，我先看看结构」）固化成一条独立气泡，再插工具卡。
@@ -198,7 +219,6 @@ export default function ChatSidebar() {
         // 再在对话流里就地插一张错误卡 —— 比一闪而过的 toast 更醒目、可回看。
         if (accumulated) {
           commitStreaming()
-          accumulated = ''
         }
         appendMessage(makeErrorCard(event.message))
         settled = true
@@ -212,7 +232,6 @@ export default function ChatSidebar() {
         // 继续禁用，直到用户提交回答后的 resume 流真正推来 done/error 为止。
         if (accumulated) {
           commitStreaming()
-          accumulated = ''
         }
         beginAwaitingAnswer()
         settled = true

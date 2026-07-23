@@ -29,6 +29,7 @@ from app.agents.prompts import SYSTEM_PROMPT
 from app.agents.tools import build_tools
 from app.checkpointer import get_checkpointer
 from app.llm import build_llm, models_by_id
+from app.model_providers import reasoning_observation, split_inline_thinking
 from app.models.file import File
 # 起别名 DBMessage 避免和 langchain_core.messages 概念混淆
 # （那边的 SystemMessage/HumanMessage 是 LLM 对话消息,这里的是数据库行）
@@ -104,11 +105,22 @@ def extract_text(response) -> str:
     """
     content = response.content
     if isinstance(content, str):
-        return content
-    return "".join(
-        block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "")
-        for block in content
-    )
+        return split_inline_thinking(content)[0]
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, dict):
+            if str(block.get("type", "")).lower() in {
+                "thinking",
+                "reasoning",
+                "reasoning_content",
+            }:
+                continue
+            text = block.get("text", "")
+        else:
+            text = getattr(block, "text", "")
+        if text:
+            parts.append(split_inline_thinking(str(text))[0])
+    return "".join(parts)
 
 
 def _is_truncation_reason(reason: object) -> bool:
@@ -155,6 +167,33 @@ RECURSION_LIMIT = 75
 # 工具结果落库 / 下发前的截断上限。多数工具结果很短（"已写入 X"、报错列表），
 # 但 read_file 会返回整文件，可能上万字 —— 截断防止把消息行和 SSE 帧撑爆。
 TOOL_RESULT_CAP = 4000
+
+# 单个思考卡最多持久化 / 下发的字符数。保留完整可读过程的同时，避免极端模型
+# 把数万字隐藏推理塞进一条 messages 记录和 SSE 帧。
+REASONING_CONTENT_CAP = 20_000
+
+
+def _reasoning_payload(response: object) -> dict:
+    """把任意厂商响应归一成前端可直接渲染的思考事件。"""
+    observation = reasoning_observation(response)
+    content = observation.content.strip()
+    truncated = len(content) > REASONING_CONTENT_CAP
+    if truncated:
+        content = content[:REASONING_CONTENT_CAP] + "\n\n…（思考过程过长，已截断）"
+
+    fallback = not content
+    if fallback and observation.tokens:
+        content = "模型已完成思考，但当前接口只返回推理 token 数，没有返回可展示的思考过程。"
+    elif fallback:
+        content = "当前模型或接口没有返回可展示的思考过程。"
+
+    return {
+        "type": "reasoning",
+        "text": content,
+        "tokens": observation.tokens or None,
+        "fallback": fallback,
+        "truncated": truncated,
+    }
 
 # 从（可能还没写完的）工具参数 JSON 片段里抠出 path 值。
 # 用途：write_file 的整个文件内容是作为 content 参数被逐 token 生成的，要等它全写完
@@ -315,6 +354,28 @@ async def _save_message(
         db.add(msg)
         await db.commit()
     return msg
+
+
+async def _save_reasoning_message(
+    db: AsyncSession,
+    db_lock: asyncio.Lock,
+    session_id: str,
+    payload: dict,
+) -> DBMessage:
+    """持久化思考卡；正文与展示元数据分开存，刷新后可无损还原。"""
+    return await _save_message(
+        db,
+        db_lock,
+        session_id,
+        "assistant",
+        str(payload["text"]),
+        kind="reasoning",
+        tool_args={
+            "tokens": payload.get("tokens"),
+            "fallback": bool(payload.get("fallback")),
+            "truncated": bool(payload.get("truncated")),
+        },
+    )
 
 
 async def _early_file_write(
@@ -531,6 +592,7 @@ async def _consume(
     待回填的 kind='tool' 消息,连同 tool_call_id 一并传进来。
     """
     final_assistant_text = ""
+    final_reasoning_payload: dict | None = None
     wrote_files = False
     truncated = False
     pending: dict[str, tuple[str, dict, DBMessage]] = dict(initial_pending or {})
@@ -630,9 +692,11 @@ async def _consume(
                                 "type": "error",
                                 "message": "模型输出超长被截断,文件没写完。请把需求拆小,或分多次生成。",
                             })
+                            final_reasoning_payload = None
                             truncated = True
                             break
 
+                        reasoning_payload = _reasoning_payload(m)
                         text = extract_text(m)
                         if m.tool_calls:
                             # 这一轮又调了工具,说明之前(若有)攒着没发的
@@ -640,6 +704,11 @@ async def _consume(
                             # 真调用工具证明它不是"这一轮的最终回复",作废丢弃,
                             # 避免收尾时把这段旧文字和这次真实工作的回复一起冒出来。
                             final_assistant_text = ""
+                            final_reasoning_payload = None
+                            yield sse(reasoning_payload)
+                            await _save_reasoning_message(
+                                db, db_lock, session_id, reasoning_payload
+                            )
                             if text:
                                 print(f"[response] content={text} (同轮调用了工具)")
                                 # 带 tool_calls 的消息不可能被 NoBluffMiddleware 判定为嘴炮
@@ -685,8 +754,8 @@ async def _consume(
                             # astream() 循环会自然走完(图到 END,不会再有新的 model 节点
                             # 更新了)——只有到那时候(见收尾处)才是"确认不会再被打回"的
                             # 唯一时机,才第一次把它下发给前端 + 存库。
-                            if text:
-                                final_assistant_text = text
+                            final_assistant_text = text
+                            final_reasoning_payload = reasoning_payload
                             print(f"[最终回复候选] content={text}")
                     if truncated:
                         break
@@ -749,6 +818,11 @@ async def _consume(
         # 到这里 astream() 已经自然走完、图不会再跳回 model 节点重新生成了 ——
         # 也就是说如果 final_assistant_text 有值,它已经【确认】不是嘴炮(没被
         # NoBluffMiddleware 打回),现在才是第一次把这段话下发给前端的时机。
+        if final_reasoning_payload:
+            yield sse(final_reasoning_payload)
+            await _save_reasoning_message(
+                db, db_lock, session_id, final_reasoning_payload
+            )
         if final_assistant_text:
             yield sse({"type": "message_delta", "text": final_assistant_text})
             await _save_message(db, db_lock, session_id, "assistant", final_assistant_text)

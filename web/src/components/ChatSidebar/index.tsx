@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ArrowUp,
   Square,
@@ -26,6 +26,28 @@ import styles from './index.module.scss'
 const MAX_IMAGES = 6
 // 单张图大小上限（5MB）。data URL 是 base64，会比原图大 ~33%，太大既费 token 又可能超请求体限制
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024
+// 每个模型分别记住用户上次选择的深度思考状态，刷新页面 / 重开标签页后仍然生效。
+const THINKING_OVERRIDES_STORAGE_KEY = 'xiaozhu:thinkingOverrides'
+
+function getInitialThinkingOverrides(): Record<string, boolean> {
+  if (typeof window === 'undefined') return {}
+
+  try {
+    const saved = window.localStorage.getItem(THINKING_OVERRIDES_STORAGE_KEY)
+    if (!saved) return {}
+
+    const parsed: unknown = JSON.parse(saved)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
+
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, boolean] => (
+        typeof entry[1] === 'boolean'
+      )),
+    )
+  } catch {
+    return {}
+  }
+}
 
 /** 把本地图片文件读成 data URL（"data:image/png;base64,..."），失败则 reject。 */
 function fileToDataUrl(file: File): Promise<string> {
@@ -85,8 +107,20 @@ export default function ChatSidebar() {
   // 输入框工具栏的「加号」展开态：图片 / 语音等次要输入方式收进这个菜单里。
   // 点菜单外的任意处自动收起（复用和 ModelSelector 同一套 useClickOutside）。
   const [toolsOpen, setToolsOpen] = useState(false)
-  // 每个模型各记一份本页内偏好；支持思考的模型首次出现时默认开启。
-  const [thinkingOverrides, setThinkingOverrides] = useState<Record<string, boolean>>({})
+  // 每个模型各记一份持久化偏好；支持思考的模型首次出现时默认开启。
+  const [thinkingOverrides, setThinkingOverrides] = useState<Record<string, boolean>>(
+    getInitialThinkingOverrides,
+  )
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        THINKING_OVERRIDES_STORAGE_KEY,
+        JSON.stringify(thinkingOverrides),
+      )
+    } catch {
+      // 隐私模式或存储空间不足时退化为仅当前页面有效，不影响开关正常使用。
+    }
+  }, [thinkingOverrides])
   const toolsRef = useRef<HTMLDivElement>(null)
   const closeTools = useCallback(() => setToolsOpen(false), [])
   useClickOutside(toolsRef, closeTools)

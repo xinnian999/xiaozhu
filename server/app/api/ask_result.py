@@ -26,7 +26,7 @@ from app.agents.loop import (
 )
 from app.db import get_db
 from app.deps import get_owned_session
-from app.llm import allowed_model_ids, default_model_id
+from app.llm import allowed_model_ids, default_model_id, validate_thinking_option
 from app.models.message import Message as DBMessage
 from app.models.session import Session
 
@@ -50,6 +50,7 @@ class AskResult(BaseModel):
     tool_call_id: str
     answer: str
     model: str | None = None
+    thinking: bool | None = None
 
 
 async def _resume_stream(session_id: str, body: AskResult, db: AsyncSession, user_id: str):
@@ -66,6 +67,7 @@ async def _resume_stream(session_id: str, body: AskResult, db: AsyncSession, use
             model = default_model_id()
         elif model not in allowed_model_ids():
             raise HTTPException(status_code=400, detail=f"不支持的模型：{model}")
+        validate_thinking_option(model, body.thinking)
 
         # thread_id 与「这一轮」绑定（见 app.agents.loop 里的说明），取这个 session
         # 最新一条用户消息的 id 就能算出触发当前这轮的 thread_id。
@@ -75,7 +77,14 @@ async def _resume_stream(session_id: str, body: AskResult, db: AsyncSession, use
 
         db_lock = asyncio.Lock()
         tree_note = await _file_tree_note(db, session_id)
-        agent = build_round_agent(db, session_id, model, db_lock, tree_note)
+        agent = build_round_agent(
+            db,
+            session_id,
+            model,
+            db_lock,
+            tree_note,
+            thinking=body.thinking,
+        )
 
         config = {"configurable": {"thread_id": thread_id}}
         state = await agent.aget_state(config)

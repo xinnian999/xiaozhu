@@ -1,5 +1,14 @@
 import { useCallback, useRef, useState } from 'react'
-import { ArrowUp, Square, Mic, Image as ImageIcon, X, Plus } from 'lucide-react'
+import {
+  ArrowUp,
+  Square,
+  Mic,
+  Image as ImageIcon,
+  X,
+  Plus,
+  BrainCircuit,
+  Check,
+} from 'lucide-react'
 import {
   useSessionStore,
   makeMessage,
@@ -78,6 +87,8 @@ export default function ChatSidebar() {
   // 输入框工具栏的「加号」展开态：图片 / 语音等次要输入方式收进这个菜单里。
   // 点菜单外的任意处自动收起（复用和 ModelSelector 同一套 useClickOutside）。
   const [toolsOpen, setToolsOpen] = useState(false)
+  // 每个模型各记一份本页内偏好；支持思考的模型首次出现时默认开启。
+  const [thinkingOverrides, setThinkingOverrides] = useState<Record<string, boolean>>({})
   const toolsRef = useRef<HTMLDivElement>(null)
   const closeTools = useCallback(() => setToolsOpen(false), [])
   useClickOutside(toolsRef, closeTools)
@@ -90,7 +101,19 @@ export default function ChatSidebar() {
   // 当前选中模型是否支持识图（多模态）。由后端实测标定的 vision 字段决定。
   // 不支持时把「添加图片」置灰：清单还没加载好（找不到当前模型）也按不支持处理，
   // 避免在不确定时放开传图。
-  const visionSupported = models.find((m) => m.id === selectedModel)?.vision ?? false
+  const currentModel = models.find((m) => m.id === selectedModel)
+  const visionSupported = currentModel?.vision ?? false
+  const thinkingSupported = currentModel?.thinking ?? false
+  const thinkingToggleable = currentModel?.thinking_toggle ?? false
+  const thinkingEnabled = thinkingSupported
+    ? (!thinkingToggleable
+        ? true
+        : selectedModel
+          ? (thinkingOverrides[selectedModel] ?? true)
+          : true)
+    : false
+  // 支持但不可关闭的模型仍显式请求开启；完全不支持时不发送参数，保留厂商默认。
+  const thinkingForRequest = thinkingSupported ? thinkingEnabled : undefined
 
   // 点「添加图片」：触发隐藏 file input 的原生选择框
   const openImagePicker = () => {
@@ -304,7 +327,15 @@ export default function ChatSidebar() {
     // 3. 流式消费 SSE
     try {
       const settled = await consumeStream(
-        streamChat(text, targetSessionId, selectedModel, controller.signal, images),
+        streamChat(
+          text,
+          targetSessionId,
+          selectedModel,
+          controller.signal,
+          images,
+          false,
+          thinkingForRequest,
+        ),
       )
       // 流没正常收场（既非 done/error，也非 ask_user 暂停）= 连接中途断了。
       // 同会话内直接标记可续跑，用户点「继续生成」即可从断点接着跑，无需刷新页面。
@@ -342,7 +373,15 @@ export default function ChatSidebar() {
     try {
       // message 传空串、retry=true：真正的 prompt 由后端取最后一条用户消息
       const settled = await consumeStream(
-        streamChat('', session.id, selectedModel, controller.signal, [], true),
+        streamChat(
+          '',
+          session.id,
+          selectedModel,
+          controller.signal,
+          [],
+          true,
+          thinkingForRequest,
+        ),
       )
       if (!settled) setResumable(session.id, true)
     } finally {
@@ -366,7 +405,7 @@ export default function ChatSidebar() {
 
     try {
       const settled = await consumeStream(
-        streamResume(session.id, selectedModel, controller.signal),
+        streamResume(session.id, selectedModel, controller.signal, thinkingForRequest),
       )
       if (!settled) setResumable(session.id, true)
     } finally {
@@ -399,7 +438,14 @@ export default function ChatSidebar() {
       abortRef.current = controller
       try {
         const settled = await consumeStream(
-          streamAskResult(session.id, msg.toolCallId as string, answer, selectedModel, controller.signal),
+          streamAskResult(
+            session.id,
+            msg.toolCallId as string,
+            answer,
+            selectedModel,
+            controller.signal,
+            thinkingForRequest,
+          ),
         )
         if (!settled) setResumable(session.id, true)
       } finally {
@@ -513,7 +559,15 @@ export default function ChatSidebar() {
                         role="menuitem"
                         className={`${styles.moreItem} ${visionSupported ? '' : styles.moreItemDisabled}`}
                         disabled={!visionSupported}
-                        title={visionSupported ? undefined : '当前模型不支持识图，请切换到支持识图的模型'}
+                        title={
+                          visionSupported
+                            ? undefined
+                            : currentModel?.vision_status === 'unknown'
+                              ? '当前模型尚未探测识图能力，请先在后台运行全面测试'
+                              : currentModel?.vision_status === 'failed'
+                                ? '当前模型识图能力探测失败，请在后台重试'
+                                : '当前模型不支持识图，请切换模型'
+                        }
                         onClick={openImagePicker}
                       >
                         <ImageIcon size={16} className={styles.moreItemIcon} />
@@ -536,6 +590,42 @@ export default function ChatSidebar() {
                 </div>
 
                 <ModelSelector />
+
+                <label
+                  className={`${styles.thinkingToggle} ${thinkingEnabled ? styles.thinkingToggleActive : ''} ${!thinkingSupported ? styles.thinkingToggleUnsupported : ''} ${thinkingSupported && !thinkingToggleable ? styles.thinkingToggleLocked : ''}`}
+                  title={
+                    !thinkingSupported
+                      ? currentModel?.thinking_status === 'unknown'
+                        ? '当前模型尚未探测思考能力，请先在后台运行全面测试'
+                        : currentModel?.thinking_status === 'failed'
+                          ? '当前模型思考能力探测失败，请在后台重试'
+                          : '当前模型不支持深度思考'
+                      : !thinkingToggleable
+                        ? '当前模型支持思考，但无法关闭'
+                        : thinkingEnabled
+                          ? '已开启深度思考'
+                          : '已关闭深度思考'
+                  }
+                >
+                  <input
+                    type="checkbox"
+                    checked={thinkingEnabled}
+                    disabled={!thinkingToggleable || composerDisabled}
+                    onChange={(event) => {
+                      if (!selectedModel) return
+                      setThinkingOverrides((prev) => ({
+                        ...prev,
+                        [selectedModel]: event.target.checked,
+                      }))
+                    }}
+                    aria-label="开启深度思考"
+                  />
+                  <span className={styles.thinkingCheck} aria-hidden>
+                    {thinkingEnabled && <Check size={10} strokeWidth={3} />}
+                  </span>
+                  <BrainCircuit size={14} aria-hidden />
+                  <span className={styles.thinkingLabel}>深度思考</span>
+                </label>
               </div>
 
               {isStreaming ? (

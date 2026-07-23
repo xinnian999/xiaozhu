@@ -241,6 +241,10 @@ export type AdminModel = {
   api_key: string
   logo: string
   vision: boolean
+  thinking: boolean
+  thinking_toggle: boolean
+  vision_status: 'unknown' | 'supported' | 'unsupported' | 'failed'
+  thinking_status: 'unknown' | 'supported' | 'unsupported' | 'failed'
   cost: number
   enabled: boolean
   sort_order: number
@@ -261,7 +265,6 @@ export type ModelCreatePayload = {
   provider: string
   base_url?: string | null
   api_key?: string
-  vision?: boolean
   cost?: number
   enabled?: boolean
   sort_order?: number

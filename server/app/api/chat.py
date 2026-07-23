@@ -18,7 +18,13 @@ from app.db import get_db
 from app.deps import get_current_user
 # 模型注册表 + LLM 构造都集中在 app.llm，这里只是引用方。
 # 现在模型在数据库、由内存缓存提供，所以引用的是「读缓存的函数」而非模块常量。
-from app.llm import allowed_model_ids, default_model_id, models_by_id, public_models
+from app.llm import (
+    allowed_model_ids,
+    default_model_id,
+    models_by_id,
+    public_models,
+    validate_thinking_option,
+)
 from app.models.session import Session
 from app.models.user import User
 
@@ -54,6 +60,7 @@ async def chat(
         req.model = default_model_id()
     elif req.model not in allowed_model_ids():
         raise HTTPException(status_code=400, detail=f"不支持的模型：{req.model}")
+    validate_thinking_option(req.model, req.thinking)
 
     # 图片校验：只在带了图时才做。
     #   1. 当前模型必须支持识图（vision）—— 否则把图发给不认图的模型只会神秘出错 / 被忽略。
@@ -104,4 +111,3 @@ async def chat(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-

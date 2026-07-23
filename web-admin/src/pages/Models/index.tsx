@@ -185,7 +185,6 @@ export default function Models() {
     form.resetFields()
     form.setFieldsValue({
       provider: 'openai',
-      vision: false,
       enabled: true,
       cost: 1,
     })
@@ -200,7 +199,6 @@ export default function Models() {
       provider: normalizeProviderId(model.provider),
       base_url: model.base_url,
       api_key: '', // 敏感值不回填脱敏串；留空表示不改
-      vision: model.vision,
       cost: model.cost,
       enabled: model.enabled,
     })
@@ -217,7 +215,6 @@ export default function Models() {
       provider: normalizeProviderId(model.provider),
       base_url: model.base_url,
       api_key: '', // 列表里是脱敏值，复制后需重新填写
-      vision: model.vision,
       cost: model.cost,
       enabled: model.enabled,
     })
@@ -420,6 +417,7 @@ export default function Models() {
         break
       }
     }
+    await fetchData()
     if (testRunRef.current === runId) setTestsRunning(false)
   }
 
@@ -439,6 +437,7 @@ export default function Models() {
     const runId = ++testRunRef.current
     setTestsRunning(true)
     await runCapability(testTarget, capability, runId)
+    if (capability === 'vision' || capability === 'thinking') await fetchData()
     if (testRunRef.current === runId) setTestsRunning(false)
   }
 
@@ -448,6 +447,17 @@ export default function Models() {
   const passedTests = CAPABILITY_TESTS.filter(
     (item) => testStates[item.key].result?.status === 'passed',
   ).length
+
+  const renderCapability = (
+    status: AdminModel['vision_status'],
+    supported: boolean,
+    detail?: string,
+  ) => {
+    if (status === 'unknown') return <Tag>待探测</Tag>
+    if (status === 'failed') return <Tag color="error">探测失败</Tag>
+    if (!supported) return <Tag>不支持</Tag>
+    return <Tag color="success">{detail || '支持'}</Tag>
+  }
 
   const columns: ColumnsType<AdminModel> = [
     {
@@ -519,7 +529,23 @@ export default function Models() {
     { title: '模型 ID', dataIndex: 'id', width: 220, ellipsis: true, fixed: 'left' },
     { title: 'Base URL', dataIndex: 'base_url', width: 220, ellipsis: true, render: (v: string | null) => v || '（官方）' },
     { title: 'API Key', dataIndex: 'api_key', width: 140, render: (v: string) => <span className={styles.secret}>{v || '—'}</span> },
-    { title: '识图', dataIndex: 'vision', width: 70, render: (v: boolean) => (v ? '✓' : '—') },
+    {
+      title: '识图能力',
+      dataIndex: 'vision',
+      width: 105,
+      render: (v: boolean, row) => renderCapability(row.vision_status, v),
+    },
+    {
+      title: '思考能力',
+      dataIndex: 'thinking',
+      width: 145,
+      render: (v: boolean, row) =>
+        renderCapability(
+          row.thinking_status,
+          v,
+          row.thinking_toggle ? '支持 · 可关闭' : '支持 · 不可关闭',
+        ),
+    },
     { title: '倍率', dataIndex: 'cost', width: 70 },
     {
       title: '操作',
@@ -583,7 +609,7 @@ export default function Models() {
         columns={columns}
         dataSource={data}
         loading={loading}
-        scroll={{ x: 1240 }}
+        scroll={{ x: 1420 }}
         rowSelection={{
           fixed: true,
           selectedRowKeys: selectedIds,
@@ -694,13 +720,14 @@ export default function Models() {
             <Form.Item label="倍率" name="cost">
               <InputNumber min={1} />
             </Form.Item>
-            <Form.Item label="识图" name="vision" valuePropName="checked">
-              <Switch />
-            </Form.Item>
             <Form.Item label="启用" name="enabled" valuePropName="checked">
               <Switch />
             </Form.Item>
           </Space>
+          <div className={styles.capabilityNotice}>
+            识图与思考能力由“全面测试”自动探测并记录，不能手动修改。
+            厂商、Base URL 或 API Key 变化后会恢复为“待探测”。
+          </div>
         </Form>
       </Drawer>
 
@@ -714,7 +741,7 @@ export default function Models() {
         className={styles.testModal}
         footer={
           <div className={styles.testFooter}>
-            <span className={styles.testFootnote}>测试只发送探测请求，不会修改模型配置</span>
+            <span className={styles.testFootnote}>识图与思考探测结果会自动写入模型能力标记</span>
             <Space>
               <Button onClick={closeFullTest}>关闭</Button>
               <Button

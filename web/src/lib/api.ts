@@ -123,12 +123,17 @@ export type ApiFile = {
 // 注意：后端不会返回 group / api_key 这些内部字段，前端拿不到也不需要。
 // vision：该模型是否支持识图（多模态图片输入），由后端实测标定，
 // 前端据此把「添加图片」置灰 —— 不支持的模型不让传图。
+// thinking / thinking_toggle：是否检测到思考、以及是否能实际关闭。
 // cost：付费倍率（1/2），一轮对话扣几点；前端据此在模型旁标 1x/2x。
 export type ApiModel = {
   id: string
   label: string
   icon: string
   vision: boolean
+  thinking: boolean
+  thinking_toggle: boolean
+  vision_status: 'unknown' | 'supported' | 'unsupported' | 'failed'
+  thinking_status: 'unknown' | 'supported' | 'unsupported' | 'failed'
   cost: number
 }
 
@@ -528,6 +533,8 @@ export async function* streamChat(
   // 重试：为 true 时把 retry 标记一起发给后端。后端会忽略 message / images，
   // 改用「最新一轮的用户消息」重新生成，结尾追加一个新版本（详见后端 ChatRequest.retry）。
   retry = false,
+  // 仅支持思考的模型传；true/false 会由后端按厂商协议转换成真实参数。
+  thinking?: boolean,
 ): AsyncGenerator<SSEEvent> {
   // 用户主动中断时 fetch 会抛 AbortError，这里统一识别后静默收尾，不弹错误
   const isAbort = (e: unknown) =>
@@ -546,6 +553,7 @@ export async function* streamChat(
         ...(model ? { model } : {}),
         ...(images.length ? { images } : {}),
         ...(retry ? { retry: true } : {}),
+        ...(thinking !== undefined ? { thinking } : {}),
       }),
       signal,
     })
@@ -586,6 +594,7 @@ export async function* streamAskResult(
   answer: string,
   model: string | null,
   signal?: AbortSignal,
+  thinking?: boolean,
 ): AsyncGenerator<SSEEvent> {
   const isAbort = (e: unknown) =>
     signal?.aborted || (e instanceof DOMException && e.name === 'AbortError')
@@ -599,6 +608,7 @@ export async function* streamAskResult(
         tool_call_id: toolCallId,
         answer,
         ...(model ? { model } : {}),
+        ...(thinking !== undefined ? { thinking } : {}),
       }),
       signal,
     })
@@ -634,6 +644,7 @@ export async function* streamResume(
   sessionId: string,
   model: string | null,
   signal?: AbortSignal,
+  thinking?: boolean,
 ): AsyncGenerator<SSEEvent> {
   const isAbort = (e: unknown) =>
     signal?.aborted || (e instanceof DOMException && e.name === 'AbortError')
@@ -643,7 +654,10 @@ export async function* streamResume(
     res = await fetch(`/api/sessions/${sessionId}/resume`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ ...(model ? { model } : {}) }),
+      body: JSON.stringify({
+        ...(model ? { model } : {}),
+        ...(thinking !== undefined ? { thinking } : {}),
+      }),
       signal,
     })
   } catch (e: unknown) {

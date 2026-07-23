@@ -132,6 +132,29 @@ def _capability_result(
     )
 
 
+async def _record_detected_capability(
+    db: AsyncSession,
+    model: LlmModel,
+    capability: ModelTestCapability,
+    *,
+    supported: bool,
+    status: str,
+    thinking_toggle: bool = False,
+) -> None:
+    """把探测结论写回模型；聊天端只消费这里产生的能力标记。"""
+    if capability == "vision":
+        model.vision = supported
+        model.vision_status = status
+    elif capability == "thinking":
+        model.thinking = supported
+        model.thinking_toggle = supported and thinking_toggle
+        model.thinking_status = status
+    else:
+        return
+    await db.commit()
+    await llm.refresh()
+
+
 def _canonical_config(
     data: dict,
     *,
@@ -208,7 +231,7 @@ async def export_models(db: AsyncSession = Depends(get_db)) -> LlmModelExportBun
         item.provider = spec.id
         item.logo = spec.logo
         models.append(item)
-    return LlmModelExportBundle(version=2, exported_at=datetime.now(), models=models)
+    return LlmModelExportBundle(version=3, exported_at=datetime.now(), models=models)
 
 
 @router.post("/import", response_model=LlmModelImportResult)
@@ -239,6 +262,12 @@ async def import_models(
         else:
             for field, value in data.items():
                 setattr(existing, field, value)
+            # 导入可能替换厂商、端点或密钥，旧环境的能力结论不可沿用。
+            existing.vision = False
+            existing.thinking = False
+            existing.thinking_toggle = False
+            existing.vision_status = "unknown"
+            existing.thinking_status = "unknown"
             updated += 1
     await db.commit()
     await llm.refresh()
@@ -295,6 +324,20 @@ async def update_model(
         provider=selected_provider,
         base_url=selected_base_url,
     )
+    capability_config_changed = any(
+        field in body.model_fields_set
+        and data.get(field) != getattr(model, field)
+        for field in ("provider", "base_url", "api_key")
+    )
+    if capability_config_changed:
+        # 厂商、端点或密钥变化后，旧探测结论立即失效；需重新执行全面测试。
+        data.update(
+            vision=False,
+            thinking=False,
+            thinking_toggle=False,
+            vision_status="unknown",
+            thinking_status="unknown",
+        )
     for field, value in data.items():
         setattr(model, field, value)
     await db.commit()
@@ -383,6 +426,13 @@ async def test_model_capability(
     if model is None:
         raise HTTPException(status_code=404, detail="模型不存在")
     if not model.api_key:
+        await _record_detected_capability(
+            db,
+            model,
+            capability,
+            supported=False,
+            status="failed",
+        )
         return LlmModelCapabilityTestResult(
             capability=capability,
             status="failed",
@@ -392,6 +442,13 @@ async def test_model_capability(
     try:
         llm_instance = llm.build_llm(model_id)
     except HTTPException as exc:
+        await _record_detected_capability(
+            db,
+            model,
+            capability,
+            supported=False,
+            status="failed",
+        )
         detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
         return LlmModelCapabilityTestResult(
             capability=capability,
@@ -399,6 +456,13 @@ async def test_model_capability(
             message=detail,
         )
     except Exception as exc:
+        await _record_detected_capability(
+            db,
+            model,
+            capability,
+            supported=False,
+            status="failed",
+        )
         return LlmModelCapabilityTestResult(
             capability=capability,
             status="failed",
@@ -427,6 +491,13 @@ async def test_model_capability(
 
         if capability == "vision":
             if reason := unsupported_vision_reason(model.provider):
+                await _record_detected_capability(
+                    db,
+                    model,
+                    capability,
+                    supported=False,
+                    status="unsupported",
+                )
                 return _capability_result(
                     capability,
                     "unsupported",
@@ -455,12 +526,26 @@ async def test_model_capability(
             )
             answer = _message_text(resp.content)
             if "红" in answer or "red" in answer.lower():
+                await _record_detected_capability(
+                    db,
+                    model,
+                    capability,
+                    supported=True,
+                    status="supported",
+                )
                 return _capability_result(
                     capability,
                     "passed",
                     f"正确识别红色测试图（{answer[:50]}）",
                     started,
                 )
+            await _record_detected_capability(
+                db,
+                model,
+                capability,
+                supported=False,
+                status="unsupported",
+            )
             return _capability_result(
                 capability,
                 "unsupported",
@@ -504,6 +589,13 @@ async def test_model_capability(
                         message="未先检测到思考，无法验证关闭开关",
                     )
                 )
+                await _record_detected_capability(
+                    db,
+                    model,
+                    capability,
+                    supported=False,
+                    status="unsupported",
+                )
                 return _capability_result(
                     capability,
                     "unsupported",
@@ -520,6 +612,14 @@ async def test_model_capability(
                         status="unsupported",
                         message="该厂商或当前模型没有可验证的关闭思考参数",
                     )
+                )
+                await _record_detected_capability(
+                    db,
+                    model,
+                    capability,
+                    supported=True,
+                    status="supported",
+                    thinking_toggle=False,
                 )
                 return _capability_result(
                     capability,
@@ -565,6 +665,14 @@ async def test_model_capability(
                     )
                 )
 
+            await _record_detected_capability(
+                db,
+                model,
+                capability,
+                supported=True,
+                status="supported",
+                thinking_toggle=can_disable,
+            )
             status: ModelTestStatus = (
                 "failed"
                 if not can_disable
@@ -620,10 +728,24 @@ async def test_model_capability(
             started,
         )
     except TimeoutError:
+        await _record_detected_capability(
+            db,
+            model,
+            capability,
+            supported=False,
+            status="failed",
+        )
         return _capability_result(
             capability, "failed", f"请求超时（>{_TEST_TIMEOUT_SEC}s）", started
         )
     except Exception as exc:
+        await _record_detected_capability(
+            db,
+            model,
+            capability,
+            supported=False,
+            status="failed",
+        )
         return _capability_result(
             capability,
             "failed",

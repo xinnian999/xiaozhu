@@ -59,6 +59,8 @@ class ChatRequest(BaseModel):
     # 随本条消息附带的图片（多模态识图）。data URL 列表,缺省空列表 = 纯文本。
     # 「模型是否支持识图、张数 / 格式是否合法」的校验同样放路由层（见 chat 函数）。
     images: list[str] = []
+    # 是否开启深度思考。None 保留厂商默认；布尔值只允许用于后台已探测到思考能力的模型。
+    thinking: bool | None = None
     # 重试标记。为 True 时:不新存用户消息,而是复用「最新一轮的用户消息」当 prompt
     # 重新生成一遍,并把喂给 LLM 的历史截到那条消息为止 —— 丢掉它之后的旧回复,
     # 让模型重新作答而不是接着自己已答的内容往下说。重生成和普通一轮一样,
@@ -506,13 +508,20 @@ async def latest_round_thread_id(db: AsyncSession, session_id: str) -> str | Non
     return f"{session_id}:{last_user.id}" if last_user is not None else None
 
 
-def build_round_agent(db: AsyncSession, session_id: str, model: str, db_lock: asyncio.Lock, tree_note: str):
+def build_round_agent(
+    db: AsyncSession,
+    session_id: str,
+    model: str,
+    db_lock: asyncio.Lock,
+    tree_note: str,
+    thinking: bool | None = None,
+):
     """按本轮选的模型重建 llm/tools/agent（含 checkpointer + NoBluffMiddleware）。
 
     与 agent_loop 首次创建 agent 的装配方式完全一致，供 resume / ask_result 复用。
     调用方负责先算好 tree_note（当下真实文件状态）和 db_lock。
     """
-    llm = build_llm(model)
+    llm = build_llm(model, thinking=thinking)
     tools = build_tools(db, session_id, db_lock)
     agent = create_agent(
         llm,
@@ -1037,7 +1046,14 @@ async def agent_loop(
     # 这一步理论上不太会失败,但和上面构造 llm/tools 一样做同款 error+done 兜底,
     # 避免任何异常在 StreamingResponse 内部裸抛,把前端卡在「思考中」出不来。
     try:
-        agent = build_round_agent(db, req.session_id, req.model, db_lock, tree_note)
+        agent = build_round_agent(
+            db,
+            req.session_id,
+            req.model,
+            db_lock,
+            tree_note,
+            thinking=req.thinking,
+        )
     except HTTPException as e:
         yield sse({"type": "error", "message": str(e.detail)})
         yield sse({"type": "done"})

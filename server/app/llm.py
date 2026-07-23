@@ -27,17 +27,16 @@ from app.models.llm_config import LlmModel
 
 # ── 种子数据（仅首次建库用）────────────────────────────────────────────────────
 # 原来写死在代码里的模型清单，现在只当「初始数据」：库为空时灌进去一次。
-# vision / cost 都是实测标定过的值（见 scripts/check_vision.py 与 billing.py），别凭记忆改。
+# 能力字段不再随种子写死，统一保持 unknown，等管理后台真实探测后自动标记。
 # _env_key 仅用于首次播种时去 .env 的 API_KEY_* 取对应 key，不入库、不是模型字段。
 SEED_MODELS = [
     {
         "id": "qwen3-coder-next",
-        "vision": False,
         "cost": 1,
         "_env_key": "qwen",
     },
-    {"id": "qwen3.6-plus", "vision": True, "cost": 1, "_env_key": "qwen"},
-    {"id": "gpt-5.5", "vision": False, "cost": 2, "_env_key": "gpt"},
+    {"id": "qwen3.6-plus", "cost": 1, "_env_key": "qwen"},
+    {"id": "gpt-5.5", "cost": 2, "_env_key": "gpt"},
 ]
 
 
@@ -66,6 +65,10 @@ async def reload_registry(session: AsyncSession) -> None:
             "api_key": m.api_key,
             "logo": provider_logo(m.provider),
             "vision": m.vision,
+            "thinking": m.thinking,
+            "thinking_toggle": m.thinking_toggle,
+            "vision_status": m.vision_status,
+            "thinking_status": m.thinking_status,
             "cost": m.cost,
             "enabled": m.enabled,
             "sort_order": m.sort_order,
@@ -78,7 +81,7 @@ async def reload_registry(session: AsyncSession) -> None:
 
 # ── 对外读取接口（都查内存缓存）────────────────────────────────────────────────
 def models_by_id() -> dict[str, dict]:
-    """模型 id → 元信息（含已禁用的）。供 chat/loop 查 cost / vision。"""
+    """模型 id → 元信息（含已禁用的）。供 chat/loop 查费用与已探测能力。"""
     return _MODELS_BY_ID
 
 
@@ -94,7 +97,7 @@ def default_model_id() -> str:
 
 
 def public_models() -> list[dict]:
-    """给前端的模型清单。只吐已启用模型的 id / label / icon / vision / cost ——
+    """给前端的模型清单。只吐已启用模型的展示信息、费用与已探测能力 ——
     故意不含 api_key（密钥，绝不外吐）。
     字段名沿用前端约定：label=id、icon=logo。
     """
@@ -107,10 +110,27 @@ def public_models() -> list[dict]:
                 "label": m["id"],
                 "icon": m["logo"],
                 "vision": m["vision"],
+                "thinking": m["thinking"],
+                "thinking_toggle": m["thinking_toggle"],
+                "vision_status": m["vision_status"],
+                "thinking_status": m["thinking_status"],
                 "cost": m["cost"],
             }
         )
     return result
+
+
+def validate_thinking_option(model: str, thinking: bool | None) -> None:
+    """校验聊天请求中的思考开关，只信后台真实探测并持久化的能力结果。"""
+    if thinking is None:
+        return
+    meta = _MODELS_BY_ID.get(model)
+    if meta is None:
+        raise HTTPException(status_code=400, detail=f"未知模型：{model}")
+    if not meta.get("thinking"):
+        raise HTTPException(status_code=400, detail="当前模型未探测到思考能力")
+    if thinking is False and not meta.get("thinking_toggle"):
+        raise HTTPException(status_code=400, detail="当前模型支持思考，但无法关闭思考")
 
 
 def build_llm(model: str, *, thinking: bool | None = None) -> BaseChatModel:
@@ -162,7 +182,6 @@ async def ensure_seeded(session: AsyncSession) -> None:
                 base_url=base_url,
                 api_key=env_keys.get(m["_env_key"], ""),
                 logo=logo,
-                vision=m["vision"],
                 cost=m["cost"],
                 enabled=True,
                 sort_order=i,

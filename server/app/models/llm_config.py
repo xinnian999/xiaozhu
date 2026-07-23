@@ -1,7 +1,7 @@
 """LLM 模型配置（搬进数据库）—— 原本写死在 app/llm.py 的 AVAILABLE_MODELS。
 
 单表设计：每个模型自带全部所需信息（不再有「分组」共享 key 的机制）：
-  id / provider / base_url / api_key / logo / cost(倍率) / vision(识图) / enabled(启用)。
+  id / provider / base_url / api_key / logo / cost(倍率) / 能力探测结果 / enabled(启用)。
 
 读取方：app/llm.py。它启动时把本表读进内存缓存（registry），
 build_llm / public_models / 白名单校验都查缓存，不每次打数据库；
@@ -42,6 +42,21 @@ class LlmModel(Base):
     # 是否支持识图（多模态）。前端据此把不支持的模型「添加图片」按钮置灰。
     vision: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="0")
 
+    # 是否检测到思考信号；是否能关闭另存一列，避免把「会思考但不可关闭」误装成可用开关。
+    thinking: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="0")
+    thinking_toggle: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="0"
+    )
+
+    # 能力探测状态：unknown / supported / unsupported / failed。
+    # 布尔列供业务快速判断；状态列供后台区分「不支持」与「尚未/探测失败」。
+    vision_status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="unknown"
+    )
+    thinking_status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="unknown"
+    )
+
     # 付费倍率：一轮对话扣多少点。普通 1、更贵的模型 2（计费见 app/billing.py）。
     cost: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
 
@@ -73,6 +88,10 @@ class LlmModelAdminRead(BaseModel):
     api_key: str
     logo: str
     vision: bool
+    thinking: bool
+    thinking_toggle: bool
+    vision_status: Literal["unknown", "supported", "unsupported", "failed"]
+    thinking_status: Literal["unknown", "supported", "unsupported", "failed"]
     cost: int
     enabled: bool
     sort_order: int
@@ -81,12 +100,13 @@ class LlmModelAdminRead(BaseModel):
 class LlmModelAdminCreate(BaseModel):
     """POST /api/admin/models 的请求体：新增一个模型（对齐 admin.py 的 form_include_pk）。"""
 
+    model_config = {"extra": "forbid"}
+
     id: str = Field(min_length=1)
     provider: str = "openai"
     base_url: str | None = None
     api_key: str = ""
     logo: str = ""
-    vision: bool = False
     cost: int = Field(default=1, ge=1)
     enabled: bool = True
     sort_order: int = 0
@@ -95,11 +115,12 @@ class LlmModelAdminCreate(BaseModel):
 class LlmModelAdminUpdate(BaseModel):
     """PATCH /api/admin/models/{id} 的请求体：编辑模型，字段都可选（partial update）。"""
 
+    model_config = {"extra": "forbid"}
+
     provider: str | None = None
     base_url: str | None = None
     api_key: str | None = None
     logo: str | None = None
-    vision: bool | None = None
     cost: int | None = Field(default=None, ge=1)
     enabled: bool | None = None
     sort_order: int | None = None
@@ -110,7 +131,6 @@ class LlmModelAdminUpdate(BaseModel):
         non_nullable = {
             "provider",
             "api_key",
-            "vision",
             "cost",
             "enabled",
             "sort_order",
@@ -142,7 +162,6 @@ class LlmModelExportItem(BaseModel):
     base_url: str | None = None
     api_key: str = ""
     logo: str = ""
-    vision: bool = False
     cost: int = Field(default=1, ge=1)
     enabled: bool = True
     sort_order: int = 0
@@ -151,7 +170,7 @@ class LlmModelExportItem(BaseModel):
 class LlmModelExportBundle(BaseModel):
     """GET /api/admin/models/export 的响应体：带版本号的导出包，方便跨环境迁移。"""
 
-    version: int = 2
+    version: int = 3
     exported_at: datetime
     models: list[LlmModelExportItem]
 

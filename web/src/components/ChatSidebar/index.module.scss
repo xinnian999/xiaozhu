@@ -173,6 +173,7 @@
           display: flex;
           align-items: center;
           gap: $space-1;
+          min-width: 0;
 
           .toolBtn {
             @include button-reset;
@@ -265,6 +266,87 @@
                   font-weight: $fw-medium;
                 }
               }
+            }
+          }
+
+          // 深度思考：沿用编辑器工具栏的克制胶囊形态，方形勾选框提供明确开关语义。
+          .thinkingToggle {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            min-width: 0;
+            padding: 4px 7px;
+            border: 1px solid transparent;
+            border-radius: $radius-md;
+            color: var(--color-text-mute);
+            font-size: $fs-11;
+            line-height: 1;
+            cursor: pointer;
+            user-select: none;
+            transition:
+              color $dur-base $ease-out,
+              border-color $dur-base $ease-out,
+              background $dur-base $ease-out;
+
+            input {
+              position: absolute;
+              width: 1px;
+              height: 1px;
+              opacity: 0;
+              pointer-events: none;
+            }
+
+            &:hover {
+              color: var(--color-text-dim);
+              background: var(--color-bg-hover);
+            }
+
+            &:has(input:focus-visible) {
+              outline: 2px solid var(--color-accent);
+              outline-offset: 2px;
+            }
+
+            .thinkingCheck {
+              display: inline-flex;
+              align-items: center;
+              justify-content: center;
+              width: 14px;
+              height: 14px;
+              flex: 0 0 auto;
+              border: 1px solid var(--color-border-strong);
+              border-radius: 4px;
+              color: white;
+              background: transparent;
+              transition:
+                border-color $dur-base $ease-out,
+                background $dur-base $ease-out;
+            }
+
+            .thinkingLabel {
+              white-space: nowrap;
+            }
+          }
+
+          .thinkingToggleActive {
+            color: var(--color-text-dim);
+            border-color: color-mix(in srgb, var(--color-accent) 24%, transparent);
+            background: var(--color-accent-fade);
+
+            .thinkingCheck {
+              border-color: var(--color-accent);
+              background: var(--color-accent);
+            }
+          }
+
+          .thinkingToggleUnsupported,
+          .thinkingToggleLocked {
+            opacity: 0.42;
+            cursor: not-allowed;
+
+            &:hover {
+              color: var(--color-text-mute);
+              background: transparent;
             }
           }
         }
@@ -373,6 +455,10 @@
                   padding: $space-3;
                 }
               }
+            }
+
+            .thinkingToggle {
+              min-height: 32px;
             }
           }
         }

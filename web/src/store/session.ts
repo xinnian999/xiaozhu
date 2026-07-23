@@ -499,7 +499,26 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           (m) => m.kind === 'tool' && m.toolCallId === toolCallId,
         )
         if (exists) {
-          // 已有这张卡（流式阶段提前建的）→ 只更新工具名 / 参数，保留它的位置和已填的结果
+          // 已有这张卡（流式阶段提前建的）→ 更新工具名 / 参数并保留已填的结果。
+          // ask_user 是个例外：它会在 tool_call_chunks 刚出现工具名时就提前出卡，
+          // 那时本轮的 reasoning / 提问前正文还没插入，卡片会暂时跑到它们前面。
+          // 等完整 questions 到达时把卡片归位到当前时间线末尾，稳定成
+          // 「思考 → 正文 → 问答」；刷新后数据库本来也是这个顺序。
+          if (name === 'ask_user' && Array.isArray(args.questions)) {
+            const current = sess.messages.find(
+              (m) => m.kind === 'tool' && m.toolCallId === toolCallId,
+            )
+            if (!current) return sess
+            return {
+              ...sess,
+              messages: [
+                ...sess.messages.filter(
+                  (m) => !(m.kind === 'tool' && m.toolCallId === toolCallId),
+                ),
+                { ...current, toolName: name, toolArgs: args },
+              ],
+            }
+          }
           return {
             ...sess,
             messages: sess.messages.map((m) =>

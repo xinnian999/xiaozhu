@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { MessageSquare, RotateCcw, PlayCircle } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
 import type { Message } from '@/types/project'
-import MessageBubble from '../MessageBubble'
+import MessageBubble, { AssistantMetaRow } from '../MessageBubble'
 import styles from './index.module.scss'
 
 // 首次进入会话时，等右侧预览区的 fade-up 展开动画（0.6s）放完、布局稳定后再滚到底。
@@ -120,6 +120,15 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
   // 不是（少见：截断 / 报错导致这轮没产出 AI 文本）→ 退回到对话末尾的独立按钮兜底。
   const lastTextIsAssistant = lastTextIndex >= 0 && messages[lastTextIndex].role === 'assistant'
   const inlineRetry = canRetry && lastTextIsAssistant
+  // 待回答的 ask_user 是这段 assistant 回复的一部分，视觉顺序应是
+  // 「正文 → 问答卡 → 时间/重新生成」。时间原本渲染在正文组件内部，需要在这种情况下
+  // 延后到卡片之后；否则刷新后数据库按「正文、工具」还原时，时间会夹在二者中间。
+  const hasPendingAskAfterLastText =
+    lastTextIndex >= 0 &&
+    messages
+      .slice(lastTextIndex + 1)
+      .some((m) => m.kind === 'tool' && m.toolName === 'ask_user' && !m.toolResult)
+  const deferAssistantMeta = lastTextIsAssistant && hasPendingAskAfterLastText
 
   // 对话末尾是不是一张「运行中」的工具卡（kind=tool 且还没拿到结果）。
   // 是的话，那张卡自带 loading 转圈，底部就不必再显示「正在生成」，避免双 loading。
@@ -153,12 +162,19 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
         <MessageBubble
           key={msg.id}
           message={msg}
-          isLast={i === lastTextIndex}
+          isLast={i === lastTextIndex && !deferAssistantMeta}
           // 只把回调给最终回复那条 AI 消息，它据此在时间同行渲染「重新生成」
-          onRetry={inlineRetry && i === lastTextIndex ? onRetry : undefined}
+          onRetry={inlineRetry && i === lastTextIndex && !deferAssistantMeta ? onRetry : undefined}
           onAskUserAnswer={onAskUserAnswer}
         />
       ))}
+
+      {deferAssistantMeta && (
+        <AssistantMetaRow
+          createdAt={messages[lastTextIndex].createdAt}
+          onRetry={inlineRetry ? onRetry : undefined}
+        />
+      )}
 
       {/* 兜底：这轮没有 AI 最终回复可挂（截断 / 报错）时，仍在对话末尾给一个独立的重试按钮。 */}
       {canRetry && !lastTextIsAssistant && (

@@ -23,6 +23,41 @@ type Props = {
   onAskUserAnswer?: (message: Message, answer: string) => Promise<void>
 }
 
+type AssistantMetaProps = {
+  createdAt: number
+  onRetry?: () => void
+}
+
+function AssistantMetaContents({ createdAt, onRetry }: AssistantMetaProps) {
+  return (
+    <div className={styles.metaRow}>
+      <time className={styles.time} dateTime={new Date(createdAt).toISOString()}>
+        {formatClock(createdAt)}
+      </time>
+      {onRetry && (
+        <button
+          type="button"
+          className={styles.retryBtn}
+          onClick={onRetry}
+          title="用当前项目状态重新生成这一轮（会追加一个新版本）"
+        >
+          <RotateCcw size={13} className={styles.retryIcon} />
+          <span>重新生成</span>
+        </button>
+      )}
+    </div>
+  )
+}
+
+/** ask_user 卡片需要落在回复正文之后、时间栏之前；列表层用它把时间栏延后到卡片下方。 */
+export function AssistantMetaRow(props: AssistantMetaProps) {
+  return (
+    <div className={styles.assistantMsg}>
+      <AssistantMetaContents {...props} />
+    </div>
+  )
+}
+
 // ============================================
 // 单条对话气泡
 // ============================================
@@ -76,22 +111,7 @@ export default function MessageBubble({ message, isStreaming = false, isLast = f
 
         {!isStreaming && isLast && (
           // 时间 + 「重新生成」同一行：时间在左，按钮在右（onRetry 传了才显示）。
-          <div className={styles.metaRow}>
-            <time className={styles.time} dateTime={new Date(message.createdAt).toISOString()}>
-              {formatClock(message.createdAt)}
-            </time>
-            {onRetry && (
-              <button
-                type="button"
-                className={styles.retryBtn}
-                onClick={onRetry}
-                title="用当前项目状态重新生成这一轮（会追加一个新版本）"
-              >
-                <RotateCcw size={13} className={styles.retryIcon} />
-                <span>重新生成</span>
-              </button>
-            )}
-          </div>
+          <AssistantMetaContents createdAt={message.createdAt} onRetry={onRetry} />
         )}
       </div>
     )

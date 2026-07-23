@@ -45,6 +45,7 @@ import {
   CircleX,
   ImageIcon,
   RotateCw,
+  Radar,
   Wrench,
   Wifi,
   type LucideIcon,
@@ -76,10 +77,37 @@ type TestItemState = {
   message?: string
 }
 
+type BatchModelTestState = {
+  phase: 'pending' | 'running' | 'done'
+  currentCapability?: ModelTestCapability
+  completed: number
+  passed: number
+  unsupported: number
+  failed: number
+  summary?: string
+}
+
 function emptyTestStates(): Record<ModelTestCapability, TestItemState> {
   return Object.fromEntries(
     CAPABILITY_TESTS.map((item) => [item.key, { phase: 'pending' }]),
   ) as Record<ModelTestCapability, TestItemState>
+}
+
+function capabilityErrorResult(
+  capability: ModelTestCapability,
+  error: unknown,
+): ModelCapabilityTestResult {
+  const rawReason = error instanceof Error ? error.message : '未知错误'
+  const timeoutMatch = rawReason.match(/timeout of (\d+)ms exceeded/i)
+  return {
+    capability,
+    status: 'failed',
+    message: timeoutMatch
+      ? `等待模型响应超时（${Math.round(Number(timeoutMatch[1]) / 1000)} 秒）`
+      : rawReason,
+    latency_ms: null,
+    details: [],
+  }
 }
 
 /** 解析导入 JSON：支持标准导出包，也兼容直接的 models 数组。 */
@@ -117,6 +145,10 @@ export default function Models() {
   const [testStates, setTestStates] = useState(emptyTestStates)
   const [testsRunning, setTestsRunning] = useState(false)
   const testRunRef = useRef(0)
+  const [batchOpen, setBatchOpen] = useState(false)
+  const [batchRunning, setBatchRunning] = useState(false)
+  const [batchStates, setBatchStates] = useState<Record<string, BatchModelTestState>>({})
+  const batchRunRef = useRef(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   /** 新建/复制时追加到列表末尾的排序权重 */
@@ -375,18 +407,7 @@ export default function Models() {
       return result
     } catch (error) {
       if (testRunRef.current !== runId) return null
-      const rawReason = error instanceof Error ? error.message : '未知错误'
-      const timeoutMatch = rawReason.match(/timeout of (\d+)ms exceeded/i)
-      const reason = timeoutMatch
-        ? `等待模型响应超时（${Math.round(Number(timeoutMatch[1]) / 1000)} 秒），请稍后单独重试`
-        : rawReason
-      const result: ModelCapabilityTestResult = {
-        capability,
-        status: 'failed',
-        message: reason,
-        latency_ms: null,
-        details: [],
-      }
+      const result = capabilityErrorResult(capability, error)
       setTestStates((prev) => ({
         ...prev,
         [capability]: { phase: 'done', result },
@@ -422,6 +443,7 @@ export default function Models() {
   }
 
   const openFullTest = (row: AdminModel) => {
+    if (batchRunning) return
     setTestTarget(row)
     void runAllTests(row)
   }
@@ -441,12 +463,127 @@ export default function Models() {
     if (testRunRef.current === runId) setTestsRunning(false)
   }
 
+  const updateBatchModel = (
+    modelId: string,
+    update: Partial<BatchModelTestState>,
+  ) => {
+    setBatchStates((prev) => ({
+      ...prev,
+      [modelId]: { ...prev[modelId], ...update },
+    }))
+  }
+
+  const probeOneModel = async (row: AdminModel, runId: number) => {
+    let completed = 0
+    let passed = 0
+    let unsupported = 0
+    let failed = 0
+    const failureMessages: string[] = []
+
+    updateBatchModel(row.id, { phase: 'running' })
+    for (const item of CAPABILITY_TESTS) {
+      if (batchRunRef.current !== runId) return
+      updateBatchModel(row.id, { currentCapability: item.key })
+
+      let result: ModelCapabilityTestResult
+      try {
+        result = await testModelCapability(row.id, item.key)
+      } catch (error) {
+        result = capabilityErrorResult(item.key, error)
+      }
+      if (batchRunRef.current !== runId) return
+
+      completed += 1
+      if (result.status === 'passed') passed += 1
+      else if (result.status === 'unsupported' && item.key !== 'connectivity') unsupported += 1
+      else {
+        failed += 1
+        failureMessages.push(`${item.label}：${result.message}`)
+      }
+
+      updateBatchModel(row.id, { completed, passed, unsupported, failed })
+
+      if (item.key === 'connectivity' && result.status !== 'passed') {
+        updateBatchModel(row.id, {
+          phase: 'done',
+          currentCapability: undefined,
+          summary: `连通性未通过，后续 3 项已跳过：${result.message}`,
+        })
+        return
+      }
+    }
+
+    updateBatchModel(row.id, {
+      phase: 'done',
+      currentCapability: undefined,
+      summary:
+        failed > 0
+          ? `失败原因：${failureMessages.slice(0, 2).join('；')}`
+          : unsupported > 0
+            ? `探测完成：${passed} 项通过，${unsupported} 项不支持`
+            : '全部能力测试通过',
+    })
+  }
+
+  const runAllModelTests = async () => {
+    if (data.length === 0) {
+      message.warning('当前没有可探测的模型')
+      return
+    }
+    const models = [...data]
+    const runId = ++batchRunRef.current
+    setBatchStates(Object.fromEntries(models.map((row) => [
+      row.id,
+      {
+        phase: 'pending',
+        completed: 0,
+        passed: 0,
+        unsupported: 0,
+        failed: 0,
+      } satisfies BatchModelTestState,
+    ])))
+    setBatchOpen(true)
+    setBatchRunning(true)
+
+    // 两个 worker 并发：明显缩短总耗时，同时避免一次把同一厂商的配额打满。
+    let cursor = 0
+    const worker = async () => {
+      while (batchRunRef.current === runId) {
+        const index = cursor
+        cursor += 1
+        if (index >= models.length) return
+        await probeOneModel(models[index], runId)
+      }
+    }
+    await Promise.all(
+      Array.from({ length: Math.min(2, models.length) }, () => worker()),
+    )
+    if (batchRunRef.current !== runId) return
+    await fetchData()
+    if (batchRunRef.current !== runId) return
+    setBatchRunning(false)
+  }
+
+  const closeBatchTest = () => {
+    if (batchRunning) batchRunRef.current += 1
+    setBatchRunning(false)
+    setBatchOpen(false)
+  }
+
   const completedTests = CAPABILITY_TESTS.filter((item) =>
     ['done', 'skipped'].includes(testStates[item.key].phase),
   ).length
   const passedTests = CAPABILITY_TESTS.filter(
     (item) => testStates[item.key].result?.status === 'passed',
   ).length
+  const batchEntries = Object.entries(batchStates)
+  const batchCompleted = batchEntries.filter(([, state]) => state.phase === 'done').length
+  const batchClean = batchEntries.filter(
+    ([, state]) => state.phase === 'done' && state.failed === 0,
+  ).length
+  const batchPercent = batchEntries.length > 0
+    ? Math.round((batchCompleted / batchEntries.length) * 100)
+    : 0
 
   const renderCapability = (
     status: AdminModel['vision_status'],
@@ -563,6 +700,7 @@ export default function Models() {
             type="link"
             size="small"
             loading={testsRunning && testTarget?.id === row.id}
+            disabled={batchRunning}
             onClick={() => openFullTest(row)}
           >
             全面测试
@@ -586,6 +724,14 @@ export default function Models() {
           </Button>
           <Button onClick={handleExport}>导出</Button>
           <Button onClick={handleImportClick}>导入</Button>
+          <Button
+            icon={<Radar size={15} />}
+            loading={batchRunning}
+            disabled={testsRunning}
+            onClick={() => void runAllModelTests()}
+          >
+            一键探测全部
+          </Button>
           <input
             ref={fileInputRef}
             type="file"
@@ -617,6 +763,124 @@ export default function Models() {
         }}
         pagination={false}
       />
+
+      <Modal
+        title={null}
+        open={batchOpen}
+        onCancel={closeBatchTest}
+        width={760}
+        destroyOnHidden
+        maskClosable={!batchRunning}
+        className={`${styles.testModal} ${styles.batchModal}`}
+        footer={
+          <div className={styles.testFooter}>
+            <span className={styles.testFootnote}>
+              全部配置模型（含停用）都会探测；最多同时执行 2 个模型
+            </span>
+            <Space>
+              <Button danger={batchRunning} onClick={closeBatchTest}>
+                {batchRunning ? '停止探测' : '关闭'}
+              </Button>
+              {!batchRunning && (
+                <Button
+                  type="primary"
+                  icon={<RotateCw size={15} />}
+                  onClick={() => void runAllModelTests()}
+                >
+                  重新探测全部
+                </Button>
+              )}
+            </Space>
+          </div>
+        }
+      >
+        <div className={styles.batchPanel}>
+          <div className={styles.batchHeader}>
+            <div className={styles.batchRadar}>
+              <Radar size={26} />
+              {batchRunning && <span aria-hidden />}
+            </div>
+            <div className={styles.testHeading}>
+              <span className={styles.testEyebrow}>MODEL FLEET DIAGNOSTICS</span>
+              <h2>全部模型能力探测</h2>
+              <p>连通性优先；失败后自动跳过该模型的后续项目。</p>
+            </div>
+            <div className={styles.testScore}>
+              <strong>{batchCompleted}</strong>
+              <span>/ {data.length} 完成</span>
+            </div>
+          </div>
+
+          <Progress
+            percent={batchPercent}
+            showInfo={false}
+            strokeColor="#1677ff"
+            trailColor="rgba(22, 119, 255, 0.10)"
+            className={styles.testProgress}
+          />
+
+          <div className={styles.batchSummary}>
+            <span>{batchRunning ? '正在探测' : '探测结束'}</span>
+            <strong>{batchClean} 个模型无失败项</strong>
+          </div>
+
+          <div className={styles.batchList}>
+            {data.map((row) => {
+              const state = batchStates[row.id] ?? {
+                phase: 'pending',
+                completed: 0,
+                passed: 0,
+                unsupported: 0,
+                failed: 0,
+              }
+              const currentLabel = CAPABILITY_TESTS.find(
+                (item) => item.key === state.currentCapability,
+              )?.label
+              const stateIcon =
+                state.phase === 'running' ? (
+                  <Spin size="small" />
+                ) : state.phase === 'done' && state.failed > 0 ? (
+                  <CircleX size={20} />
+                ) : state.phase === 'done' && state.unsupported > 0 ? (
+                  <CircleHelp size={20} />
+                ) : state.phase === 'done' ? (
+                  <CircleCheck size={20} />
+                ) : (
+                  <span className={styles.pendingDot} />
+                )
+              return (
+                <div
+                  key={row.id}
+                  className={`${styles.batchItem} ${state.phase === 'running' ? styles.batchRunning : ''} ${state.phase === 'done' && state.failed > 0 ? styles.failed : ''}`}
+                >
+                  <div className={styles.batchModelIcon}>
+                    <ModelIcon name={logoForModel(row)} size={22} />
+                  </div>
+                  <div className={styles.batchModelBody}>
+                    <div className={styles.batchModelTitle}>
+                      <strong>{row.id}</strong>
+                      <span>{providerForModel(row)?.label || row.provider}</span>
+                    </div>
+                    <p title={state.phase === 'done' ? state.summary : undefined}>
+                      {state.phase === 'running'
+                        ? `正在测试${currentLabel || '模型能力'}…`
+                        : state.phase === 'done'
+                          ? state.summary
+                          : '等待探测'}
+                    </p>
+                  </div>
+                  <div className={styles.batchMetrics}>
+                    <span>{state.passed} 通过</span>
+                    {state.unsupported > 0 && <span>{state.unsupported} 不支持</span>}
+                    {state.failed > 0 && <span data-failed>{state.failed} 失败</span>}
+                  </div>
+                  <div className={styles.batchStateIcon}>{stateIcon}</div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      </Modal>
 
       <Drawer
         title={editing ? `编辑模型 · ${editing.id}` : isCopy ? '复制模型' : '新建模型'}

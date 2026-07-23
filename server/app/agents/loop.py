@@ -228,6 +228,16 @@ async def _charge_user(db: AsyncSession, user_id: str, model: str) -> None:
         print(f"[扣费失败] user={user_id} model={model}: {type(e).__name__}: {e}")
 
 
+async def _delete_thread_checkpoint(thread_id: str) -> None:
+    """严格删除一轮的 LangGraph 状态。
+
+    与正常收尾时的 best-effort 清理不同，重新生成必须先确保旧 checkpoint 已删除；
+    否则同一个 ``session_id:last_user_id`` 会从 ask_user 的 interrupt 处继续执行，
+    模型就会把“重新生成”误认为用户跳过了问题。
+    """
+    await get_checkpointer().adelete_thread(thread_id)
+
+
 async def _prepare_retry(
     req: ChatRequest, db: AsyncSession
 ) -> tuple[DBMessage, list[dict]] | None:
@@ -237,14 +247,16 @@ async def _prepare_retry(
     于是什么都不改、也不产新版本 —— 表现就是"重试没反应"。所以必须先把文件回退到
     「这一轮开始前」的状态,AI 才会从头再写一遍。
 
-    具体做四件事:
+    具体做五件事:
       1. 捞「最新一轮的用户消息」当本轮 prompt(回填到 req.message,供版本快照 summary 用);
-      2. 把文件回退到这一轮开始前的状态 —— 即它的版本卡之前最近一张版本卡对应的快照;
+      2. 严格删除这轮可能遗留的 LangGraph checkpoint，确保从原始 prompt 重新开始，
+         而不是从 ask_user 的 interrupt 暂停点继续;
+      3. 把文件回退到这一轮开始前的状态 —— 即它的版本卡之前最近一张版本卡对应的快照;
          若它之前没有任何版本卡(这是第一轮),就回退到初始模板;
-      3. 删掉这条用户消息之后的所有对话消息(旧回复 / 工具卡 / 版本卡),让对话看起来像
+      4. 删掉这条用户消息之后的所有对话消息(旧回复 / 工具卡 / 版本卡),让对话看起来像
          把这条消息重新发了一遍。注意只删 messages,versions / version_files 快照一律不动,
          所以生成过的版本全部保留、仍能在「版本历史」里回滚;
-      4. 算出「回退后该同步给前端的文件事件」并返回,调用方负责 yield 出去。
+      5. 算出「回退后该同步给前端的文件事件」并返回,调用方负责 yield 出去。
 
     返回 (最新一轮的用户消息, 文件同步事件列表);若一条用户消息都没有则返回 None。
     """
@@ -264,11 +276,15 @@ async def _prepare_retry(
         return None
     req.message = last_user.text
 
-    # 2a. 当前文件(= 旧的最后一轮结束后的状态),用来和回退目标做 diff,算出哪些要删
+    # 2. retry 会复用同一条 user 消息，因此 thread_id 也完全相同。必须先严格清掉
+    # ask_user / 断连留下的旧图状态，否则 create_agent 会直接从旧 checkpoint 续跑。
+    await _delete_thread_checkpoint(f"{req.session_id}:{last_user.id}")
+
+    # 3a. 当前文件(= 旧的最后一轮结束后的状态),用来和回退目标做 diff,算出哪些要删
     res = await db.execute(select(File).where(File.session_id == req.session_id))
     old_contents = {f.path: f.content for f in res.scalars().all()}
 
-    # 2b. 找「这一轮开始前」的版本:版本卡在 last_user 之前的最后一张。
+    # 3b. 找「这一轮开始前」的版本:版本卡在 last_user 之前的最后一张。
     #     版本卡和版本快照一一对应(见 versioning.snapshot_current_files),
     #     从卡的 tool_args 里取 version_id 就能定位到要回退的那份快照。
     res = await db.execute(
@@ -283,7 +299,7 @@ async def _prepare_retry(
     )
     prev_card = res.scalar_one_or_none()
 
-    # 2c. 算出回退目标的文件状态 pre_round（path -> content）
+    # 3c. 算出回退目标的文件状态 pre_round（path -> content）
     target_vid = prev_card.tool_args.get("version_id") if (prev_card and prev_card.tool_args) else None
     if target_vid is not None:
         res = await db.execute(
@@ -294,14 +310,14 @@ async def _prepare_retry(
         # 它之前没有任何版本 = 这是第一轮,回到初始模板（和新建会话时预置的一致）
         pre_round = load_template("vite-react")
 
-    # 3a. 用 pre_round 整体覆盖 files 表（删旧建新,和 versions.restore_version 同款写法）
+    # 4a. 用 pre_round 整体覆盖 files 表（删旧建新,和 versions.restore_version 同款写法）
     await db.execute(delete(File).where(File.session_id == req.session_id))
     db.add_all([
         File(session_id=req.session_id, path=path, content=content)
         for path, content in pre_round.items()
     ])
 
-    # 3b. 删掉 last_user 之后的所有对话消息（versions/version_files 不动）
+    # 4b. 删掉 last_user 之后的所有对话消息（versions/version_files 不动）
     await db.execute(
         delete(DBMessage).where(
             DBMessage.session_id == req.session_id,
@@ -310,7 +326,7 @@ async def _prepare_retry(
     )
     await db.commit()
 
-    # 4. 算出回退后要同步给前端的文件事件：旧有新无的删、内容变了的重发。
+    # 5. 算出回退后要同步给前端的文件事件：旧有新无的删、内容变了的重发。
     #    （这些事件由调用方在流里 yield；前端用现成的 file_write / file_delete 处理逻辑消费。）
     file_sync_events: list[dict] = []
     for path in old_contents:
@@ -435,7 +451,7 @@ async def _cleanup_thread(thread_id: str) -> None:
     自己吞掉异常,理由同 _charge_user:清理失败不该污染已经成功 / 已经报错收尾的 SSE 流。
     """
     try:
-        await get_checkpointer().adelete_thread(thread_id)
+        await _delete_thread_checkpoint(thread_id)
     except Exception as e:
         print(f"[checkpoint 清理失败] thread_id={thread_id}: {type(e).__name__}: {e}")
 
@@ -881,7 +897,15 @@ async def agent_loop(
     #    - 重试:见下面 _prepare_retry 的详细说明。它负责"把这一轮当作从没发生过":
     #      回退文件、删掉旧对话、并把回退后的文件状态同步给前端。
     if req.retry:
-        prepared = await _prepare_retry(req, db)
+        try:
+            prepared = await _prepare_retry(req, db)
+        except Exception as e:
+            # retry 的 checkpoint 清理是正确性的前置条件，不能像正常收尾那样吞错继续；
+            # 否则会再次从 ask_user 暂停点续跑。转成完整 SSE 错误帧，避免前端只看到断流。
+            print(f"[重新生成准备失败] {type(e).__name__}: {e}")
+            yield sse({"type": "error", "message": "重新生成准备失败，请稍后重试。"})
+            yield sse({"type": "done"})
+            return
         if prepared is None:
             # 一条用户消息都没有 —— 没什么可重试的,直接收尾
             yield sse({"type": "error", "message": "没有可重试的消息"})

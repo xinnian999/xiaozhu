@@ -114,6 +114,120 @@
         color: var(--color-accent);
       }
     }
+
+    // 模型列表独立滚动，深度思考固定在底部，避免模型较多时开关被卷走。
+    .panelFooter {
+      margin-top: $space-2;
+      padding-top: $space-2;
+      border-top: 1px solid var(--color-border);
+    }
+
+    .thinkingControl {
+      position: relative;
+      display: grid;
+      grid-template-columns: 28px minmax(0, 1fr) 16px;
+      align-items: center;
+      gap: $space-2;
+      width: 100%;
+      padding: $space-2;
+      border-radius: $radius-md;
+      color: var(--color-text-dim);
+      cursor: pointer;
+      user-select: none;
+      transition:
+        color $dur-base $ease-out,
+        background $dur-base $ease-out;
+
+      input {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      &:hover {
+        color: var(--color-text);
+        background: var(--color-bg-hover);
+      }
+
+      &:has(input:focus-visible) {
+        outline: 2px solid var(--color-accent);
+        outline-offset: 1px;
+      }
+    }
+
+    .thinkingIcon {
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      border-radius: $radius-sm;
+      color: var(--color-text-mute);
+      background: var(--color-bg-soft);
+      transition:
+        color $dur-base $ease-out,
+        background $dur-base $ease-out;
+    }
+
+    .thinkingMeta {
+      min-width: 0;
+
+      strong,
+      small {
+        display: block;
+      }
+
+      strong {
+        color: inherit;
+        font-size: $fs-12;
+        font-weight: $fw-medium;
+      }
+
+      small {
+        margin-top: 2px;
+        color: var(--color-text-mute);
+        font-size: $fs-10;
+      }
+    }
+
+    .thinkingCheck {
+      display: grid;
+      place-items: center;
+      width: 16px;
+      height: 16px;
+      border: 1px solid var(--color-border-strong);
+      border-radius: 5px;
+      color: white;
+      background: transparent;
+      transition:
+        border-color $dur-base $ease-out,
+        background $dur-base $ease-out;
+    }
+
+    .thinkingControlActive {
+      background: var(--color-accent-fade);
+
+      .thinkingIcon {
+        color: var(--color-accent);
+        background: color-mix(in srgb, var(--color-accent) 12%, var(--color-bg-soft));
+      }
+
+      .thinkingCheck {
+        border-color: var(--color-accent);
+        background: var(--color-accent);
+      }
+    }
+
+    .thinkingControlDisabled {
+      opacity: 0.46;
+      cursor: not-allowed;
+
+      &:hover {
+        color: var(--color-text-dim);
+        background: transparent;
+      }
+    }
   }
 
   // lobe 解析不出时的 lucide 兜底图标，颜色调淡和品牌图标区分

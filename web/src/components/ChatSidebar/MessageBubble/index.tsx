@@ -269,7 +269,31 @@ function ToolCallChip({ message }: { message: Message }) {
 // 数据来自通用的 tool_call 事件（message.toolArgs.questions），不是独立的 SSE 事件类型。
 // 每个问题各自单选或多选，点「提交/确认」后才切到下一题，全部答完才一次性提交
 // （见 onAnswer：内部会 POST /ask-result 唤醒后端，或降级为发一条新消息）。
-type AskQuestion = { question: string; options: string[]; multi?: boolean }
+type AskOption = string | { label: string; description?: string }
+type AskQuestion = {
+  header?: string
+  question: string
+  options: AskOption[]
+  multi?: boolean
+}
+
+function isAskOption(v: unknown): v is AskOption {
+  if (typeof v === 'string') return true
+  if (!v || typeof v !== 'object') return false
+  const option = v as { label?: unknown; description?: unknown }
+  return (
+    typeof option.label === 'string' &&
+    (option.description === undefined || typeof option.description === 'string')
+  )
+}
+
+function askOptionLabel(option: AskOption): string {
+  return typeof option === 'string' ? option : option.label
+}
+
+function askOptionDescription(option: AskOption): string | undefined {
+  return typeof option === 'string' ? undefined : option.description
+}
 
 function isAskQuestions(v: unknown): v is AskQuestion[] {
   return (
@@ -280,7 +304,10 @@ function isAskQuestions(v: unknown): v is AskQuestion[] {
         !!q &&
         typeof q === 'object' &&
         typeof (q as { question?: unknown }).question === 'string' &&
-        Array.isArray((q as { options?: unknown }).options),
+        ((q as { header?: unknown }).header === undefined ||
+          typeof (q as { header?: unknown }).header === 'string') &&
+        Array.isArray((q as { options?: unknown }).options) &&
+        (q as { options: unknown[] }).options.every(isAskOption),
     )
   )
 }
@@ -320,7 +347,7 @@ function parseSingleAskAnswer(
   if (answer === ASK_FALLBACK_ANSWER) {
     return { selectedIndex: null, isFallback: true, customText: '', isCustom: false }
   }
-  const idx = question.options.findIndex((opt) => opt === answer)
+  const idx = question.options.findIndex((opt) => askOptionLabel(opt) === answer)
   if (idx !== -1) return { selectedIndex: idx, isFallback: false, customText: '', isCustom: false }
   return { selectedIndex: null, isFallback: false, customText: answer, isCustom: true }
 }
@@ -337,7 +364,7 @@ function parseMultiAskAnswer(
   if (!match) return { checked: new Set(), customText: answer, isCustom: true }
   const checked = new Set<number>()
   for (const label of match[1].split('、')) {
-    const idx = question.options.findIndex((opt) => opt === label)
+    const idx = question.options.findIndex((opt) => askOptionLabel(opt) === label)
     if (idx !== -1) checked.add(idx)
   }
   const customText = match[2]?.trim() ?? ''
@@ -465,7 +492,7 @@ function AskUserChip({
               onClick={() => setActiveIndex(i)}
             >
               {answers[i] != null && <Check size={11} className={styles.askChipTabCheck} aria-hidden />}
-              <span className={styles.askChipTabLabel}>问题{i + 1}</span>
+              <span className={styles.askChipTabLabel}>{q.header || `问题${i + 1}`}</span>
             </button>
           ))}
         </div>
@@ -542,7 +569,9 @@ function AskQuestionBody({
   // （这就是「不强制选择」的落点）；「说说其他想法」有内容则一并/单独拼进去。
   const confirmMulti = () => {
     const text = customText.trim()
-    const picked = question.options.filter((_, i) => checked.has(i))
+    const picked = question.options
+      .filter((_, i) => checked.has(i))
+      .map(askOptionLabel)
     if (isCustomSelected && text) {
       if (picked.length === 0) {
         onFinalize(text)
@@ -567,7 +596,7 @@ function AskQuestionBody({
       return
     }
     if (selectedIndex !== null) {
-      onFinalize(question.options[selectedIndex])
+      onFinalize(askOptionLabel(question.options[selectedIndex]))
       return
     }
     if (isFallbackSelected) {
@@ -593,20 +622,26 @@ function AskQuestionBody({
 
       {multi ? (
         <div className={styles.askChipOptions}>
-          {question.options.map((opt, i) => (
-            <label
-              key={i}
-              className={`${styles.askChipCheckbox} ${checked.has(i) ? styles.askChipCheckboxSelected : ''}`}
-            >
-              <input
-                type="checkbox"
-                checked={checked.has(i)}
-                disabled={disabled}
-                onChange={() => toggleOption(i)}
-              />
-              <span>{opt}</span>
-            </label>
-          ))}
+          {question.options.map((opt, i) => {
+            const description = askOptionDescription(opt)
+            return (
+              <label
+                key={i}
+                className={`${styles.askChipCheckbox} ${checked.has(i) ? styles.askChipCheckboxSelected : ''}`}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked.has(i)}
+                  disabled={disabled}
+                  onChange={() => toggleOption(i)}
+                />
+                <span className={styles.askChipOptionCopy}>
+                  <strong>{askOptionLabel(opt)}</strong>
+                  {description && <small>{description}</small>}
+                </span>
+              </label>
+            )
+          })}
           <label
             className={`${styles.askChipCheckbox} ${isCustomSelected ? styles.askChipCheckboxSelected : ''}`}
           >
@@ -621,21 +656,27 @@ function AskQuestionBody({
         </div>
       ) : (
         <div className={styles.askChipOptions}>
-          {question.options.map((opt, i) => (
-            <button
-              key={i}
-              type="button"
-              className={`${styles.askChipOptionBtn} ${selectedIndex === i ? styles.askChipOptionBtnSelected : ''}`}
-              disabled={disabled}
-              onClick={() => {
-                setSelectedIndex(i)
-                setIsFallbackSelected(false)
-                setIsCustomSelected(false)
-              }}
-            >
-              {opt}
-            </button>
-          ))}
+          {question.options.map((opt, i) => {
+            const description = askOptionDescription(opt)
+            return (
+              <button
+                key={i}
+                type="button"
+                className={`${styles.askChipOptionBtn} ${selectedIndex === i ? styles.askChipOptionBtnSelected : ''}`}
+                disabled={disabled}
+                onClick={() => {
+                  setSelectedIndex(i)
+                  setIsFallbackSelected(false)
+                  setIsCustomSelected(false)
+                }}
+              >
+                <span className={styles.askChipOptionCopy}>
+                  <strong>{askOptionLabel(opt)}</strong>
+                  {description && <small>{description}</small>}
+                </span>
+              </button>
+            )
+          })}
           <button
             type="button"
             className={`${styles.askChipOptionBtn} ${styles.askChipFallbackBtn} ${isFallbackSelected ? styles.askChipOptionBtnSelected : ''}`}

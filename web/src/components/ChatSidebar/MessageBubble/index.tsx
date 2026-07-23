@@ -15,9 +15,6 @@ type Props = {
   isStreaming?: boolean
   /** 是否是对话里最后一条文本消息 —— 只有它才显示时间，作为本轮结束的标记 */
   isLast?: boolean
-  /** 重试回调。仅传给「最终回复」那条 AI 文本消息 —— 传了就在时间同行右侧渲染「重新生成」，
-   *  这样按钮落在版本卡之前（最终回复在 DOM 上排在版本卡前面），而不是堆到所有版本卡下方。 */
-  onRetry?: () => void
   /** ask_user 交互卡片答完（单个问题或多问题 Tab 全部答完）时的回调，只传给 kind='tool'
    *  且 toolName='ask_user' 的消息。answer 是 AskUserChip 内部已经汇总格式化好的文本。 */
   onAskUserAnswer?: (message: Message, answer: string) => Promise<void>
@@ -25,26 +22,14 @@ type Props = {
 
 type AssistantMetaProps = {
   createdAt: number
-  onRetry?: () => void
 }
 
-function AssistantMetaContents({ createdAt, onRetry }: AssistantMetaProps) {
+function AssistantMetaContents({ createdAt }: AssistantMetaProps) {
   return (
     <div className={styles.metaRow}>
       <time className={styles.time} dateTime={new Date(createdAt).toISOString()}>
         {formatClock(createdAt)}
       </time>
-      {onRetry && (
-        <button
-          type="button"
-          className={styles.retryBtn}
-          onClick={onRetry}
-          title="用当前项目状态重新生成这一轮（会追加一个新版本）"
-        >
-          <RotateCcw size={13} className={styles.retryIcon} />
-          <span>重新生成</span>
-        </button>
-      )}
     </div>
   )
 }
@@ -65,7 +50,7 @@ export function AssistantMetaRow(props: AssistantMetaProps) {
 //   （toolName === 'ask_user' 走独立的 AskUserChip，其余走 ToolCallChip）
 // - kind === 'version'：渲染成"版本卡"，附带回滚按钮
 // - 其余情况：渲染成普通文本气泡
-export default function MessageBubble({ message, isStreaming = false, isLast = false, onRetry, onAskUserAnswer }: Props) {
+export default function MessageBubble({ message, isStreaming = false, isLast = false, onAskUserAnswer }: Props) {
   // 必须在任何条件 return 之前调用 hook（Hooks 规则）
   const openImagePreview = useUIStore((s) => s.openImagePreview)
 
@@ -110,8 +95,7 @@ export default function MessageBubble({ message, isStreaming = false, isLast = f
         </div>
 
         {!isStreaming && isLast && (
-          // 时间 + 「重新生成」同一行：时间在左，按钮在右（onRetry 传了才显示）。
-          <AssistantMetaContents createdAt={message.createdAt} onRetry={onRetry} />
+          <AssistantMetaContents createdAt={message.createdAt} />
         )}
       </div>
     )

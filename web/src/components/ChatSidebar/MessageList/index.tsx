@@ -116,12 +116,9 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
   // 是否有可重试的内容：至少有一条用户消息（手动编辑只追加版本卡、不产生用户消息）。
   const hasUserMessage = messages.some((m) => m.role === 'user')
   const canRetry = !isStreaming && !!onRetry && hasUserMessage
-  // 最终回复（最后一条文本）是不是 AI 的：是 → 把「重新生成」挂到它的时间行右侧（落在版本卡之前）；
-  // 不是（少见：截断 / 报错导致这轮没产出 AI 文本）→ 退回到对话末尾的独立按钮兜底。
   const lastTextIsAssistant = lastTextIndex >= 0 && messages[lastTextIndex].role === 'assistant'
-  const inlineRetry = canRetry && lastTextIsAssistant
   // 待回答的 ask_user 是这段 assistant 回复的一部分，视觉顺序应是
-  // 「正文 → 问答卡 → 时间/重新生成」。时间原本渲染在正文组件内部，需要在这种情况下
+  // 「正文 → 问答卡 → 时间」。时间原本渲染在正文组件内部，需要在这种情况下
   // 延后到卡片之后；否则刷新后数据库按「正文、工具」还原时，时间会夹在二者中间。
   const hasPendingAskAfterLastText =
     lastTextIndex >= 0 &&
@@ -163,8 +160,6 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
           key={msg.id}
           message={msg}
           isLast={i === lastTextIndex && !deferAssistantMeta}
-          // 只把回调给最终回复那条 AI 消息，它据此在时间同行渲染「重新生成」
-          onRetry={inlineRetry && i === lastTextIndex && !deferAssistantMeta ? onRetry : undefined}
           onAskUserAnswer={onAskUserAnswer}
         />
       ))}
@@ -172,21 +167,7 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
       {deferAssistantMeta && (
         <AssistantMetaRow
           createdAt={messages[lastTextIndex].createdAt}
-          onRetry={inlineRetry ? onRetry : undefined}
         />
-      )}
-
-      {/* 兜底：这轮没有 AI 最终回复可挂（截断 / 报错）时，仍在对话末尾给一个独立的重试按钮。 */}
-      {canRetry && !lastTextIsAssistant && (
-        <button
-          type="button"
-          className={styles.retryBtn}
-          onClick={onRetry}
-          title="用当前项目状态重新生成这一轮（会追加一个新版本）"
-        >
-          <RotateCcw size={13} className={styles.retryIcon} />
-          <span>重新生成</span>
-        </button>
       )}
 
       {/* 中断续跑提示卡：最新一轮被打断（刷新 / 锁屏 / 断网）后显示。点「继续生成」从
@@ -220,6 +201,20 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
             </span>
           )}
         </div>
+      )}
+
+      {/* 会话级操作始终放在完整时间线最底部，不再嵌进某条正文的时间行。
+          这样后续出现工具卡、版本卡或「继续生成」时，按钮也不会夹到消息中间。 */}
+      {canRetry && (
+        <button
+          type="button"
+          className={styles.retryBtn}
+          onClick={onRetry}
+          title="用当前项目状态重新生成这一轮（会追加一个新版本）"
+        >
+          <RotateCcw size={13} className={styles.retryIcon} />
+          <span>重新生成</span>
+        </button>
       )}
 
       <div ref={endRef} className={styles.listEnd} aria-hidden />

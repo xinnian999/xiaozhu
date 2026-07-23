@@ -79,7 +79,7 @@
   gap: $space-1;
   margin-bottom: $space-4;
 
-  // 时间 + 「重新生成」一行：时间贴左，按钮推到右端
+  // 回复时间行；会话级「重新生成」统一由 MessageList 放在时间线最底部。
   .metaRow {
     display: flex;
     align-items: center;
@@ -90,34 +90,6 @@
     font-family: var(--font-mono);
     font-size: $fs-10;
     color: var(--color-text-faint);
-  }
-
-  // 「重新生成」幽灵按钮：低调，推到时间行最右侧
-  .retryBtn {
-    @include button-reset;
-    margin-left: auto;
-    display: inline-flex;
-    align-items: center;
-    gap: $space-1;
-    padding: $space-1 $space-2;
-    border-radius: $radius-sm;
-    color: var(--color-text-mute);
-    font-size: $fs-12;
-    transition: color $dur-base $ease-out, background $dur-base $ease-out;
-
-    // 图标 hover 时轻轻逆时针转一下，呼应「重新生成」的语义
-    .retryIcon {
-      transition: transform $dur-base $ease-out;
-    }
-
-    &:hover {
-      color: var(--color-text);
-      background: var(--color-bg-hover);
-
-      .retryIcon {
-        transform: rotate(-45deg);
-      }
-    }
   }
 }
 

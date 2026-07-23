@@ -77,13 +77,16 @@ http.interceptors.response.use(
 
 export type SSEEvent =
   | { type: 'message_delta'; text: string }
+  | { type: 'reasoning_delta'; id: string; text: string }
   | {
       type: 'reasoning'
+      id: string
       text: string
       tokens: number | null
       fallback: boolean
       truncated: boolean
     }
+  | { type: 'reasoning_discard'; id: string }
   | { type: 'file_write'; path: string; content: string }
   | { type: 'file_delete'; path: string }
   // AI 调 check_build 时推这个：把暂存的文件揭晓到预览并触发重新构建（无 payload，纯信号）

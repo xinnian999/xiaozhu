@@ -5,7 +5,6 @@ import {
   makeMessage,
   makeVersionCard,
   makeErrorCard,
-  makeReasoningCard,
 } from '@/store/session'
 import { useUIStore } from '@/store/ui'
 import { streamChat, streamAskResult, streamResume, type SSEEvent } from '@/lib/api'
@@ -39,6 +38,9 @@ export default function ChatSidebar() {
   const activeId = useSessionStore((s) => s.activeId)
   const createNew = useSessionStore((s) => s.createNew)
   const appendMessage = useSessionStore((s) => s.appendMessage)
+  const appendReasoningDelta = useSessionStore((s) => s.appendReasoningDelta)
+  const finalizeReasoning = useSessionStore((s) => s.finalizeReasoning)
+  const discardReasoning = useSessionStore((s) => s.discardReasoning)
   const truncateAfterLastUserMessage = useSessionStore((s) => s.truncateAfterLastUserMessage)
   const setToolResult = useSessionStore((s) => s.setToolResult)
   const upsertToolCall = useSessionStore((s) => s.upsertToolCall)
@@ -164,6 +166,14 @@ export default function ChatSidebar() {
       if (event.type === 'message_delta') {
         accumulated += event.text
         setStreamingText(accumulated)
+      } else if (event.type === 'reasoning_delta') {
+        // 推理正文按厂商 token/chunk 实时追加到同一张思考卡。若上一轮已有过场文字，
+        // 先固化它，再开始下一次模型调用的思考，保持时间线顺序。
+        if (accumulated) {
+          commitStreaming()
+          accumulated = ''
+        }
+        appendReasoningDelta(event.id, event.text)
       } else if (event.type === 'reasoning') {
         // 思考过程是独立的时间线卡片。若前一轮模型已输出过场文字，先固化正文，
         // 再插入下一次模型调用的思考卡，保持「正文 → 思考 → 工具」的真实顺序。
@@ -171,14 +181,16 @@ export default function ChatSidebar() {
           commitStreaming()
           accumulated = ''
         }
-        appendMessage(
-          makeReasoningCard(
-            event.text,
-            event.tokens,
-            event.fallback,
-            event.truncated,
-          ),
+        finalizeReasoning(
+          event.id,
+          event.text,
+          event.tokens,
+          event.fallback,
+          event.truncated,
         )
+      } else if (event.type === 'reasoning_discard') {
+        // NoBluffMiddleware 否决了一次候选回复：它的临时推理流也随候选一起撤回。
+        discardReasoning(event.id)
       } else if (event.type === 'tool_call') {
         // 工具调用前，先把本轮已累积的叙述（模型在调工具前说的话，
         // 如「好的，我先看看结构」）固化成一条独立气泡，再插工具卡。

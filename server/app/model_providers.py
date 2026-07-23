@@ -223,6 +223,63 @@ def reasoning_observation(response: object) -> ReasoningObservation:
     )
 
 
+def reasoning_delta_text(response: object) -> str:
+    """提取单个流式 chunk 的推理正文，并保留分片首尾空白。
+
+    ``reasoning_observation`` 面向完整响应，会 strip / 去重；流式场景若沿用它，
+    ``"I" + " am"`` 会被拼成 ``"Iam"``。这里按厂商最常见的字段优先级只取一份
+    原始增量，避免 ``content`` 与 ``content_blocks`` 同时存在时重复下发。
+    """
+
+    def raw_text(value: object) -> str:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            for key in (
+                "thinking",
+                "reasoning_content",
+                "reasoning",
+                "text",
+                "content",
+            ):
+                if key in value:
+                    text = raw_text(value[key])
+                    if text:
+                        return text
+            return ""
+        if isinstance(value, list):
+            return "".join(
+                raw_text(item)
+                for item in value
+                if isinstance(item, dict)
+                and str(item.get("type", "")).lower()
+                in {"thinking", "reasoning", "reasoning_content"}
+            )
+        return ""
+
+    additional = getattr(response, "additional_kwargs", {}) or {}
+    for field in _REASONING_FIELDS:
+        if field in additional:
+            text = raw_text(additional[field])
+            if text:
+                return text
+
+    content = getattr(response, "content", None)
+    if isinstance(content, list):
+        text = raw_text(content)
+        if text:
+            return text
+    elif isinstance(content, str):
+        inline_parts = _INLINE_THINKING_RE.findall(content)
+        if inline_parts:
+            return "".join(inline_parts)
+
+    try:
+        return raw_text(getattr(response, "content_blocks", []))
+    except Exception:
+        return ""
+
+
 class _SerialToolsMixin:
     """默认关闭并行工具调用，保持现有共享 AsyncSession 的串行约束。"""
 

@@ -29,7 +29,11 @@ from app.agents.prompts import SYSTEM_PROMPT
 from app.agents.tools import build_tools
 from app.checkpointer import get_checkpointer
 from app.llm import build_llm, models_by_id
-from app.model_providers import reasoning_observation, split_inline_thinking
+from app.model_providers import (
+    reasoning_delta_text,
+    reasoning_observation,
+    split_inline_thinking,
+)
 from app.models.file import File
 # 起别名 DBMessage 避免和 langchain_core.messages 概念混淆
 # （那边的 SystemMessage/HumanMessage 是 LLM 对话消息,这里的是数据库行）
@@ -609,6 +613,9 @@ async def _consume(
     """
     final_assistant_text = ""
     final_reasoning_payload: dict | None = None
+    reasoning_seq = 0
+    active_reasoning_id: str | None = None
+    active_reasoning_text = ""
     wrote_files = False
     truncated = False
     pending: dict[str, tuple[str, dict, DBMessage]] = dict(initial_pending or {})
@@ -625,6 +632,35 @@ async def _consume(
 
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": RECURSION_LIMIT}
 
+    def ensure_reasoning_id() -> str:
+        """为当前模型调用分配稳定 id，增量帧与完成帧用它更新同一张卡。"""
+        nonlocal reasoning_seq, active_reasoning_id
+        if active_reasoning_id is None:
+            reasoning_seq += 1
+            active_reasoning_id = f"{thread_id}:reasoning:{reasoning_seq}"
+        return active_reasoning_id
+
+    def reset_active_reasoning() -> None:
+        nonlocal active_reasoning_id, active_reasoning_text
+        active_reasoning_id = None
+        active_reasoning_text = ""
+
+    def reasoning_delta(raw: str) -> str:
+        """兼容厂商返回真正增量或「截至当前的累计文本」两种流形态。"""
+        nonlocal active_reasoning_text
+        if not raw or len(active_reasoning_text) >= REASONING_CONTENT_CAP:
+            return ""
+        if raw.startswith(active_reasoning_text):
+            delta = raw[len(active_reasoning_text) :]
+        elif active_reasoning_text.endswith(raw):
+            delta = ""
+        else:
+            delta = raw
+        remaining = REASONING_CONTENT_CAP - len(active_reasoning_text)
+        delta = delta[:remaining]
+        active_reasoning_text += delta
+        return delta
+
     try:
         # 同时开 updates(节点边界,做副作用)+ messages(token 流)。
         #
@@ -640,17 +676,37 @@ async def _consume(
         # 时机才整段一次性下发 ——①这条消息带了 tool_calls（tool_calls 存在本身就是
         # NoBluffMiddleware 判定"不算嘴炮"的充分条件，见 middleware.aafter_model 的
         # 第一行判断，可以立刻放行）；②真正跑到收尾阶段（本轮不会再回 model 节点了）。
-        # messages 模式这里只留 tool_call_chunks 的早出卡逻辑（和嘴炮风险无关,write_file
-        # 的参数早到早展示,不用等文字/整轮结束）。
+        # 普通回答正文继续等待节点确认后再发；推理字段则用 reasoning_delta 实时下发。
+        # 若 NoBluffMiddleware 把这次候选打回，下一次 model 流开始时会发
+        # reasoning_discard 删除旧临时卡，避免把被否决候选的思路留在时间线上。
         async for mode, chunk in agent.astream(
             graph_input,
             stream_mode=["updates", "messages"],
             config=config,
         ):
-            # ── messages 模式:LLM 的 token 增量,只用来做工具卡早出卡 ──
+            # ── messages 模式：推理正文 + 工具参数都按 token 尽早下发 ──
             if mode == "messages":
                 msg, meta = chunk
                 if meta.get("langgraph_node") == "model":
+                    # 上一次无工具候选若没有走到 END，而是又进入 model，说明它被
+                    # NoBluffMiddleware 否决了；移除已经流给前端的临时思考卡。
+                    if final_reasoning_payload is not None:
+                        stale_id = final_reasoning_payload.get("id")
+                        if stale_id:
+                            yield sse({"type": "reasoning_discard", "id": stale_id})
+                        final_reasoning_payload = None
+                        final_assistant_text = ""
+
+                    delta = reasoning_delta(reasoning_delta_text(msg))
+                    if delta:
+                        yield sse(
+                            {
+                                "type": "reasoning_delta",
+                                "id": ensure_reasoning_id(),
+                                "text": delta,
+                            }
+                        )
+
                     for tcc in getattr(msg, "tool_call_chunks", None) or []:
                         idx = tcc.get("index") or 0
                         cid = tcc.get("id")
@@ -708,11 +764,20 @@ async def _consume(
                                 "type": "error",
                                 "message": "模型输出超长被截断,文件没写完。请把需求拆小,或分多次生成。",
                             })
+                            if active_reasoning_id:
+                                yield sse(
+                                    {
+                                        "type": "reasoning_discard",
+                                        "id": active_reasoning_id,
+                                    }
+                                )
+                                reset_active_reasoning()
                             final_reasoning_payload = None
                             truncated = True
                             break
 
                         reasoning_payload = _reasoning_payload(m)
+                        reasoning_payload["id"] = ensure_reasoning_id()
                         text = extract_text(m)
                         if m.tool_calls:
                             # 这一轮又调了工具,说明之前(若有)攒着没发的
@@ -720,11 +785,21 @@ async def _consume(
                             # 真调用工具证明它不是"这一轮的最终回复",作废丢弃,
                             # 避免收尾时把这段旧文字和这次真实工作的回复一起冒出来。
                             final_assistant_text = ""
+                            if final_reasoning_payload and final_reasoning_payload.get(
+                                "id"
+                            ):
+                                yield sse(
+                                    {
+                                        "type": "reasoning_discard",
+                                        "id": final_reasoning_payload["id"],
+                                    }
+                                )
                             final_reasoning_payload = None
                             yield sse(reasoning_payload)
                             await _save_reasoning_message(
                                 db, db_lock, session_id, reasoning_payload
                             )
+                            reset_active_reasoning()
                             if text:
                                 print(f"[response] content={text} (同轮调用了工具)")
                                 # 带 tool_calls 的消息不可能被 NoBluffMiddleware 判定为嘴炮
@@ -772,6 +847,7 @@ async def _consume(
                             # 唯一时机,才第一次把它下发给前端 + 存库。
                             final_assistant_text = text
                             final_reasoning_payload = reasoning_payload
+                            reset_active_reasoning()
                             print(f"[最终回复候选] content={text}")
                     if truncated:
                         break
@@ -858,6 +934,11 @@ async def _consume(
         yield sse({"type": "done"})
 
     except GraphRecursionError:
+        unfinished_id = active_reasoning_id or (
+            final_reasoning_payload.get("id") if final_reasoning_payload else None
+        )
+        if unfinished_id:
+            yield sse({"type": "reasoning_discard", "id": unfinished_id})
         yield sse({
             "type": "error",
             "message": "已达最大轮次,自动停止以防死循环。",
@@ -865,6 +946,11 @@ async def _consume(
         await _cleanup_thread(thread_id)
         yield sse({"type": "done"})
     except Exception as e:
+        unfinished_id = active_reasoning_id or (
+            final_reasoning_payload.get("id") if final_reasoning_payload else None
+        )
+        if unfinished_id:
+            yield sse({"type": "reasoning_discard", "id": unfinished_id})
         yield sse({"type": "error", "message": str(e)})
         await _cleanup_thread(thread_id)
         yield sse({"type": "done"})

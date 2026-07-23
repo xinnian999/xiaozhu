@@ -84,6 +84,18 @@ type SessionState = {
   /** 回到"无激活会话"的空态首屏，不真正创建会话 */
   goToEmpty: () => void
   appendMessage: (msg: Message) => void
+  /** 追加一段推理正文；同一 streamId 始终更新同一张思考卡。 */
+  appendReasoningDelta: (streamId: string, text: string) => void
+  /** 推理流结束：用完整正文和 token 元数据锁定卡片，不重复新增。 */
+  finalizeReasoning: (
+    streamId: string,
+    text: string,
+    tokens: number | null,
+    fallback: boolean,
+    truncated: boolean,
+  ) => void
+  /** 候选回复被中间件否决时，移除已经流出的临时思考卡。 */
+  discardReasoning: (streamId: string) => void
   /** 重试前的截断：移除「最新一轮用户消息」之后的所有消息（旧回复 / 工具卡 / 版本卡），
    *  让对话看起来像把这条消息重新发了一遍。版本快照在后端保留，可在「版本历史」回滚。 */
   truncateAfterLastUserMessage: () => void
@@ -451,6 +463,100 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }))
   },
 
+  appendReasoningDelta: (streamId, text) => {
+    const id = get().activeId
+    if (!id || !text) return
+    set((s) => ({
+      sessions: s.sessions.map((sess) => {
+        if (sess.id !== id) return sess
+        const index = sess.messages.findIndex(
+          (m) => m.kind === 'reasoning' && m.reasoningStreamId === streamId,
+        )
+        if (index === -1) {
+          return {
+            ...sess,
+            messages: [
+              ...sess.messages,
+              makeMessage('assistant', text, {
+                kind: 'reasoning',
+                reasoningStreamId: streamId,
+                reasoningStreaming: true,
+              }),
+            ],
+          }
+        }
+        return {
+          ...sess,
+          messages: sess.messages.map((message, messageIndex) =>
+            messageIndex === index
+              ? {
+                  ...message,
+                  text: message.text + text,
+                  reasoningStreaming: true,
+                }
+              : message,
+          ),
+        }
+      }),
+    }))
+  },
+
+  finalizeReasoning: (streamId, text, tokens, fallback, truncated) => {
+    const id = get().activeId
+    if (!id) return
+    set((s) => ({
+      sessions: s.sessions.map((sess) => {
+        if (sess.id !== id) return sess
+        const index = sess.messages.findIndex(
+          (m) => m.kind === 'reasoning' && m.reasoningStreamId === streamId,
+        )
+        const completed = {
+          text,
+          reasoningStreamId: streamId,
+          reasoningStreaming: false,
+          reasoningTokens: tokens ?? undefined,
+          reasoningFallback: fallback,
+          reasoningTruncated: truncated,
+        }
+        if (index === -1) {
+          return {
+            ...sess,
+            messages: [
+              ...sess.messages,
+              makeMessage('assistant', text, {
+                kind: 'reasoning',
+                ...completed,
+              }),
+            ],
+          }
+        }
+        return {
+          ...sess,
+          messages: sess.messages.map((message, messageIndex) =>
+            messageIndex === index ? { ...message, ...completed } : message,
+          ),
+        }
+      }),
+    }))
+  },
+
+  discardReasoning: (streamId) => {
+    const id = get().activeId
+    if (!id) return
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === id
+          ? {
+              ...sess,
+              messages: sess.messages.filter(
+                (m) => !(m.kind === 'reasoning' && m.reasoningStreamId === streamId),
+              ),
+            }
+          : sess,
+      ),
+    }))
+  },
+
   truncateAfterLastUserMessage: () => {
     const id = get().activeId
     if (!id) return
@@ -589,9 +695,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set((s) => ({
       sessions: s.sessions.map((sess) => {
         if (sess.id !== id) return sess
-        const messages = sess.streamingText
+        const messages = (sess.streamingText
           ? [...sess.messages, makeMessage('assistant', sess.streamingText)]
           : sess.messages
+        ).map((message) =>
+          message.kind === 'reasoning' && message.reasoningStreaming
+            ? { ...message, reasoningStreaming: false }
+            : message,
+        )
         return { ...sess, messages, streamingText: '', isStreaming: false }
       }),
     }))

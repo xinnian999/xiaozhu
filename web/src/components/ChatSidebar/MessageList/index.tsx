@@ -42,6 +42,12 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
   const sessionId = session?.id ?? null
   // 本轮流式已累积的文本：非空 = 已经在吐字了，就不再显示「思考中」计时提示。
   const streamingText = session?.streamingText ?? ''
+  // 厂商正在回传真实推理正文时，由思考卡自身展示流式状态，不再叠一层通用计时提示。
+  const liveReasoning = [...messages].reverse().find(
+    (m) => m.kind === 'reasoning' && m.reasoningStreaming,
+  )
+  const liveReasoningTextLength = liveReasoning?.text.length ?? 0
+  const hasLiveReasoning = liveReasoning !== undefined
   // 最新工具卡：用于判断当前这段「静默等待」到底是在构建、修复，还是已经构建完等模型总结。
   // 注意：工具卡的 result 是异步回填的，下面的 phaseKey 会把「工具刚出现」和「工具有结果」
   // 当成两个阶段，计时也跟着重置，避免把整轮累计时间误显示成当前卡住时间。
@@ -59,7 +65,7 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
   // 避免把整轮累计耗时误显示成当前卡住时间。
   const [genSeconds, setGenSeconds] = useState(0)
   useEffect(() => {
-    if (!isStreaming || streamingText) {
+    if (!isStreaming || streamingText || hasLiveReasoning) {
       const resetTimer = setTimeout(() => setGenSeconds(0), 0)
       return () => clearTimeout(resetTimer)
     }
@@ -72,7 +78,7 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
       clearTimeout(resetTimer)
       clearInterval(timer)
     }
-  }, [isStreaming, streamingText, phaseKey])
+  }, [isStreaming, streamingText, hasLiveReasoning, phaseKey])
 
   // 新消息到来 / 进入思考态时滚动到底部
   useEffect(() => {
@@ -90,7 +96,7 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
     }
     // 同会话后续更新：即时平滑滚动
     endRef.current.scrollIntoView({ behavior: 'smooth' })
-  }, [sessionId, messages.length, isStreaming, resumable])
+  }, [sessionId, messages.length, liveReasoningTextLength, isStreaming, resumable])
 
   if (messages.length === 0 && !isStreaming) {
     return (
@@ -175,7 +181,7 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
           免得底部又冒一个 loading、和工具卡的转圈重复。空窗期 / 纯对话轮仍然显示。
           若久久没出字（推理型模型思考中、中转又不回传思维链），补一句耐心提示 + 计时，
           让「秒数在走」证明它还在干活，避免被当成卡死。 */}
-      {isStreaming && !tailToolRunning && (
+      {isStreaming && !tailToolRunning && !hasLiveReasoning && (
         <div className={styles.thinkingWrap} aria-live="polite">
           <span className={styles.thinking}>{thinkingLabel}</span>
           {genSeconds >= SLOW_GEN_HINT_AFTER && (

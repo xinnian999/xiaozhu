@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { FileText, FilePlus, FilePen, FolderOpen, Wrench, Bug, ChevronRight, GitCommit, RotateCcw, Loader2, Check, AlertCircle, HelpCircle, BrainCircuit } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -103,11 +103,19 @@ export default function MessageBubble({ message, isStreaming = false, onAskUserA
 // 思考过程：真实正文可展开；仅有 token / 无正文时显示低噪声兜底状态
 // ============================================
 function ReasoningCard({ message }: { message: Message }) {
+  const streaming = message.reasoningStreaming === true
   const fallback = message.reasoningFallback === true
   const expandable = !fallback && message.text.trim().length > 0
-  const [expanded, setExpanded] = useState(false)
+  const [expanded, setExpanded] = useState(streaming)
+  const bodyRef = useRef<HTMLDivElement>(null)
   const preview = message.text.replace(/\s+/g, ' ').trim()
   const previewText = preview.length > 72 ? `${preview.slice(0, 72)}…` : preview
+
+  // 长推理超过卡片最大高度后，跟随最新分片滚到底部。
+  useEffect(() => {
+    if (!streaming || !bodyRef.current) return
+    bodyRef.current.scrollTop = bodyRef.current.scrollHeight
+  }, [message.text, streaming])
 
   const header = (
     <>
@@ -115,13 +123,21 @@ function ReasoningCard({ message }: { message: Message }) {
         <BrainCircuit size={14} />
       </span>
       <span className={styles.reasoningHeading}>
-        <strong>{fallback ? '已完成思考' : '思考过程'}</strong>
-        <small>{fallback ? message.text : expanded ? '收起推理内容' : previewText}</small>
+        <strong>{streaming ? '正在思考' : fallback ? '已完成思考' : '思考过程'}</strong>
+        <small>
+          {streaming
+            ? '推理内容正在实时输出'
+            : fallback
+              ? message.text
+              : expanded
+                ? '收起推理内容'
+                : previewText}
+        </small>
       </span>
-      {message.reasoningTokens !== undefined && (
+      {!streaming && message.reasoningTokens !== undefined && (
         <span className={styles.reasoningTokens}>{message.reasoningTokens} tokens</span>
       )}
-      {expandable && (
+      {!streaming && expandable && (
         <ChevronRight
           size={13}
           className={`${styles.reasoningChevron} ${expanded ? styles.reasoningChevronOpen : ''}`}
@@ -132,8 +148,10 @@ function ReasoningCard({ message }: { message: Message }) {
   )
 
   return (
-    <section className={`${styles.reasoningCard} ${fallback ? styles.reasoningFallback : ''}`}>
-      {expandable ? (
+    <section
+      className={`${styles.reasoningCard} ${fallback ? styles.reasoningFallback : ''} ${streaming ? styles.reasoningStreaming : ''}`}
+    >
+      {!streaming && expandable ? (
         <button
           type="button"
           className={styles.reasoningHeader}
@@ -147,7 +165,11 @@ function ReasoningCard({ message }: { message: Message }) {
       )}
 
       {expanded && (
-        <div className={styles.reasoningBody}>
+        <div
+          ref={bodyRef}
+          className={`${styles.reasoningBody} ${streaming ? styles.reasoningBodyLive : ''}`}
+          aria-live={streaming ? 'polite' : undefined}
+        >
           <Markdown remarkPlugins={[remarkGfm]}>{message.text}</Markdown>
           {message.reasoningTruncated && (
             <span className={styles.reasoningTruncated}>内容已由服务端截断</span>

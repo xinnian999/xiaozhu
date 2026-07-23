@@ -36,6 +36,10 @@ export type Message = {
   reasoningFallback?: boolean
   /** kind === 'reasoning'：正文超过服务端上限时为 true */
   reasoningTruncated?: boolean
+  /** kind === 'reasoning'：一次模型调用内稳定的流 id，用于增量帧更新同一张卡 */
+  reasoningStreamId?: string
+  /** kind === 'reasoning'：true 表示推理正文仍在实时追加 */
+  reasoningStreaming?: boolean
   /** kind === 'tool' 时使用：工具名（如 write_file / read_file / list_files） */
   toolName?: string
   /** kind === 'tool' 时使用：工具参数的摘要（如 { path: 'src/App.tsx' }） */

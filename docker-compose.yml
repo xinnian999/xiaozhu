@@ -1,6 +1,6 @@
 # 小筑 生产部署 compose —— 在服务器上直接 `docker compose up -d` 即可拉起。
 #
-# 这个镜像是「单容器双进程」：Uvicorn 对外监听 8000，Bun Worker 仅在容器
+# 这个镜像是「单容器双进程」：Uvicorn 对外监听 8000，Node Worker 仅在容器
 # loopback 监听 8010。前端、API、构建和预览产物都由一个部署容器承载。
 #
 # 用法（服务器上）：

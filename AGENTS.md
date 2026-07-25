@@ -6,7 +6,7 @@
 ## 前端web
 
 ### 硬规则
-- 包管理器使用 `bun`
+- JavaScript 运行时使用 Node.js 22，包管理器使用 `pnpm`
 - 图标库使用 `lucide-react`
 - 样式使用 SCSS；组件样式优先 `index.module.scss`
 - 多些注释，代码注释必须使用中文

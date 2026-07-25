@@ -7,7 +7,7 @@
   - 模板就是一份已验证可由 Worker 构建的最小项目，零随机性。
 
 模板放在 server/templates/<name>/ 下面，就是一个真实的 vite 项目，
-本地可以 cd 进去 bun install && bun dev 验证它能跑。
+本地可以 cd 进去 pnpm install && pnpm dev 验证它能跑。
 """
 
 from pathlib import Path

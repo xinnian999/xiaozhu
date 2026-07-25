@@ -1,0 +1,4 @@
+packages:
+  - web
+  - web-admin
+  - sandbox-worker

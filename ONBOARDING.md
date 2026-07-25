@@ -65,16 +65,19 @@ opaque origin，父页面都不直接读 iframe DOM；截图走 iframe bridge �
 ## 常用命令
 
 ```bash
-bun install
-bun run dev
-bun run build
-bun run build:admin
+corepack enable
+pnpm install
+pnpm run dev
+pnpm run build
+pnpm run build:admin
 uv run --directory server alembic upgrade head
 uv run --directory server ruff check app tests
 uv run --directory server python -m unittest discover -s tests
 docker compose up -d --build
 SANDBOX_WORKER_TOKEN=config-check-placeholder docker compose config --no-env-resolution
 ```
+
+本地要求 Node.js 22，并通过 Corepack 使用仓库锁定的 pnpm 版本。
 
 本地端口：前台 9000、管理后台 9100、API 8000。Worker 使用 8010；Compose 只把它
 绑定到宿主机 `127.0.0.1`，不会暴露到公网网卡。

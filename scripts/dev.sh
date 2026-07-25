@@ -12,11 +12,11 @@ export SANDBOX_PREVIEW_DIR="${SANDBOX_PREVIEW_DIR:-$project_dir/data/sandbox-wor
 export SANDBOX_PREVIEW_ORIGIN="${SANDBOX_PREVIEW_ORIGIN:-http://preview.localhost:9000}"
 export SANDBOX_FRAME_ANCESTORS="${SANDBOX_FRAME_ANCESTORS:-http://localhost:9000}"
 
-exec bun x concurrently \
+exec pnpm exec concurrently \
   -k \
   -n web,admin,server,sandbox \
   -c cyan,yellow,magenta,green \
-  "bun run dev:web" \
-  "bun run dev:admin" \
-  "bun run dev:server" \
-  "bun run dev:sandbox"
+  "pnpm run dev:web" \
+  "pnpm run dev:admin" \
+  "pnpm run dev:server" \
+  "pnpm run dev:sandbox"

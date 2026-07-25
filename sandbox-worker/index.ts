@@ -1,3 +1,5 @@
+import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import {
   mkdir,
   readdir,
@@ -8,7 +10,9 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises'
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import path from 'node:path'
+import type { Readable } from 'node:stream'
 
 const port = Number.parseInt(process.env.SANDBOX_PORT || '8010', 10)
 const hostname = process.env.SANDBOX_HOST || '0.0.0.0'
@@ -91,13 +95,12 @@ let building = false
 
 class PayloadTooLargeError extends Error {}
 
-function json(body: unknown, status = 200): Response {
-  return Response.json(body, {
-    status,
-    headers: {
-      'Cache-Control': 'no-store',
-    },
+function json(response: ServerResponse, body: unknown, status = 200): void {
+  response.writeHead(status, {
+    'Cache-Control': 'no-store',
+    'Content-Type': 'application/json; charset=utf-8',
   })
+  response.end(JSON.stringify(body))
 }
 
 function clipLog(value: string): string {
@@ -106,32 +109,21 @@ function clipLog(value: string): string {
   return `${new TextDecoder().decode(bytes.slice(0, MAX_LOG_BYTES))}\n…日志已截断`
 }
 
-async function readJsonWithLimit(request: Request): Promise<unknown> {
-  if (!request.body) throw new Error('请求体不能为空')
-  const reader = request.body.getReader()
-  const chunks: Uint8Array[] = []
+async function readJsonWithLimit(request: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = []
   let totalBytes = 0
-  try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      totalBytes += value.byteLength
-      if (totalBytes > MAX_WIRE_BYTES) {
-        await reader.cancel().catch(() => {})
-        throw new PayloadTooLargeError('请求体超过 32MiB')
-      }
-      chunks.push(value)
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    totalBytes += buffer.byteLength
+    if (totalBytes > MAX_WIRE_BYTES) {
+      // 继续排空 socket，避免大请求提前返回时破坏 keep-alive 连接。
+      request.resume()
+      throw new PayloadTooLargeError('请求体超过 32MiB')
     }
-  } finally {
-    reader.releaseLock()
+    chunks.push(buffer)
   }
-
-  const body = new Uint8Array(totalBytes)
-  let offset = 0
-  for (const chunk of chunks) {
-    body.set(chunk, offset)
-    offset += chunk.byteLength
-  }
+  if (totalBytes === 0) throw new Error('请求体不能为空')
+  const body = Buffer.concat(chunks, totalBytes)
   return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body))
 }
 
@@ -717,9 +709,9 @@ async function runViteBuild(jobDir: string): Promise<{ code: number; output: str
     PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
     TMPDIR: process.env.TMPDIR || '/tmp',
   }
-  const proc = Bun.spawn(
+  const proc = spawn(
+    vite,
     [
-      vite,
       'build',
       '--config',
       path.join(jobDir, 'vite.config.ts'),
@@ -734,23 +726,35 @@ async function runViteBuild(jobDir: string): Promise<{ code: number; output: str
       cwd: jobDir,
       // 不把 Worker token 等服务端密钥传进用户源码参与的 Vite 构建进程。
       env: childEnv,
-      stdout: 'pipe',
-      stderr: 'pipe',
+      stdio: ['ignore', 'pipe', 'pipe'],
     },
   )
-  const stdoutPromise = new Response(proc.stdout).text()
-  const stderrPromise = new Response(proc.stderr).text()
+  const readOutput = async (stream: Readable): Promise<string> => {
+    stream.setEncoding('utf8')
+    let output = ''
+    for await (const chunk of stream) output += chunk
+    return output
+  }
+  const stdoutPromise = readOutput(proc.stdout)
+  const stderrPromise = readOutput(proc.stderr)
+  let spawnError = ''
+  proc.once('error', (error) => {
+    spawnError = error instanceof Error ? error.message : String(error)
+  })
+  const exitedPromise = new Promise<number>((resolve) => {
+    proc.once('close', (code) => resolve(code ?? 1))
+  })
   let timedOut = false
   const timer = setTimeout(() => {
     timedOut = true
-    try { proc.kill(9) } catch {}
+    try { proc.kill('SIGKILL') } catch {}
   }, buildTimeoutMs)
-  const code = await proc.exited
+  const code = await exitedPromise
   clearTimeout(timer)
   const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise])
   return {
     code,
-    output: clipLog([stdout, stderr].filter(Boolean).join('\n').trim()),
+    output: clipLog([spawnError, stdout, stderr].filter(Boolean).join('\n').trim()),
     timedOut,
   }
 }
@@ -773,7 +777,7 @@ async function pruneSessionPreviews(sessionId: string): Promise<void> {
 }
 
 async function cachedBuildId(payload: BuildPayload): Promise<string> {
-  const hasher = new Bun.CryptoHasher('sha256')
+  const hasher = createHash('sha256')
   hasher.update(`xiaozhu-sandbox-build\0${BUILD_CACHE_VERSION}\0`)
   for (const filePath of [...protectedFiles].sort()) {
     let content = await readFile(path.join(templateDir, filePath), 'utf8')
@@ -832,9 +836,10 @@ async function build(payload: BuildPayload): Promise<BuildResult> {
     }
     await mkdir(path.dirname(previewDir), { recursive: true })
     await rm(previewDir, { recursive: true, force: true })
-    await Bun.write(
+    await writeFile(
       path.join(jobDir, 'dist', '.xiaozhu-build.json'),
       JSON.stringify({ sessionId: payload.session_id, buildId, device: payload.device }),
+      'utf8',
     )
     await rename(path.join(jobDir, 'dist'), previewDir)
     await pruneSessionPreviews(payload.session_id)
@@ -852,29 +857,36 @@ async function build(payload: BuildPayload): Promise<BuildResult> {
 await mkdir(jobsDir, { recursive: true })
 await mkdir(previewsDir, { recursive: true })
 
-const server = Bun.serve({
-  port,
-  hostname,
-  async fetch(request) {
-    const url = new URL(request.url)
+const server = createServer(async (request, response) => {
+  try {
+    const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`)
     if (request.method === 'GET' && url.pathname === '/health') {
-      return json({ status: 'ok', building })
+      json(response, { status: 'ok', building })
+      return
     }
     if (request.method !== 'POST' || url.pathname !== '/internal/build') {
-      return new Response('Not found', { status: 404 })
+      response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
+      response.end('Not found')
+      return
     }
-    if (!workerToken || request.headers.get('Authorization') !== `Bearer ${workerToken}`) {
-      return json({ error: '无效 Worker 凭证' }, 401)
+    if (!workerToken || request.headers.authorization !== `Bearer ${workerToken}`) {
+      json(response, { error: '无效 Worker 凭证' }, 401)
+      return
     }
-    const contentEncoding = request.headers.get('content-encoding')
+    const contentEncoding = request.headers['content-encoding']
     if (contentEncoding && contentEncoding.toLowerCase() !== 'identity') {
-      return json({ error: '不支持压缩请求体' }, 415)
+      json(response, { error: '不支持压缩请求体' }, 415)
+      return
     }
-    const contentLength = Number.parseInt(request.headers.get('content-length') || '0', 10)
+    const contentLength = Number.parseInt(request.headers['content-length'] || '0', 10)
     if (contentLength > MAX_WIRE_BYTES) {
-      return json({ error: '请求体过大' }, 413)
+      json(response, { error: '请求体过大' }, 413)
+      return
     }
-    if (building) return json({ error: '当前已有构建任务' }, 429)
+    if (building) {
+      json(response, { error: '当前已有构建任务' }, 429)
+      return
+    }
 
     building = true
     try {
@@ -883,18 +895,26 @@ const server = Bun.serve({
         payload = validatePayload(await readJsonWithLimit(request))
       } catch (error) {
         if (error instanceof PayloadTooLargeError) {
-          return json({ error: error.message }, 413)
+          json(response, { error: error.message }, 413)
+          return
         }
-        return json({ error: error instanceof Error ? error.message : String(error) }, 400)
+        json(response, { error: error instanceof Error ? error.message : String(error) }, 400)
+        return
       }
-      return json(await build(payload))
+      json(response, await build(payload))
     } catch (error) {
       console.error('sandbox build failed', error)
-      return json({ error: 'Worker 内部错误' }, 500)
+      json(response, { error: 'Worker 内部错误' }, 500)
     } finally {
       building = false
     }
-  },
+  } catch (error) {
+    console.error('sandbox request failed', error)
+    if (!response.headersSent) json(response, { error: 'Worker 内部错误' }, 500)
+    else response.end()
+  }
 })
 
-console.log(`xiaozhu sandbox worker listening on ${server.hostname}:${server.port}`)
+server.listen(port, hostname, () => {
+  console.log(`xiaozhu sandbox worker listening on ${hostname}:${port}`)
+})

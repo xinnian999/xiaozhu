@@ -3,7 +3,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "bun run index.ts",
-    "test": "bun test"
+    "build": "tsc -p tsconfig.json",
+    "dev": "node --watch index.ts",
+    "start": "node dist/index.js",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "~6.0.2"
   }
 }

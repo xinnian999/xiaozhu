@@ -15,7 +15,7 @@
 
 # 依赖与虚拟环境（镜像内会重新安装）
 node_modules
-web/node_modules
+**/node_modules
 server/.venv
 
 # Python 缓存
@@ -25,7 +25,12 @@ server/.ruff_cache
 
 # 构建产物（镜像内会重新构建 / 重新拷贝）
 web/dist
+web-admin/dist
+sandbox-worker/dist
+server/templates/vite-react/dist
 server/static
+server/static-admin
+data
 
 # 本地数据库与备份（绝不进镜像！）
 **/*.db

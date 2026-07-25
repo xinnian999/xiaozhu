@@ -9,7 +9,7 @@
 # 前置条件：
 #   1. 已 docker login 到阿里云（脚本会提示你登录，见下方 LOGIN 说明）
 #   2. 阿里云命名空间 elin-common 已开启「自动创建仓库」，或已手动建好
-#      bun / python / uv 这三个仓库。
+#      node / python / uv 这三个仓库。
 
 set -euo pipefail
 
@@ -18,10 +18,10 @@ REGISTRY="crpi-a7p27yxlrmekg1a3.cn-beijing.personal.cr.aliyuncs.com"
 NAMESPACE="elin-common"
 
 # ── 镜像映射表：每行「官方源 => 阿里云仓库名:tag」──────────────────
-# 注意：阿里云个人版一个「仓库名」对应一个镜像，所以这里把 oven/bun 简化成 bun，
+# 注意：Node 通过国内代理读取，避免 Docker Hub 在国内网络下超时；
 #       astral-sh/uv 简化成 uv，避免私有库里出现多级路径。
 declare -a IMAGES=(
-  "oven/bun:1|bun:1"
+  "docker.1ms.run/library/node:22-bookworm-slim|node:22"
   "python:3.12-slim|python:3.12-slim"
   "ghcr.io/astral-sh/uv:latest|uv:latest"
 )

@@ -1,5 +1,5 @@
 #!/bin/sh
-# 生产单容器入口：迁移数据库后，同时监管 FastAPI 与 Bun Worker 两个进程。
+# 生产单容器入口：迁移数据库后，同时监管 FastAPI 与 Node Worker 两个进程。
 set -eu
 
 worker_pid=""
@@ -47,7 +47,7 @@ env -i \
   SANDBOX_DATA_DIR="$SANDBOX_DATA_DIR" \
   SANDBOX_TEMPLATE_DIR="$SANDBOX_TEMPLATE_DIR" \
   SANDBOX_WORKER_TOKEN="$SANDBOX_WORKER_TOKEN" \
-  /usr/local/bin/bun /app/sandbox-worker/index.ts &
+  /usr/local/bin/node /app/sandbox-worker/index.js &
 worker_pid=$!
 
 # API 启动前先确认内部 Worker 可用，避免容器表面存活但所有预览都失败。

@@ -47,10 +47,12 @@ sandbox-worker（固定依赖、单并发 Vite build）
 
 ## 本地开发
 
-前置：Bun、uv、Python 3.12+。宿主机开发先安装依赖并准备后端配置：
+前置：Node.js 22、Corepack、uv、Python 3.12+。宿主机开发先安装依赖并准备后端配置：
 
 ```bash
-bun install
+corepack enable
+pnpm install
+pnpm --dir server/templates/vite-react install --ignore-workspace
 uv sync --directory server
 cp server/.env.example server/.env
 ```
@@ -70,7 +72,7 @@ SANDBOX_FRAME_ANCESTORS=http://localhost:9000
 本地开发直接执行：
 
 ```bash
-bun run dev
+pnpm run dev
 ```
 
 该命令会同时启动前台、管理后台、FastAPI 和沙箱 Worker；首次运行会自动安装固定预览模板依赖，不要求启动 Docker。
@@ -95,8 +97,9 @@ SANDBOX_FRAME_ANCESTORS=http://localhost:8000
 ## 验证
 
 ```bash
-bun run build
-bun run build:admin
+pnpm run build
+pnpm run build:admin
+pnpm run build:worker
 uv run --directory server ruff check app tests
 uv run --directory server python -m unittest discover -s tests
 SANDBOX_WORKER_TOKEN=config-check-placeholder docker compose config --no-env-resolution
@@ -104,7 +107,7 @@ SANDBOX_WORKER_TOKEN=config-check-placeholder docker compose config --no-env-res
 
 ## 部署
 
-生产只需要 `elin/xiaozhu` 一个镜像和一个容器。镜像内包含 FastAPI、Bun Worker、
+生产只需要 `elin/xiaozhu` 一个镜像和一个容器。镜像内包含 FastAPI、Node Worker、
 固定模板依赖以及前后台静态资源；不要在 2GB 生产机上现场构建镜像，由 ACR 构建后
 直接拉取。主站域名与预览域名都反向代理到该容器的 `8000` 端口；预览域名只承载
 `/api/sandbox-preview/...`。`8010` 不映射到宿主机。

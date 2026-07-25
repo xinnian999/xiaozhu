@@ -1,7 +1,8 @@
 """后端预览沙箱 API。
 
-主 API 负责鉴权、签发预览 capability 和转发静态产物；真正的 Vite 构建在独立
-sandbox-worker 中完成。公网 Web 进程不接触 Docker Socket，也不直接执行用户项目。
+主 API 负责鉴权、签发预览 capability，并从共享目录直接返回静态产物；真正的 Vite
+构建在独立 sandbox-worker 中完成。公网 Web 进程不接触 Docker Socket，也不直接
+执行用户项目。
 """
 
 import base64
@@ -10,11 +11,13 @@ import hashlib
 import hmac
 import re
 import time
+from pathlib import Path
 from typing import Literal
-from urllib.parse import quote, urlsplit
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ValidationError, field_validator
 
 from app.config import settings
@@ -170,97 +173,41 @@ def _read_preview_capability(capability: str) -> tuple[str, str]:
     return session_id, build_id
 
 
-def _safe_preview_asset_path(asset_path: str) -> str:
+def _safe_preview_asset_path(asset_path: str) -> tuple[str, ...]:
     if not asset_path:
-        return "index.html"
+        return ("index.html",)
     if "\0" in asset_path or "\\" in asset_path or asset_path.startswith("/"):
         raise HTTPException(status_code=404, detail="预览资源不存在")
     parts = asset_path.split("/")
     if any(part in {"", ".", ".."} for part in parts):
         raise HTTPException(status_code=404, detail="预览资源不存在")
-    return "/".join(quote(part, safe="-._~") for part in parts)
+    return tuple(parts)
 
 
-async def _proxy_preview_asset(
+def _read_preview_asset(
     capability: str,
     asset_path: str,
     request_host: str,
 ) -> Response:
-    if not settings.sandbox_worker_token:
-        raise HTTPException(status_code=503, detail="沙箱 Worker 密钥未配置")
     session_id, build_id = _read_preview_capability(capability)
-    safe_asset_path = _safe_preview_asset_path(asset_path)
-    worker_url = (
-        f"{settings.sandbox_worker_url.rstrip('/')}/preview/"
-        f"{quote(session_id, safe='')}/{quote(build_id, safe='')}/{safe_asset_path}"
-    )
+    path_parts = _safe_preview_asset_path(asset_path)
+    preview_root = Path(settings.sandbox_preview_dir).resolve()
+    build_root = (preview_root / session_id / build_id).resolve()
+    target = build_root.joinpath(*path_parts)
     try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
-            async with client.stream(
-                "GET",
-                worker_url,
-                headers={
-                    "Accept-Encoding": "identity",
-                    "Authorization": f"Bearer {settings.sandbox_worker_token}",
-                },
-            ) as upstream:
-                if 300 <= upstream.status_code < 400:
-                    raise HTTPException(
-                        status_code=502,
-                        detail="沙箱 Worker 返回了不允许的重定向",
-                    )
-                if upstream.status_code == status.HTTP_404_NOT_FOUND:
-                    raise HTTPException(status_code=404, detail="预览资源不存在")
-                if upstream.status_code >= 500:
-                    raise HTTPException(status_code=502, detail="沙箱 Worker 预览失败")
-                if not 200 <= upstream.status_code < 300:
-                    raise HTTPException(
-                        status_code=upstream.status_code,
-                        detail="沙箱拒绝预览请求",
-                    )
-
-                raw_content_length = upstream.headers.get("content-length")
-                if raw_content_length is not None:
-                    try:
-                        content_length = int(raw_content_length)
-                    except ValueError:
-                        raise HTTPException(
-                            status_code=502,
-                            detail="沙箱 Worker 返回的资源长度无效",
-                        ) from None
-                    if content_length < 0:
-                        raise HTTPException(
-                            status_code=502,
-                            detail="沙箱 Worker 返回的资源长度无效",
-                        )
-                    if content_length > _MAX_PREVIEW_ASSET_BYTES:
-                        raise HTTPException(
-                            status_code=502,
-                            detail="沙箱 Worker 返回的预览资源过大",
-                        )
-
-                body = bytearray()
-                async for chunk in upstream.aiter_bytes():
-                    if len(body) + len(chunk) > _MAX_PREVIEW_ASSET_BYTES:
-                        raise HTTPException(
-                            status_code=502,
-                            detail="沙箱 Worker 返回的预览资源过大",
-                        )
-                    body.extend(chunk)
-                upstream_status = upstream.status_code
-                content_type = upstream.headers.get("content-type")
-    except httpx.TimeoutException as exc:
-        raise HTTPException(status_code=504, detail="后端沙箱预览超时") from exc
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=503, detail="无法连接沙箱 Worker") from exc
-
-    headers = _preview_headers(request_host)
-    if content_type:
-        headers["Content-Type"] = content_type
-    return Response(
-        content=bytes(body),
-        status_code=upstream_status,
-        headers=headers,
+        actual_build_root = build_root.resolve(strict=True)
+        actual_target = target.resolve(strict=True)
+        actual_target.relative_to(actual_build_root)
+        target_stat = actual_target.stat()
+    except (FileNotFoundError, NotADirectoryError, ValueError):
+        raise HTTPException(status_code=404, detail="预览资源不存在") from None
+    if not actual_target.is_file() or target.is_symlink():
+        raise HTTPException(status_code=404, detail="预览资源不存在")
+    if target_stat.st_size > _MAX_PREVIEW_ASSET_BYTES:
+        raise HTTPException(status_code=413, detail="预览资源过大")
+    return FileResponse(
+        actual_target,
+        headers=_preview_headers(request_host),
     )
 
 
@@ -370,7 +317,7 @@ async def read_sandbox_preview_index(
     request: Request,
 ) -> Response:
     """以短期 capability 读取入口页；iframe 导航无需暴露登录 JWT。"""
-    return await _proxy_preview_asset(
+    return _read_preview_asset(
         capability,
         "index.html",
         request.headers.get("host", ""),
@@ -383,8 +330,8 @@ async def read_sandbox_preview_asset(
     asset_path: str,
     request: Request,
 ) -> Response:
-    """只代理 capability 绑定的固定 Worker 构建，浏览器不能指定任意上游 URL。"""
-    return await _proxy_preview_asset(
+    """只读取 capability 绑定的共享目录产物，浏览器不能指定任意文件根目录。"""
+    return _read_preview_asset(
         capability,
         asset_path,
         request.headers.get("host", ""),

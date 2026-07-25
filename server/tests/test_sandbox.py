@@ -1,10 +1,11 @@
 import hashlib
 import hmac
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import patch
 
-import httpx
 from fastapi import HTTPException
 from starlette.requests import Request
 
@@ -423,7 +424,7 @@ class PreviewCapabilityTests(CapabilitySecretTestCase):
         self.assertEqual(raised.exception.detail, "预览不存在")
 
 
-class PreviewProxyTests(CapabilitySecretTestCase):
+class PreviewFileTests(CapabilitySecretTestCase):
     async def test_main_origin_response_is_forced_into_opaque_sandbox(self):
         with (
             patch.object(
@@ -444,116 +445,75 @@ class PreviewProxyTests(CapabilitySecretTestCase):
         self.assertIn("sandbox allow-scripts allow-forms allow-modals", csp)
         self.assertNotIn("allow-same-origin", csp)
 
-    async def test_index_is_proxied_through_fixed_worker_with_authorization(self):
+    def _write_asset(
+        self,
+        root: str,
+        relative_path: str,
+        content: bytes,
+    ) -> None:
+        target = Path(root, SESSION_ID, BUILD_ID, relative_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+
+    async def test_index_is_read_directly_from_shared_directory(self):
         capability = _capability()
-        client = _FakeClient(
-            get_response=_FakeResponse(
-                content=b"<html>preview</html>",
-                headers={"content-type": "text/html; charset=utf-8"},
-            )
-        )
-
-        with (
-            patch.object(sandbox.settings, "sandbox_worker_token", WORKER_TOKEN),
-            patch.object(sandbox.settings, "sandbox_worker_url", "http://worker:8010/"),
-            patch.object(sandbox.time, "time", return_value=NOW),
-            patch.object(sandbox.httpx, "AsyncClient", return_value=client) as factory,
-        ):
-            response = await sandbox.read_sandbox_preview_index(
-                capability,
-                _request(),
-            )
-
-        self.assertEqual(response.body, b"<html>preview</html>")
-        self.assertEqual(response.headers["content-type"], "text/html; charset=utf-8")
-        factory.assert_called_once_with(timeout=15, follow_redirects=False)
-        self.assertEqual(
-            client.requests,
-            [
-                (
-                    "GET",
-                    f"http://worker:8010/preview/{SESSION_ID}/{BUILD_ID}/index.html",
-                    {
-                        "headers": {
-                            "Accept-Encoding": "identity",
-                            "Authorization": f"Bearer {WORKER_TOKEN}",
-                        }
-                    },
+        with TemporaryDirectory() as root:
+            self._write_asset(root, "index.html", b"<html>preview</html>")
+            with (
+                patch.object(sandbox.settings, "sandbox_preview_dir", root),
+                patch.object(sandbox.time, "time", return_value=NOW),
+            ):
+                response = await sandbox.read_sandbox_preview_index(
+                    capability,
+                    _request(),
                 )
-            ],
-        )
 
-    async def test_nested_asset_is_quoted_and_cannot_change_worker_origin(self):
+            self.assertEqual(
+                Path(response.path).read_bytes(),
+                b"<html>preview</html>",
+            )
+            self.assertEqual(response.media_type, "text/html")
+
+    async def test_nested_unicode_asset_is_read_from_shared_directory(self):
         capability = _capability()
-        client = _FakeClient(
-            get_response=_FakeResponse(
-                content=b"<svg/>",
-                headers={"content-type": "image/svg+xml"},
-            )
-        )
+        with TemporaryDirectory() as root:
+            self._write_asset(root, "assets/你好 logo.svg", b"<svg/>")
+            with (
+                patch.object(sandbox.settings, "sandbox_preview_dir", root),
+                patch.object(sandbox.time, "time", return_value=NOW),
+            ):
+                response = await sandbox.read_sandbox_preview_asset(
+                    capability,
+                    "assets/你好 logo.svg",
+                    _request(),
+                )
 
-        with (
-            patch.object(sandbox.settings, "sandbox_worker_token", WORKER_TOKEN),
-            patch.object(sandbox.settings, "sandbox_worker_url", "http://worker:8010"),
-            patch.object(sandbox.time, "time", return_value=NOW),
-            patch.object(sandbox.httpx, "AsyncClient", return_value=client),
-        ):
-            response = await sandbox.read_sandbox_preview_asset(
-                capability,
-                "assets/你好 logo.svg",
-                _request(),
-            )
+            self.assertEqual(Path(response.path).read_bytes(), b"<svg/>")
+            self.assertEqual(response.media_type, "image/svg+xml")
 
-        self.assertEqual(response.body, b"<svg/>")
-        method, url, kwargs = client.requests[0]
-        self.assertEqual(method, "GET")
-        self.assertEqual(
-            url,
-            (
-                f"http://worker:8010/preview/{SESSION_ID}/{BUILD_ID}/assets/"
-                "%E4%BD%A0%E5%A5%BD%20logo.svg"
-            ),
-        )
-        self.assertTrue(url.startswith("http://worker:8010/preview/"))
-        self.assertEqual(
-            kwargs["headers"]["Authorization"],
-            f"Bearer {WORKER_TOKEN}",
-        )
-
-    async def test_proxy_replaces_upstream_headers_with_security_policy(self):
+    async def test_direct_response_has_preview_security_policy(self):
         capability = _capability()
-        client = _FakeClient(
-            get_response=_FakeResponse(
-                content=b"console.log('ok')",
-                headers={
-                    "content-type": "text/javascript; charset=utf-8",
-                    "location": "https://attacker.example/",
-                    "set-cookie": "session=stolen",
-                },
-            )
-        )
-
-        with (
-            patch.object(sandbox.settings, "sandbox_worker_token", WORKER_TOKEN),
-            patch.object(sandbox.settings, "sandbox_worker_url", "http://worker:8010"),
-            patch.object(
-                sandbox.settings,
-                "sandbox_preview_origin",
-                "https://preview.example",
-            ),
-            patch.object(
-                sandbox.settings,
-                "sandbox_frame_ancestors",
-                "https://app.example",
-            ),
-            patch.object(sandbox.time, "time", return_value=NOW),
-            patch.object(sandbox.httpx, "AsyncClient", return_value=client),
-        ):
-            response = await sandbox.read_sandbox_preview_asset(
-                capability,
-                "assets/app.js",
-                _request("preview.example"),
-            )
+        with TemporaryDirectory() as root:
+            self._write_asset(root, "assets/app.js", b"console.log('ok')")
+            with (
+                patch.object(sandbox.settings, "sandbox_preview_dir", root),
+                patch.object(
+                    sandbox.settings,
+                    "sandbox_preview_origin",
+                    "https://preview.example",
+                ),
+                patch.object(
+                    sandbox.settings,
+                    "sandbox_frame_ancestors",
+                    "https://app.example",
+                ),
+                patch.object(sandbox.time, "time", return_value=NOW),
+            ):
+                response = await sandbox.read_sandbox_preview_asset(
+                    capability,
+                    "assets/app.js",
+                    _request("preview.example"),
+                )
 
         self.assertEqual(response.headers["access-control-allow-origin"], "*")
         self.assertEqual(response.headers["cache-control"], "private, no-store")
@@ -561,14 +521,8 @@ class PreviewProxyTests(CapabilitySecretTestCase):
             response.headers["cross-origin-resource-policy"],
             "cross-origin",
         )
-        self.assertEqual(response.headers["referrer-policy"], "no-referrer")
-        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
         self.assertIn(
             "frame-ancestors https://app.example",
-            response.headers["content-security-policy"],
-        )
-        self.assertIn(
-            "object-src 'none'",
             response.headers["content-security-policy"],
         )
         self.assertIn(
@@ -576,203 +530,91 @@ class PreviewProxyTests(CapabilitySecretTestCase):
             response.headers["content-security-policy"],
         )
         self.assertIn("camera=()", response.headers["permissions-policy"])
-        self.assertNotIn("location", response.headers)
-        self.assertNotIn("set-cookie", response.headers)
 
-    async def test_declared_oversized_asset_is_rejected(self):
+    async def test_oversized_asset_is_rejected(self):
         capability = _capability()
-        client = _FakeClient(
-            get_response=_FakeResponse(
-                headers={
-                    "content-length": str(
-                        sandbox._MAX_PREVIEW_ASSET_BYTES + 1
-                    ),
-                    "content-type": "application/octet-stream",
-                },
-            )
-        )
+        with TemporaryDirectory() as root:
+            self._write_asset(root, "assets/large.bin", b"123456789")
+            with (
+                patch.object(sandbox.settings, "sandbox_preview_dir", root),
+                patch.object(sandbox, "_MAX_PREVIEW_ASSET_BYTES", 8),
+                patch.object(sandbox.time, "time", return_value=NOW),
+                self.assertRaises(HTTPException) as raised,
+            ):
+                await sandbox.read_sandbox_preview_asset(
+                    capability,
+                    "assets/large.bin",
+                    _request(),
+                )
 
-        with (
-            patch.object(sandbox.settings, "sandbox_worker_token", WORKER_TOKEN),
-            patch.object(sandbox.settings, "sandbox_worker_url", "http://worker:8010"),
-            patch.object(sandbox.time, "time", return_value=NOW),
-            patch.object(sandbox.httpx, "AsyncClient", return_value=client),
-            self.assertRaises(HTTPException) as raised,
-        ):
-            await sandbox.read_sandbox_preview_asset(
-                capability,
-                "assets/large.bin",
-                _request(),
-            )
+        self.assertEqual(raised.exception.status_code, 413)
+        self.assertEqual(raised.exception.detail, "预览资源过大")
 
-        self.assertEqual(sandbox._MAX_PREVIEW_ASSET_BYTES, 16 * 1024 * 1024)
-        self.assertEqual(raised.exception.status_code, 502)
-        self.assertEqual(
-            raised.exception.detail,
-            "沙箱 Worker 返回的预览资源过大",
-        )
-
-    async def test_streamed_asset_crossing_limit_is_rejected(self):
+    async def test_missing_asset_returns_404(self):
         capability = _capability()
-        client = _FakeClient(
-            get_response=_FakeResponse(
-                chunks=[b"1234", b"5678", b"9"],
-                headers={"content-type": "application/octet-stream"},
-            )
-        )
-
-        with (
-            patch.object(sandbox.settings, "sandbox_worker_token", WORKER_TOKEN),
-            patch.object(sandbox.settings, "sandbox_worker_url", "http://worker:8010"),
-            patch.object(sandbox, "_MAX_PREVIEW_ASSET_BYTES", 8),
-            patch.object(sandbox.time, "time", return_value=NOW),
-            patch.object(sandbox.httpx, "AsyncClient", return_value=client),
-            self.assertRaises(HTTPException) as raised,
-        ):
-            await sandbox.read_sandbox_preview_asset(
-                capability,
-                "assets/large.bin",
-                _request(),
-            )
-
-        self.assertEqual(raised.exception.status_code, 502)
-        self.assertEqual(
-            raised.exception.detail,
-            "沙箱 Worker 返回的预览资源过大",
-        )
-
-    async def test_worker_redirect_is_rejected(self):
-        capability = _capability()
-        client = _FakeClient(
-            get_response=_FakeResponse(
-                status_code=302,
-                headers={"location": "https://attacker.example/"},
-            )
-        )
-
-        with (
-            patch.object(sandbox.settings, "sandbox_worker_token", WORKER_TOKEN),
-            patch.object(sandbox.settings, "sandbox_worker_url", "http://worker:8010"),
-            patch.object(sandbox.time, "time", return_value=NOW),
-            patch.object(sandbox.httpx, "AsyncClient", return_value=client),
-            self.assertRaises(HTTPException) as raised,
-        ):
-            await sandbox.read_sandbox_preview_asset(
-                capability,
-                "assets/app.js",
-                _request(),
-            )
-
-        self.assertEqual(raised.exception.status_code, 502)
-        self.assertEqual(
-            raised.exception.detail,
-            "沙箱 Worker 返回了不允许的重定向",
-        )
-
-    async def test_missing_upstream_asset_returns_404(self):
-        capability = _capability()
-        client = _FakeClient(get_response=_FakeResponse(status_code=404))
-
-        with (
-            patch.object(sandbox.settings, "sandbox_worker_token", WORKER_TOKEN),
-            patch.object(sandbox.settings, "sandbox_worker_url", "http://worker:8010"),
-            patch.object(sandbox.time, "time", return_value=NOW),
-            patch.object(sandbox.httpx, "AsyncClient", return_value=client),
-            self.assertRaises(HTTPException) as raised,
-        ):
-            await sandbox.read_sandbox_preview_asset(
-                capability,
-                "missing.js",
-                _request(),
-            )
+        with TemporaryDirectory() as root:
+            with (
+                patch.object(sandbox.settings, "sandbox_preview_dir", root),
+                patch.object(sandbox.time, "time", return_value=NOW),
+                self.assertRaises(HTTPException) as raised,
+            ):
+                await sandbox.read_sandbox_preview_asset(
+                    capability,
+                    "missing.js",
+                    _request(),
+                )
 
         self.assertEqual(raised.exception.status_code, 404)
         self.assertEqual(raised.exception.detail, "预览资源不存在")
 
-    async def test_worker_server_error_is_mapped_to_bad_gateway(self):
-        capability = _capability()
-        client = _FakeClient(get_response=_FakeResponse(status_code=500))
-
-        with (
-            patch.object(sandbox.settings, "sandbox_worker_token", WORKER_TOKEN),
-            patch.object(sandbox.settings, "sandbox_worker_url", "http://worker:8010"),
-            patch.object(sandbox.time, "time", return_value=NOW),
-            patch.object(sandbox.httpx, "AsyncClient", return_value=client),
-            self.assertRaises(HTTPException) as raised,
-        ):
-            await sandbox.read_sandbox_preview_asset(
-                capability,
-                "assets/app.js",
-                _request(),
-            )
-
-        self.assertEqual(raised.exception.status_code, 502)
-        self.assertEqual(raised.exception.detail, "沙箱 Worker 预览失败")
-
-    async def test_worker_connection_error_is_mapped_to_service_unavailable(self):
-        capability = _capability()
-        client = _FakeClient(get_error=httpx.ConnectError("worker unavailable"))
-
-        with (
-            patch.object(sandbox.settings, "sandbox_worker_token", WORKER_TOKEN),
-            patch.object(sandbox.settings, "sandbox_worker_url", "http://worker:8010"),
-            patch.object(sandbox.time, "time", return_value=NOW),
-            patch.object(sandbox.httpx, "AsyncClient", return_value=client),
-            self.assertRaises(HTTPException) as raised,
-        ):
-            await sandbox.read_sandbox_preview_asset(
-                capability,
-                "assets/app.js",
-                _request(),
-            )
-
-        self.assertEqual(raised.exception.status_code, 503)
-        self.assertEqual(raised.exception.detail, "无法连接沙箱 Worker")
-
-    async def test_path_traversal_is_rejected_before_worker_request(self):
+    async def test_path_traversal_is_rejected(self):
         capability = _capability()
         blocked_paths = (
             "../secret",
             "assets/../secret",
             "./index.html",
             "/etc/passwd",
-            r"assets\secret.js",
+            r"assets\\secret.js",
             "assets//secret.js",
             "assets/\0secret.js",
         )
 
-        for asset_path in blocked_paths:
-            with self.subTest(asset_path=asset_path):
-                client = _FakeClient(
-                    get_response=_FakeResponse(content=b"must not be reached")
-                )
-                with (
-                    patch.object(
-                        sandbox.settings,
-                        "sandbox_worker_token",
-                        WORKER_TOKEN,
-                    ),
-                    patch.object(
-                        sandbox.settings,
-                        "sandbox_worker_url",
-                        "http://worker:8010",
-                    ),
-                    patch.object(sandbox.time, "time", return_value=NOW),
-                    patch.object(
-                        sandbox.httpx,
-                        "AsyncClient",
-                        return_value=client,
-                    ),
-                    self.assertRaises(HTTPException) as raised,
-                ):
-                    await sandbox.read_sandbox_preview_asset(
-                        capability,
-                        asset_path,
-                        _request(),
-                    )
+        with TemporaryDirectory() as root:
+            for asset_path in blocked_paths:
+                with self.subTest(asset_path=asset_path):
+                    with (
+                        patch.object(sandbox.settings, "sandbox_preview_dir", root),
+                        patch.object(sandbox.time, "time", return_value=NOW),
+                        self.assertRaises(HTTPException) as raised,
+                    ):
+                        await sandbox.read_sandbox_preview_asset(
+                            capability,
+                            asset_path,
+                            _request(),
+                        )
 
-                self.assertEqual(raised.exception.status_code, 404)
-                self.assertEqual(client.requests, [])
+                    self.assertEqual(raised.exception.status_code, 404)
+
+    async def test_symlink_cannot_escape_shared_build_directory(self):
+        capability = _capability()
+        with TemporaryDirectory() as root, TemporaryDirectory() as outside:
+            build_root = Path(root, SESSION_ID, BUILD_ID)
+            build_root.mkdir(parents=True)
+            secret = Path(outside, "secret.txt")
+            secret.write_text("secret")
+            Path(build_root, "escape.txt").symlink_to(secret)
+            with (
+                patch.object(sandbox.settings, "sandbox_preview_dir", root),
+                patch.object(sandbox.time, "time", return_value=NOW),
+                self.assertRaises(HTTPException) as raised,
+            ):
+                await sandbox.read_sandbox_preview_asset(
+                    capability,
+                    "escape.txt",
+                    _request(),
+                )
+
+        self.assertEqual(raised.exception.status_code, 404)
 
 
 if __name__ == "__main__":

@@ -10,16 +10,18 @@
   ├─ SSE 对话 / 文件编辑
   ├─ POST 当前文件快照到主 API
   └─ iframe 加载 preview origin 下的 /api/sandbox-preview/{capability}/...
-                         │ 主 API 逐字节代理
-FastAPI 主服务（鉴权、Agent、SQLite、预览 capability）
-                         │ Docker 内网 + Bearer Token
-sandbox-worker（固定依赖、单并发 Vite build、内部静态预览）
+                         │ 主 API 直接读取共享静态产物
+FastAPI 主服务（鉴权、Agent、SQLite、预览 capability、静态预览）
+                         │ Docker 内网 + Bearer Token（只发构建请求）
+sandbox-worker（固定依赖、单并发 Vite build）
+                         │ 写入共享预览目录
 ```
 
 浏览器不运行 Node，不下载运行时或依赖快照。主服务也不持有 Docker Socket；
-它把已鉴权的文件快照转发给 Worker，并通过带不可猜 capability 的主站路径逐字节
-代理构建产物。Worker 端口只在 Compose 内网和宿主机 loopback 可见，浏览器不会
-直接连接 Worker，公网网卡也不应发布该端口。
+它把已鉴权的文件快照转发给 Worker。Worker 按源码内容缓存构建，相同版本直接复用
+已有产物；新版本构建一次并把静态产物写入共享目录，
+主服务通过带不可猜 capability 的路径直接返回产物。Worker 端口只在 Compose 内网
+和宿主机 loopback 可见，浏览器不会直接连接 Worker，公网网卡也不应发布该端口。
 
 ## 沙箱边界
 
@@ -58,16 +60,18 @@ JWT_SECRET=随机长密钥
 SANDBOX_WORKER_TOKEN=另一个随机长密钥
 SANDBOX_CAPABILITY_SECRET=第三个随机长密钥
 SANDBOX_WORKER_URL=http://127.0.0.1:8010
+SANDBOX_PREVIEW_DIR=../data/sandbox-worker-dev/previews
 SANDBOX_PREVIEW_ORIGIN=http://preview.localhost:9000
 SANDBOX_FRAME_ANCESTORS=http://localhost:9000
 ```
 
-先用 Compose 只启动 Worker（端口只绑定宿主机 `127.0.0.1`），再启动源码服务：
+本地开发直接执行：
 
 ```bash
-SANDBOX_WORKER_TOKEN=与-server/.env-相同的密钥 docker compose up -d sandbox-worker
 bun run dev
 ```
+
+该命令会同时启动前台、管理后台、FastAPI 和沙箱 Worker；首次运行会自动安装固定预览模板依赖，不要求启动 Docker。
 
 开发地址：前台 `http://localhost:9000`，管理后台
 `http://localhost:9100/admin/`，API `http://localhost:8000`。
@@ -76,6 +80,7 @@ bun run dev
 
 ```dotenv
 SANDBOX_WORKER_URL=http://sandbox-worker:8010
+SANDBOX_PREVIEW_DIR=/app/data/sandbox-worker/previews
 SANDBOX_CAPABILITY_SECRET=只注入主应用的随机长密钥
 SANDBOX_PREVIEW_ORIGIN=http://preview.localhost:8000
 SANDBOX_FRAME_ANCESTORS=http://localhost:8000
@@ -103,13 +108,14 @@ SANDBOX_WORKER_TOKEN=config-check-placeholder docker compose config --no-env-res
 - `elin/xiaozhu-sandbox`：固定模板依赖与构建 Worker。
 
 不要在 2GB 生产机上现场构建 Worker 镜像；由 ACR 构建后让服务器直接拉取。
-主站域名与预览域名都反向代理到主应用的 `8000` 端口；预览域名只承载
+两个容器共享预览产物目录。主站域名与预览域名都反向代理到主应用的 `8000` 端口；预览域名只承载
 `/api/sandbox-preview/...`。二者都不直接连接 Worker，也不要把 Worker 端口发布公网。
 
 生产环境设置：
 
 ```dotenv
 SANDBOX_WORKER_URL=http://sandbox-worker:8010
+SANDBOX_PREVIEW_DIR=/app/data/sandbox-worker/previews
 SANDBOX_WORKER_TOKEN=随机长密钥
 SANDBOX_CAPABILITY_SECRET=另一个仅主应用持有的随机长密钥
 SANDBOX_PREVIEW_ORIGIN=https://preview.xiaozhu.elin521.cn
@@ -131,6 +137,6 @@ web/                    主前端
 web-admin/              管理后台
 server/app/             FastAPI、Agent、数据模型
 server/templates/       Worker 使用的可信项目模板
-sandbox-worker/         构建与内部预览服务
+sandbox-worker/         独立构建 Worker
 server/alembic/         数据库迁移
 ```

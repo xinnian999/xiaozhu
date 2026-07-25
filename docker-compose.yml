@@ -33,6 +33,7 @@ services:
     environment:
       - DATABASE_URL=sqlite+aiosqlite:////app/data/xiaozhu.db
       - SANDBOX_WORKER_URL=http://sandbox-worker:8010
+      - SANDBOX_PREVIEW_DIR=/app/data/sandbox-worker/previews
 
     # 把宿主机 ./data 挂到容器 /app/data，让 SQLite 数据库文件持久化。
     # 升级 / 重建容器后数据还在。

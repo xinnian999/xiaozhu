@@ -107,6 +107,8 @@ class Settings(BaseSettings):
     # Worker 只在 Docker 内网暴露构建接口；主 API 代用户转发，浏览器永远拿不到内部 token。
     sandbox_worker_url: str = "http://sandbox-worker:8010"
     sandbox_worker_token: str = ""
+    # Worker 与主服务共享的预览产物目录；主服务直接读文件，不再向 Worker 代理静态资源。
+    sandbox_preview_dir: str = "../data/sandbox-worker-dev/previews"
     # 只供主 API 签发预览 capability；留空时回退到 JWT_SECRET，绝不复用 Worker token。
     sandbox_capability_secret: str = ""
     # 推荐把同一个主 API 的 /api/sandbox-preview 路由暴露到独立预览 Origin。

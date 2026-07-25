@@ -9,11 +9,13 @@
 4. Worker 把源码写入临时任务目录，用可信模板覆盖构建配置，链接镜像内固定
    `node_modules`，串行执行 `vite build --base=./`。
 5. 成功产物移动到持久化预览目录，Worker 返回 `build_id`。
+   `build_id` 由可信模板和源码内容生成；相同内容已有完整产物时直接复用，不重复执行
+   Vite。
 6. FastAPI 用只存在于主 API 的独立密钥为本次产物签发不可猜的 capability，并返回
    预览 Origin 下的 URL：
    `{SANDBOX_PREVIEW_ORIGIN}/api/sandbox-preview/{capability}/...`。
-7. iframe 请求该 URL 时，FastAPI 校验 capability，再从 Docker 内网 Worker 读取
-   HTML、JS、CSS 和图片并逐字节返回；不是重定向。
+7. iframe 请求该 URL 时，FastAPI 校验 capability，再从共享预览目录直接返回
+   HTML、JS、CSS 和图片；不是重定向，也不再请求 Worker。
 8. iframe 通过很小的 `postMessage` bridge 回传导航状态、运行时错误和基础布局问题；
    `check_build` 时还会在 iframe 内生成限尺寸截图并回传二进制。
 9. 前端上传截图并把编译/运行/布局结果回报 `build-result`，唤醒 Agent 的
@@ -32,6 +34,7 @@ capability 是临时 Bearer 凭证。iframe 导航和静态资源请求不会携
 SANDBOX_WORKER_URL=http://sandbox-worker:8010
 SANDBOX_WORKER_TOKEN=随机长密钥
 SANDBOX_CAPABILITY_SECRET=另一个仅主 API 持有的随机长密钥
+SANDBOX_PREVIEW_DIR=/app/data/sandbox-worker/previews
 SANDBOX_BUILD_TIMEOUT_S=75
 SANDBOX_PREVIEW_ORIGIN=https://preview.example.com
 SANDBOX_FRAME_ANCESTORS=https://app.example.com
@@ -45,9 +48,10 @@ SANDBOX_DATA_DIR=/data
 SANDBOX_WORKER_TOKEN=与主服务一致
 ```
 
-Worker 不再生成浏览器 URL，因此不需要 `SANDBOX_PUBLIC_BASE_URL`。生产 Compose
-通过服务名 `sandbox-worker:8010` 访问 Worker；宿主机端口只绑定
-`127.0.0.1:8010` 方便源码开发，公网入口只连接主应用。
+Worker 不生成浏览器 URL，也不提供静态预览接口，因此不需要
+`SANDBOX_PUBLIC_BASE_URL`。生产 Compose 把 Worker 的 `/data` 映射到主服务可读取的
+`/app/data/sandbox-worker`；主服务只通过 `sandbox-worker:8010` 发起构建。宿主机
+端口只绑定 `127.0.0.1:8010` 方便源码开发，公网入口只连接主应用。
 
 `SANDBOX_WORKER_TOKEN` 只负责主 API → Worker 的内部鉴权；
 `SANDBOX_CAPABILITY_SECRET` 只负责浏览器预览 capability 的签名，绝不能把后者注入

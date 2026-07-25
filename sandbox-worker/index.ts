@@ -1,9 +1,7 @@
 import {
-  lstat,
   mkdir,
   readdir,
   readFile,
-  realpath,
   rename,
   rm,
   stat,
@@ -30,6 +28,8 @@ const MAX_TOTAL_BYTES = 5 * 1024 * 1024
 const MAX_WIRE_BYTES = 32 * 1024 * 1024
 const MAX_LOG_BYTES = 100 * 1024
 const MAX_PREVIEWS_PER_SESSION = 3
+// 修改可信模板、构建器或运行时 bridge 后递增，避免复用旧格式产物。
+const BUILD_CACHE_VERSION = '2'
 
 const protectedFiles = [
   '.npmrc',
@@ -740,10 +740,50 @@ async function pruneSessionPreviews(sessionId: string): Promise<void> {
   )
 }
 
+async function cachedBuildId(payload: BuildPayload): Promise<string> {
+  const hasher = new Bun.CryptoHasher('sha256')
+  hasher.update(`xiaozhu-sandbox-build\0${BUILD_CACHE_VERSION}\0`)
+  for (const filePath of [...protectedFiles].sort()) {
+    let content = await readFile(path.join(templateDir, filePath), 'utf8')
+    if (filePath === 'index.html') {
+      content = content.replace('</head>', `${runtimeBridge()}\n</head>`)
+    }
+    hasher.update(`trusted\0${filePath}\0${content.length}\0${content}\0`)
+  }
+  for (const filePath of Object.keys(payload.files).sort()) {
+    const content = payload.files[filePath]
+    hasher.update(`user\0${filePath}\0${content.length}\0${content}\0`)
+  }
+  const hex = hasher.digest('hex')
+  // 保持 UUID 形状，沿用 capability 对 build_id 的严格校验；第 13 位标记为 v5，
+  // variant 固定为 RFC 4122 的 10xx。
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    `5${hex.slice(13, 16)}`,
+    `a${hex.slice(17, 20)}`,
+    hex.slice(20, 32),
+  ].join('-')
+}
+
 async function build(payload: BuildPayload): Promise<BuildResult> {
-  const buildId = crypto.randomUUID()
+  const buildId = await cachedBuildId(payload)
   const jobDir = path.join(jobsDir, buildId)
   const previewDir = path.join(previewsDir, payload.session_id, buildId)
+  const markerPath = path.join(previewDir, '.xiaozhu-build.json')
+  try {
+    const marker = JSON.parse(await readFile(markerPath, 'utf8')) as Record<string, unknown>
+    if (marker.sessionId === payload.session_id && marker.buildId === buildId) {
+      return {
+        ok: true,
+        build_id: buildId,
+        logs: '源码未变化，复用已有构建产物',
+        errors: '',
+      }
+    }
+  } catch {
+    // 没有完整缓存时正常重新构建；残缺目录会在发布新产物前清理。
+  }
   await mkdir(jobDir, { recursive: true })
   try {
     await writeJobFiles(jobDir, payload.files)
@@ -759,6 +799,7 @@ async function build(payload: BuildPayload): Promise<BuildResult> {
       }
     }
     await mkdir(path.dirname(previewDir), { recursive: true })
+    await rm(previewDir, { recursive: true, force: true })
     await Bun.write(
       path.join(jobDir, 'dist', '.xiaozhu-build.json'),
       JSON.stringify({ sessionId: payload.session_id, buildId, device: payload.device }),
@@ -776,63 +817,6 @@ async function build(payload: BuildPayload): Promise<BuildResult> {
   }
 }
 
-function previewHeaders(): HeadersInit {
-  return {
-    'Cache-Control': 'no-store',
-    'X-Content-Type-Options': 'nosniff',
-  }
-}
-
-async function servePreview(url: URL): Promise<Response> {
-  const parts = url.pathname.split('/').filter(Boolean)
-  if (parts.length < 3 || parts[0] !== 'preview') return new Response('Not found', { status: 404 })
-  const sessionId = parts[1]
-  const buildId = parts[2]
-  if (!/^[A-Za-z0-9-]{1,80}$/.test(sessionId) || !/^[a-f0-9-]{36}$/.test(buildId)) {
-    return new Response('Not found', { status: 404 })
-  }
-  let rawFile: string
-  try {
-    rawFile = parts.slice(3).map((part) => decodeURIComponent(part)).join('/') || 'index.html'
-  } catch {
-    return new Response('Not found', { status: 404 })
-  }
-  const filePath = safeRelativePath(rawFile)
-  if (!filePath) return new Response('Not found', { status: 404 })
-  const root = path.join(previewsDir, sessionId, buildId)
-  const target = path.resolve(root, filePath)
-  let actualRoot: string
-  let actualTarget: string
-  try {
-    const targetStat = await lstat(target)
-    if (!targetStat.isFile() || targetStat.isSymbolicLink()) {
-      return new Response('Not found', { status: 404 })
-    }
-    const resolvedPaths = await Promise.all([realpath(root), realpath(target)])
-    actualRoot = resolvedPaths[0]
-    actualTarget = resolvedPaths[1]
-  } catch {
-    return new Response('Not found', { status: 404 })
-  }
-  const relative = path.relative(actualRoot, actualTarget)
-  if (
-    !relative
-    || relative === '..'
-    || relative.startsWith(`..${path.sep}`)
-    || path.isAbsolute(relative)
-  ) return new Response('Not found', { status: 404 })
-  const file = Bun.file(target)
-  if (!(await file.exists())) return new Response('Not found', { status: 404 })
-  // 主 API 会缓冲并重新生成浏览器安全头；Worker 仍返回稳定 Content-Length，
-  // 避免 Bun.file() 的 sendfile/chunked 路径在部分代理上表现不一致。
-  return new Response(await file.arrayBuffer(), {
-    headers: {
-      ...previewHeaders(),
-      'Content-Type': file.type || 'application/octet-stream',
-    },
-  })
-}
-
 await mkdir(jobsDir, { recursive: true })
 await mkdir(previewsDir, { recursive: true })
 
@@ -843,12 +827,6 @@ const server = Bun.serve({
     const url = new URL(request.url)
     if (request.method === 'GET' && url.pathname === '/health') {
       return json({ status: 'ok', building })
-    }
-    if (request.method === 'GET' && url.pathname.startsWith('/preview/')) {
-      if (!workerToken || request.headers.get('Authorization') !== `Bearer ${workerToken}`) {
-        return json({ error: '无效 Worker 凭证' }, 401)
-      }
-      return servePreview(url)
     }
     if (request.method !== 'POST' || url.pathname !== '/internal/build') {
       return new Response('Not found', { status: 404 })

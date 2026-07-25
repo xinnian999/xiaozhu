@@ -267,7 +267,8 @@ export default function ServerPreviewPane() {
     const result = {
       ok: allErrors.length === 0,
       errors: allErrors.join('\n'),
-      runtime: pending.runtimeErrors.length > 0,
+      // ready 超时发生在编译成功、iframe 启动验收阶段，不能误导 Agent 当成编译错误改代码。
+      runtime: pending.runtimeErrors.length > 0 || Boolean(terminalError),
       visual: pending.layoutIssues.length > 0,
     }
 

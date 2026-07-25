@@ -447,6 +447,21 @@ import html2canvas from 'html2canvas';
     await waitForImages();
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   };
+  const waitForAppMounted = () => new Promise((resolve) => {
+    const startedAt = Date.now();
+    const check = () => {
+      const root = document.getElementById('root');
+      if (
+        (root && (root.firstElementChild || (root.textContent || '').trim()))
+        || Date.now() - startedAt >= 3000
+      ) {
+        resolve();
+        return;
+      }
+      requestAnimationFrame(check);
+    };
+    requestAnimationFrame(check);
+  });
 
   const inspectLayout = () => {
     const width = Math.max(1, innerWidth || document.documentElement.clientWidth || 0);
@@ -520,7 +535,8 @@ import html2canvas from 'html2canvas';
     }, 'image/webp', 0.75);
   });
   const capture = async (background) => {
-    await waitForAssets();
+    // 字体或第三方图片可能长时间不结束；截图尽量等稳定，但不能被它们无限拖住。
+    await waitAtMost(waitForAssets(), 4000);
     const viewportWidth = Math.max(
       1,
       innerWidth || document.documentElement.clientWidth || 0,
@@ -649,7 +665,10 @@ import html2canvas from 'html2canvas';
 
   const announceReady = async () => {
     try {
-      await waitForAssets();
+      // ready 表示 React 已经挂载、运行时桥可用，不代表所有远端视觉资源都已彻底稳定。
+      // 视觉稳定由后续截图阶段单独等待，避免首轮未缓存资源超过父页面的 8 秒兜底。
+      await waitForAppMounted();
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       reportPath();
       const issues = reportLayout();
       post('xiaozhu-server-ready', {
@@ -659,8 +678,11 @@ import html2canvas from 'html2canvas';
       });
     } catch {}
   };
-  if (document.readyState === 'complete') setTimeout(announceReady, 0);
-  else window.addEventListener('load', announceReady, { once: true });
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', announceReady, { once: true });
+  } else {
+    setTimeout(announceReady, 0);
+  }
 })();
 </script>`
 }

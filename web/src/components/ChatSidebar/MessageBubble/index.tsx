@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { FileText, FilePlus, FilePen, FolderOpen, Wrench, Bug, ChevronRight, GitCommit, RotateCcw, Loader2, Check, AlertCircle, HelpCircle, BrainCircuit } from 'lucide-react'
+import { FileText, FilePlus, FilePen, FolderOpen, Wrench, Bug, ChevronRight, GitCommit, RotateCcw, Loader2, Check, AlertCircle, HelpCircle, BrainCircuit, Image as ImageIcon } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useSessionStore } from '@/store/session'
 import { useUIStore } from '@/store/ui'
 import { toast } from '@/lib/toast'
-import type { Message } from '@/types/project'
+import { fetchAuthenticatedImage } from '@/lib/api'
+import type { Message, PreviewScreenshot } from '@/types/project'
 import styles from './index.module.scss'
 
 type Props = {
@@ -205,6 +206,7 @@ function ToolCallChip({ message }: { message: Message }) {
   // 运行中不让展开（参数还没补全、也没结果可看）；跑完拿到结果后才可展开看参数 + 结果。
   const expandable = hasResult
   const [expanded, setExpanded] = useState(false)
+  const screenshot = message.toolName === 'check_build' ? message.toolScreenshot : undefined
 
   // 头部内容（图标 + 文案 + 右侧状态图标）两种渲染路径共用。
   // 右侧：运行中是转圈的 loading 动画，完成后变成可点开的箭头。
@@ -243,6 +245,8 @@ function ToolCallChip({ message }: { message: Message }) {
         </div>
       )}
 
+      {screenshot && <CheckBuildScreenshot screenshot={screenshot} />}
+
       {expanded && (
         <div className={styles.toolChipDetail}>
           {hasArgs && (
@@ -258,6 +262,92 @@ function ToolCallChip({ message }: { message: Message }) {
             </>
           )}
         </div>
+      )}
+    </div>
+  )
+}
+
+/** check_build 的截图自检记录。
+ *  持久化 URL 是私有资源，必须先带 JWT fetch 成 Blob，不能直接塞给 img.src。 */
+function CheckBuildScreenshot({ screenshot }: { screenshot: PreviewScreenshot }) {
+  const openImagePreview = useUIStore((s) => s.openImagePreview)
+  const direct = screenshot.url.startsWith('blob:') || screenshot.url.startsWith('data:')
+  const [fetched, setFetched] = useState<{ url: string; src: string } | null>(null)
+  const [failedUrl, setFailedUrl] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!screenshot.local || !screenshot.url.startsWith('blob:')) return
+    const localUrl = screenshot.url
+    // 上传完成后 props 会切为持久化 ref；卡片卸载时也要释放临时 URL。
+    return () => URL.revokeObjectURL(localUrl)
+  }, [screenshot.local, screenshot.url])
+
+  useEffect(() => {
+    if (direct) return
+    const controller = new AbortController()
+    let objectUrl: string | null = null
+
+    void fetchAuthenticatedImage(screenshot.url, controller.signal)
+      .then((blob) => {
+        if (controller.signal.aborted) return
+        objectUrl = URL.createObjectURL(blob)
+        setFetched({ url: screenshot.url, src: objectUrl })
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setFailedUrl(screenshot.url)
+      })
+
+    return () => {
+      controller.abort()
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [direct, screenshot.url])
+
+  const src = direct
+    ? screenshot.url
+    : fetched?.url === screenshot.url
+      ? fetched.src
+      : null
+  const failed = !direct && failedUrl === screenshot.url
+  const dimensions = screenshot.width > 0 && screenshot.height > 0
+    ? `${screenshot.width} × ${screenshot.height}`
+    : '预览截图'
+
+  return (
+    <div className={styles.toolScreenshot}>
+      {src ? (
+        <button
+          type="button"
+          className={styles.toolScreenshotButton}
+          onClick={() => openImagePreview(src)}
+          aria-label="预览截图自检记录"
+        >
+          <img
+            src={src}
+            className={styles.toolScreenshotImage}
+            alt="截图自检记录"
+          />
+          <span className={styles.toolScreenshotCaption}>
+            <span>
+              <ImageIcon size={12} aria-hidden />
+              截图自检记录
+            </span>
+            <small>{dimensions}</small>
+          </span>
+        </button>
+      ) : (
+        <div className={styles.toolScreenshotPlaceholder} role="status">
+          {failed
+            ? <AlertCircle size={14} aria-hidden />
+            : <Loader2 size={14} className={styles.toolScreenshotLoader} aria-hidden />}
+          <span>{failed ? '截图加载失败' : '正在加载截图…'}</span>
+        </div>
+      )}
+      {(screenshot.path || screenshot.local) && (
+        <span className={styles.toolScreenshotMeta}>
+          <span>{screenshot.path || '当前预览页面'}</span>
+          <small>{screenshot.local ? '正在保存' : '已保存'}</small>
+        </span>
       )}
     </div>
   )

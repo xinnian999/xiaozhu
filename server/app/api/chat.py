@@ -16,6 +16,7 @@ from app.agents.loop import ChatRequest, agent_loop, with_heartbeat
 from app.billing import allowance_for, used_today
 from app.db import get_db
 from app.deps import get_current_user
+from app.generation_control import managed_generation, reserve_generation
 # 模型注册表 + LLM 构造都集中在 app.llm，这里只是引用方。
 # 现在模型在数据库、由内存缓存提供，所以引用的是「读缓存的函数」而非模块常量。
 from app.llm import (
@@ -106,8 +107,14 @@ async def chat(
     # 把 user_id 传进去：loop 跑完干净收尾时按它扣点。
     # 外面包一层 with_heartbeat：check_build 最多等 90s，靠它保活连接
     #（ask_user 已改用 interrupt()，不会再让这条请求长时间挂起，见 app.agents.loop）。
+    lease = reserve_generation(req.session_id)
+    if lease is None:
+        raise HTTPException(status_code=409, detail="项目正在删除，无法继续生成")
     return StreamingResponse(
-        with_heartbeat(agent_loop(req, db, current_user.id)),
+        managed_generation(
+            lease,
+            with_heartbeat(agent_loop(req, db, current_user.id)),
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

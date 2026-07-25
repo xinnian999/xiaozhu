@@ -72,11 +72,11 @@ type UIState = {
   previewReloadTick: number
   reloadPreview: () => void
 
-  /** 预览应用计数：自增即把当前暂存文件同步进容器并重新 vite build（见 PreviewPane）。
+  /** 预览应用请求：seq 自增触发同步与构建，checkId 把本次结果/截图绑定到对应工具卡。
    *  与 reloadPreview 的区别：这个触发「同步文件 + 重新构建」，构建成功后才由 PreviewPane
-   *  调 reloadPreview 整页重载换上新 dist。AI 调 check_build / 流结束兜底时自增它。 */
-  previewApplyTick: number
-  requestPreviewApply: () => void
+   *  调 reloadPreview 整页重载换上新 dist。 */
+  previewApplyRequest: { seq: number; checkId: string | null; sessionId: string | null }
+  requestPreviewApply: (checkId: string, sessionId: string) => void
 
   // —— 预览路由导航（地址栏 + 前进后退）——
   // iframe 跨域，父页面读不到它的 URL，靠注入的导航桥 postMessage 上报，
@@ -151,8 +151,15 @@ export const useUIStore = create<UIState>((set) => ({
   previewReloadTick: 0,
   reloadPreview: () => set((s) => ({ previewReloadTick: s.previewReloadTick + 1 })),
 
-  previewApplyTick: 0,
-  requestPreviewApply: () => set((s) => ({ previewApplyTick: s.previewApplyTick + 1 })),
+  previewApplyRequest: { seq: 0, checkId: null, sessionId: null },
+  requestPreviewApply: (checkId, sessionId) =>
+    set((s) => ({
+      previewApplyRequest: {
+        seq: s.previewApplyRequest.seq + 1,
+        checkId,
+        sessionId,
+      },
+    })),
 
   previewPath: '/',
   previewCanBack: false,

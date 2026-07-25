@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Message } from '@/types/project'
+import type { Message, PreviewScreenshot } from '@/types/project'
 import {
   createSession,
   listSessions,
@@ -18,6 +18,7 @@ import {
   type ApiModel,
   type ApiBilling,
 } from '@/lib/api'
+import { interruptSessionStream } from '@/lib/sessionStream'
 
 // ============================================
 // Session store：多会话管理（对接后端，messages 存内存）
@@ -81,8 +82,8 @@ type SessionState = {
   /** 删除会话：DELETE 后端，成功后从列表移除；删的若是当前会话则回到空态首屏 */
   deleteSession: (id: string) => Promise<void>
   switchTo: (id: string) => Promise<void>
-  /** 回到"无激活会话"的空态首屏，不真正创建会话 */
-  goToEmpty: () => void
+  /** 回到"无激活会话"的空态首屏；若正在生成，先中断并等流收尾 */
+  goToEmpty: () => Promise<void>
   appendMessage: (msg: Message) => void
   /** 追加一段推理正文；同一 streamId 始终更新同一张思考卡。 */
   appendReasoningDelta: (streamId: string, text: string) => void
@@ -100,7 +101,17 @@ type SessionState = {
    *  让对话看起来像把这条消息重新发了一遍。版本快照在后端保留，可在「版本历史」回滚。 */
   truncateAfterLastUserMessage: () => void
   /** 工具执行完，把结果填到对应工具卡（按 toolCallId 匹配当前会话里那条 tool 消息） */
-  setToolResult: (toolCallId: string, result: string) => void
+  setToolResult: (
+    toolCallId: string,
+    result: string,
+    screenshot?: PreviewScreenshot | null,
+  ) => void
+  /** check_build 截图生成后立即写入对应工具卡；持久化引用到达时按 id 幂等替换。 */
+  setToolScreenshot: (
+    toolCallId: string,
+    screenshot: PreviewScreenshot,
+    sessionId?: string,
+  ) => void
   /** 工具卡「有则更新、无则新建」：流式阶段先用 {path} 提前建卡，工具调用整段生成完后
    *  再用完整参数（含 write_file 的 content）按 toolCallId 补全同一张卡，展开即可看到全部参数。
    *  无 path、没提前发的工具（list_files / check_build）则由完整参数这一发直接新建。 */
@@ -182,13 +193,41 @@ function fromApiMessage(m: ApiMessage): Message {
   } as const
 
   if (m.kind === 'tool') {
+    const storedArgs = m.tool_args ?? {}
+    const toolCallId =
+      typeof storedArgs._tool_call_id === 'string'
+        ? storedArgs._tool_call_id
+        : undefined
+    // 后端把调用 ID 与构建缓存摘要放在同一个 JSON 列中；这些字段只服务于断线恢复，
+    // 工具卡展开时仍只展示模型真正传入的公开参数。
+    const toolArgs = Object.fromEntries(
+      Object.entries(storedArgs).filter(
+        ([key]) => key !== '_tool_call_id' && !key.startsWith('_build_'),
+      ),
+    )
+    // 历史工具消息只持久化了私有截图 URL；尺寸/路由会在本轮实时 ref 中展示，
+    // 刷新后的历史卡仍保留可点击缩略图即可。
+    const screenshotUrl = m.images?.[0]
     return {
       ...base,
       kind: 'tool',
       toolName: m.tool_name ?? undefined,
-      toolArgs: m.tool_args ?? undefined,
+      toolArgs,
+      ...(toolCallId ? { toolCallId } : {}),
       // 工具消息的 text 存的是「工具执行结果」，刷新后还原到 toolResult 供卡片展示
       toolResult: m.text || undefined,
+      ...(screenshotUrl && m.tool_name === 'check_build'
+        ? {
+            toolScreenshot: {
+              id: `history-${m.id}`,
+              url: screenshotUrl,
+              width: 0,
+              height: 0,
+              path: '',
+              mime: 'image/webp',
+            },
+          }
+        : {}),
     }
   }
   if (m.kind === 'reasoning') {
@@ -396,16 +435,26 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   deleteSession: async (id) => {
+    // 当前项目不允许删除：用户必须先切换到另一个项目，避免删除动作同时承担导航、
+    // 中断与数据销毁三种语义。UI 会禁用按钮，这里再做状态层兜底。
+    if (get().activeId === id) return
+    // 非当前项目正常不会再有本页流；这里仍清理可能残留的登记，再发 DELETE。
+    // 跨标签页或服务端迟到任务由后端 generation_control 做第二层取消屏障。
+    await interruptSessionStream(id)
     // 先请求后端删除（连带级联清理子表）；失败会被 axios 拦截器统一 toast，这里不动本地
     await apiDeleteSession(id)
-    // 删的若是当前激活会话，先回到空态首屏（清激活态 + URL），再把它从列表移除
-    if (get().activeId === id) get().goToEmpty()
     set((s) => ({ sessions: s.sessions.filter((sess) => sess.id !== id) }))
     // 顺手清掉该会话的 currentVersion 缓存，避免内存里残留无主对象
     versionCache.delete(id)
   },
 
   switchTo: async (id) => {
+    const current = get().sessions.find((sess) => sess.id === get().activeId)
+    // 先等旧会话的 SSE 消费端完整退出，再改 activeId；否则它 finally 里的 endStreaming
+    // 以及缓冲中的 file/tool 事件会按新的 activeId 写错项目。
+    if (current?.isStreaming && current.id !== id) {
+      await interruptSessionStream(current.id)
+    }
     set({ activeId: id })
     // 同步 URL —— 切换会话也要让地址栏跟着变，分享链接才能定位
     const url = new URL(window.location.href)
@@ -443,7 +492,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
-  goToEmpty: () => {
+  goToEmpty: async () => {
+    const current = get().sessions.find((sess) => sess.id === get().activeId)
+    if (current?.isStreaming) await interruptSessionStream(current.id)
     // 把激活态清掉，路由也去掉 sessionId，UI 自然回到空态首屏
     set({ activeId: null })
     const url = new URL(window.location.href)
@@ -613,7 +664,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }))
   },
 
-  setToolResult: (toolCallId, result) => {
+  setToolResult: (toolCallId, result, screenshot) => {
     const id = get().activeId
     if (!id) return
     // 找到当前会话里 toolCallId 匹配的那条工具卡，把结果填上
@@ -622,8 +673,50 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         if (sess.id !== id) return sess
         return {
           ...sess,
+          messages: sess.messages.map((m) => {
+            if (m.kind !== 'tool' || m.toolCallId !== toolCallId) return m
+            return {
+              ...m,
+              toolResult: result,
+              // tool_result 带持久化 ref 时覆盖本地 blob；重复事件写入同一个值是幂等的。
+              ...(screenshot ? { toolScreenshot: screenshot } : {}),
+            }
+          }),
+        }
+      }),
+    }))
+  },
+
+  setToolScreenshot: (toolCallId, screenshot, sessionId) => {
+    const id = sessionId ?? get().activeId
+    if (!id) return
+    set((s) => ({
+      sessions: s.sessions.map((sess) => {
+        if (sess.id !== id) return sess
+        const exists = sess.messages.some(
+          (m) => m.kind === 'tool' && m.toolCallId === toolCallId,
+        )
+        if (!exists) {
+          // 正常时 tool_call 会先到；这里兜底乱序，确保截图不会因卡片尚未创建而丢失。
+          return {
+            ...sess,
+            messages: [
+              ...sess.messages,
+              makeMessage('assistant', '', {
+                kind: 'tool',
+                toolName: 'check_build',
+                toolCallId,
+                toolScreenshot: screenshot,
+              }),
+            ],
+          }
+        }
+        return {
+          ...sess,
           messages: sess.messages.map((m) =>
-            m.kind === 'tool' && m.toolCallId === toolCallId ? { ...m, toolResult: result } : m,
+            m.kind === 'tool' && m.toolCallId === toolCallId
+              ? { ...m, toolScreenshot: screenshot }
+              : m,
           ),
         }
       }),

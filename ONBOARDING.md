@@ -64,8 +64,8 @@ xiaozhu/
 ```
 
 SSE 事件类型（前后端双份定死，见 [web/src/lib/api.ts](web/src/lib/api.ts) 的 `SSEEvent`）：
-`message_delta`(增量文本) / `file_write` / `file_delete` / `preview_refresh` /
-`plan_update` / `tool_call`(带 id) / `tool_result`(按 id 关联) / `version` / `error` /
+`message_delta`(增量文本) / `file_write` / `file_delete` / `preview_refresh`(带 check id) /
+`plan_update` / `tool_call`(带 id) / `tool_result`(按 id 关联，可带截图引用) / `version` / `error` /
 `done` / `awaiting_answer`（ask_user 触发 interrupt 暂停时发）。
 
 Agent 工具（[server/app/agents/tools.py](server/app/agents/tools.py)，闭包工厂 `build_tools`，
@@ -85,13 +85,51 @@ LLM（[llm.py](server/app/llm.py)）：`max_tokens=16384`，`model_kwargs={"para
 
 会合点机制（[server/app/build_store.py](server/app/build_store.py)，基于 `asyncio.Event`）：
 
-1. AI 调 `check_build` → loop.py 先 `build_store.arm(session_id)` 架好会合点，再推 `preview_refresh`。
+1. AI 调 `check_build` → loop.py 以 `tool_call_id` 为 `check_id`，先
+   `build_store.arm(session_id, check_id)` 架好会合点，再推 `preview_refresh {id: check_id}`。
+   会合点按 `(session_id, check_id)` 隔离，上一轮迟到的构建/截图不会误唤醒下一轮。
 2. 前端收到 `preview_refresh` → `syncFiles`：写文件进 WebContainer → `vite build`。
-   编译失败立刻回报 `{ok:false, runtime:false, errors}`；编译成功则重载 iframe，从 `load` 事件起开
-   一个收集窗（`REVEAL_COLLECT_MS` 默认 1.5s，兜底 `REVEAL_FALLBACK_MS` 6s），收 console 桥抓到的
-   运行时报错，再带 `{ok, runtime, errors}` 回报 `POST /api/sessions/{id}/build-result`。
-3. 后端 `check_build` 用 `build_store.wait(session_id, timeout=90.0)` 挂着 await，前端一回报即被唤醒。
+   编译失败立刻回报 `{ok:false, runtime:false, errors}`；编译成功则重载 iframe。截图桥为每次新
+   document 生成 `documentId`，等样式、字体、图片和 DOM 稳定后发 `capture-ready`；父页只对本轮
+   新 ID 开收集窗（`REVEAL_COLLECT_MS` 默认 1.5s，兜底 `REVEAL_FALLBACK_MS` 12s），收 console 桥抓到的
+   运行时报错和布局桥报告。随后由 iframe 内注入的截图桥调用 `html2canvas` 截当前 viewport，
+   压成最长边 1280px 的 WebP；父页先用 blob URL 立即更新工具卡，再把原始 body 上传到鉴权截图
+   接口（`X-Check-Id` 必须对应仍在等待的会合点，且每轮限一张），最后带
+   `{check_id, ok, runtime, visual, errors, screenshot_id}` 回报
+   `POST /api/sessions/{id}/build-result`。**编译失败时绝不截仍在 iframe 里的旧 dist**。
+3. 后端 `check_build` 用 `build_store.wait(session_id, check_id, timeout=90.0)` 挂着 await，前端一回报
+   即被唤醒。截图 ID/引用放进轻量 `ToolMessage.artifact`（不放 base64，避免膨胀 checkpoint）；
+   仅当当前模型 `vision=true` 时，`ScreenshotVisionMiddleware` 才在下一次模型调用前按 ID 读盘，
+   临时追加图片 HumanMessage，不把富媒体塞进 tool role。loop 同时把私有截图 URL 写进工具消息
+   `images` 并随 `tool_result.screenshot` 下发，
+   所以卡片实时可见、刷新后仍可鉴权加载并点击预览。
    **前端多快回就多快返回**；90s 超时兜底返回「构建超时」。
+
+截图文件放在 `DATABASE_URL` 同目录的 `preview-screenshots/{session_id}/`，图片与 JSON sidecar
+分开存储，不把二进制写进主业务表；删除会话时同步清理精确目录。父页因跨域不能读 WebContainer
+iframe DOM，所以截图逻辑必须留在 iframe 内。`html2canvas` 开启 `foreignObjectRendering`，把
+源文档 computed style 带进克隆，并在截图前后校验关键样式指纹；克隆样式不一致时宁可无图，
+不能把“默认 HTML”误交给 Agent。它仍属于 DOM 重绘而非浏览器表面逐像素捕获：跨域图片、视频、
+WebGL、嵌套 iframe 和非零滚动状态可能无法完整还原；当前对滚动状态直接 fail-closed。任何失败
+都只能降级为“有构建结果、无截图”，不能拖死 `check_build`。
+
+同一轮内的 `check_build` 有工具层幂等保护：可靠截图或明确的编译/运行/布局结果返回后，
+后端会对按路径排序的完整 `(path, content)` 文件集做 SHA-256 摘要。模型在文件内容未变化时
+再次调用 `check_build`，不会再发 `preview_refresh`、不会重新构建/截图，也不会在用户时间线
+增加重复工具卡，只把上次结论回给 LangGraph 继续推理。超时、取消以及“构建成功但没有可靠
+截图”不缓存，允许下一次真实重试；同批带写文件工具时也强制真实检查，避免 tools 节点并发
+尚未提交导致误复用。缓存动作、文件摘要和 `tool_call_id` 随工具行持久化，`ask_user` 或断线
+续跑仍限定在同一用户消息轮次恢复；恢复中的工具批次以 checkpoint 为准补齐工具行。若 tools
+节点已完成但 SSE 消费端尚未来得及回填，恢复器会从尾部 `ToolMessage` 对账回写结果、截图和
+缓存；若尚未完成，则先重放 `file_write`、再触发真实检查，避免拿旧文件构建。额外的同批
+`check_build` 继续保持隐藏。`/resume` 对同一个 thread 做进程内互斥，两个标签页不能同时
+续跑并覆盖 waiter。生成期间允许切换或回空态，但必须先通过
+`web/src/lib/sessionStream.ts` abort 并等待原 SSE 的 `finally` 收尾，再修改 `activeId`；
+当前项目不允许直接删除，必须先切换到别的项目；删除非当前项目额外经过
+`app.generation_control`：服务端取消并等待该会话的所有生成 lease，清构建 waiter 与
+LangGraph checkpoint 后才删除数据库和截图，避免断流传播尚未完成时写出孤儿数据。
+WebContainer 的全量 boot/reset 另有生命周期代次：reset 会先让旧 boot/install/build
+任务失效，旧任务在每个异步边界退出，不能在切换后重新 mount 旧项目或覆盖新预览。
 
 > ⚠️ **注意**：`vite build` **不跑 tsc**（AI 代码常有无害类型错，跑 tsc 会卡构建）。所以**类型级错误
 > 不在自检覆盖内**——它和运行时检测互补、不是包含关系。

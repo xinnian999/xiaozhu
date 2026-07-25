@@ -80,6 +80,17 @@ export class BootError extends Error {
   }
 }
 
+class ContainerLifecycleCancelled extends Error {
+  constructor() {
+    super('容器生命周期已切换')
+    this.name = 'ContainerLifecycleCancelled'
+  }
+}
+
+// 每次全量启动或 reset 都推进代次。WebContainer 的 boot/install/build 不能真正 abort，
+// 旧异步任务只能在每个 await 边界核对所有权后尽快退出，绝不能继续污染新项目。
+let containerLifecycleEpoch = 0
+
 
 // ── dist 产物缓存（内容寻址）─────────────────────────────────────
 // 痛点：切版本 / 回滚是瞬时的，但预览每次都重新跑一遍 `vite build`（几秒），切完要干等。
@@ -92,7 +103,7 @@ const distCache = new Map<string, BuiltFile[]>()
 const DIST_CACHE_MAX = 12  // 最多缓存几份 dist，超了按最久未用淘汰，防内存无限涨
 // 缓存格式版本：并进 key 前缀。dist 读写逻辑 / bridge 注入这类「会改变产物」的东西变动时
 // +1，旧持久化缓存自然失配作废（IDB 里的旧条目会被淘汰逻辑慢慢清掉）。
-const DIST_CACHE_VERSION = 'v3'  // v2→v3：加入浏览器端布局验收桥，旧 dist 未注入该桥，作废重建
+const DIST_CACHE_VERSION = 'v7'  // v6→v7：截图超时清理隔离到本轮 clone，旧产物作废
 
 /** 写入 dist 缓存（近似 LRU：重新插到末尾刷新最近使用，超量淘汰最老的）。 */
 function putDistCache(key: string, dist: BuiltFile[]): void {
@@ -228,7 +239,7 @@ export function getContainer(): Promise<WebContainer> {
     // 本次 boot 是不是冷 boot：会话里还没成功 boot 过 = 冷。成功/失败上报都要用。
     const cold = !hasBootedOk
     lastBootCold = cold
-    containerPromise = (async () => {
+    const bootPromise = (async () => {
       let lastErr: unknown
       for (let attempt = 0; attempt <= BOOT_MAX_RETRIES; attempt++) {
         try {
@@ -250,10 +261,12 @@ export function getContainer(): Promise<WebContainer> {
       }
       throw lastErr
     })()
+    containerPromise = bootPromise
     // boot 失败要把单例清空，否则这个 rejected promise 会被永久缓存，
     // 用户刷新（不重建模块）后再 boot 也拿到同一个失败结果、再也起不来。
-    containerPromise.catch(() => {
-      containerPromise = null
+    bootPromise.catch(() => {
+      // reset 后可能已经开始了新一轮 boot；旧 promise 的迟到失败不能清掉新实例。
+      if (containerPromise === bootPromise) containerPromise = null
     })
   }
   return containerPromise
@@ -363,7 +376,8 @@ const NAV_BRIDGE_SCRIPT = `<script>(function(){
 
 // ── 基础布局验收桥接脚本 ──────────────────────────────────────
 // agent 看不到真实画面，因此在 iframe 内用浏览器实际布局数据做一层确定性检查：
-// 横向溢出、桌面仍被锁成手机窄画布、fixed 元素逃出应用壳都直接回报父页面。
+// 横向溢出、桌面仍被锁成手机窄画布、fixed 元素逃出应用壳，以及桌面页头短文字
+// 被拆成多行，都直接回报父页面。
 // 明确的手机模拟器可以在根壳加 data-preview-mode="mobile" 跳过「桌面窄壳」规则，
 // 但横向溢出和 fixed 越界仍然必须修复。
 const LAYOUT_BRIDGE_SCRIPT = `<script>(function(){
@@ -372,6 +386,53 @@ const LAYOUT_BRIDGE_SCRIPT = `<script>(function(){
   var timer = 0;
   function add(issues, message) {
     if (issues.indexOf(message) === -1) issues.push(message);
+  }
+  function normalizedText(element) {
+    return (element.textContent || '').replace(/\\s+/g, ' ').trim();
+  }
+  function textLineCount(element) {
+    try {
+      var doc = element.ownerDocument;
+      var walker = doc.createTreeWalker(element, 4);
+      var rects = [];
+      var textNode = walker.nextNode();
+      while (textNode) {
+        if ((textNode.textContent || '').trim()) {
+          var range = doc.createRange();
+          range.selectNodeContents(textNode);
+          var nodeRects = range.getClientRects();
+          for (var index = 0; index < nodeRects.length; index += 1) {
+            var rect = nodeRects[index];
+            if (rect.width > 0 && rect.height > 0) {
+              rects.push(rect);
+            }
+          }
+        }
+        textNode = walker.nextNode();
+      }
+      var lines = [];
+      rects.sort(function(left, right){
+        return left.top - right.top || left.left - right.left;
+      });
+      rects.forEach(function(rect){
+        var center = (rect.top + rect.bottom) / 2;
+        var line = lines.find(function(candidate){
+          // 同一行里的图标/不同字号文字 top 可能不同；按文字盒垂直中心聚类，
+          // 避免把「SVG + span」或上下标误报成换行。
+          return Math.abs(candidate.center - center) <=
+            Math.max(candidate.height, rect.height) * 0.55;
+        });
+        if (line) {
+          line.center = (line.center + center) / 2;
+          line.height = Math.max(line.height, rect.height);
+        } else {
+          lines.push({ center: center, height: rect.height });
+        }
+      });
+      return lines.length;
+    } catch(e) {
+      return 0;
+    }
   }
   function inspect() {
     var vw = window.innerWidth || document.documentElement.clientWidth || 0;
@@ -419,6 +480,37 @@ const LAYOUT_BRIDGE_SCRIPT = `<script>(function(){
       }
     }
 
+    // 页头品牌名、导航和按钮都是短 UI 标签；桌面视口里把一个词拆成多行通常是
+    // flex 收缩或缺少 nowrap。用真实 DOM 的 Range 行盒判断，不依赖截图模型猜测。
+    if (vw >= 768) {
+      var shortUiNodes = document.querySelectorAll(
+        'header a,header button,header [role="button"]'
+      );
+      for (var k = 0; k < shortUiNodes.length && k < 100; k += 1) {
+        var uiNode = shortUiNodes[k];
+        var uiText = normalizedText(uiNode);
+        if (!uiText || Array.from(uiText).length > 32) continue;
+        var uiStyle = window.getComputedStyle(uiNode);
+        var uiRect = uiNode.getBoundingClientRect();
+        if (
+          uiStyle.display === 'none' ||
+          uiStyle.visibility === 'hidden' ||
+          uiRect.width <= 0 ||
+          uiRect.height <= 0 ||
+          uiRect.bottom <= 0 ||
+          uiRect.top >= vh
+        ) continue;
+        if (textLineCount(uiNode) > 1) {
+          add(
+            issues,
+            '[布局验收] 桌面页头/导航短文字“' + uiText.slice(0, 32) +
+            '”发生意外换行；请为品牌名或短标签保留单行宽度（如 nowrap + shrink-0）。'
+          );
+          break;
+        }
+      }
+    }
+
     try {
       window.parent.postMessage({
         type: 'xiaozhu-layout',
@@ -441,6 +533,519 @@ const LAYOUT_BRIDGE_SCRIPT = `<script>(function(){
   setTimeout(inspect, 900);
 })();</script>`
 
+// ── 预览截图桥接脚本 ──────────────────────────────────────────
+// 截图必须在 iframe 自己的 origin 内完成：父页面无法直接读取跨域 DOM/canvas。
+// 模板已固定依赖 html2canvas，因此把这段内联 module 一起交给 Vite 构建：
+// - 每次新 document 先发 ready + documentId，父页绝不向旧 iframe 请求截图；
+// - 等样式表、字体、图片及 DOM 静止后，只截当前 viewport；
+// - 开启 foreignObjectRendering，把真实 computed style 内联到克隆文档。默认 Canvas
+//   renderer 在 WebContainer 的嵌套 clone 中可能丢掉 Vite 外链 CSS，曾把 Tailwind 页面
+//   错截成浏览器默认样式；
+// - 对源文档与 clone 做关键样式指纹校验，不一致时宁可无图，也不把伪截图交给 Agent；
+// - 最长边压到 1280px，编码成 quality≈0.75 的 WebP；
+// - ArrayBuffer 用 transferable 回传，避免大段 base64 的复制与内存峰值。
+const SCREENSHOT_BRIDGE_SCRIPT = `<script type="module">
+import html2canvas from 'html2canvas';
+(function(){
+  if (window.__xiaozhuCaptureBridged) return;
+  window.__xiaozhuCaptureBridged = true;
+  var documentId = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : 'document-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+  function nextFrame() {
+    return new Promise(function(resolve){ requestAnimationFrame(function(){ resolve(); }); });
+  }
+
+  function waitAtMost(value, timeout) {
+    return new Promise(function(resolve){
+      var timer = setTimeout(resolve, timeout);
+      Promise.resolve(value).then(function(){
+        clearTimeout(timer);
+        resolve();
+      }, function(){
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+
+  function waitForStylesheets() {
+    var links = Array.prototype.slice.call(
+      document.querySelectorAll('link[rel="stylesheet"]')
+    );
+    return Promise.all(links.map(function(link){
+      if (link.sheet) return Promise.resolve();
+      return new Promise(function(resolve){
+        var done = function(){ resolve(); };
+        link.addEventListener('load', done, { once: true });
+        link.addEventListener('error', done, { once: true });
+        setTimeout(done, 1500);
+      });
+    }));
+  }
+
+  async function waitForImages() {
+    var images = Array.prototype.slice.call(document.images || []);
+    await Promise.all(images.map(async function(img){
+      try {
+        if (!img.complete) {
+          await new Promise(function(resolve){
+            var done = function(){ resolve(); };
+            img.addEventListener('load', done, { once: true });
+            img.addEventListener('error', done, { once: true });
+            setTimeout(done, 1200);
+          });
+        }
+        if (typeof img.decode === 'function') {
+          await waitAtMost(img.decode(), 1200);
+        }
+      } catch(e) {}
+    }));
+  }
+
+  async function waitForFonts() {
+    try {
+      if (document.fonts && document.fonts.ready) {
+        await waitAtMost(document.fonts.ready, 1500);
+      }
+    } catch(e) {}
+  }
+
+  function waitForDomQuiet() {
+    return new Promise(function(resolve){
+      var settled = false;
+      var quietTimer = 0;
+      var maxTimer = 0;
+      var mutationObserver = null;
+      var resizeObserver = null;
+      var finish = function(){
+        if (settled) return;
+        settled = true;
+        clearTimeout(quietTimer);
+        clearTimeout(maxTimer);
+        if (mutationObserver) mutationObserver.disconnect();
+        if (resizeObserver) resizeObserver.disconnect();
+        resolve();
+      };
+      var bump = function(){
+        clearTimeout(quietTimer);
+        quietTimer = setTimeout(finish, 320);
+      };
+      if (typeof MutationObserver === 'function') {
+        mutationObserver = new MutationObserver(bump);
+        mutationObserver.observe(document.documentElement, {
+          attributes: true,
+          childList: true,
+          characterData: true,
+          subtree: true
+        });
+      }
+      if (typeof ResizeObserver === 'function') {
+        resizeObserver = new ResizeObserver(bump);
+        resizeObserver.observe(document.documentElement);
+        if (document.body) resizeObserver.observe(document.body);
+      }
+      maxTimer = setTimeout(finish, 1800);
+      bump();
+    });
+  }
+
+  async function waitForAssets() {
+    await waitForStylesheets();
+    await waitForFonts();
+    await waitForImages();
+    await waitForDomQuiet();
+    // quiet 期间应用可能刚插入新的 link/img/@font-face；再扫描一次，避免只等到旧快照。
+    await waitForStylesheets();
+    await waitForFonts();
+    await waitForImages();
+    await nextFrame();
+    await nextFrame();
+  }
+
+  function visualRoot(doc) {
+    var root = doc.getElementById('root');
+    return root && root.firstElementChild
+      ? root.firstElementChild
+      : (doc.body && doc.body.firstElementChild ? doc.body.firstElementChild : doc.body);
+  }
+
+  function styleFingerprint(doc, element) {
+    if (!element || !doc.defaultView) return null;
+    var style = doc.defaultView.getComputedStyle(element);
+    var rect = element.getBoundingClientRect();
+    return {
+      display: style.display,
+      backgroundImage: style.backgroundImage,
+      backgroundColor: style.backgroundColor,
+      padding: style.padding,
+      minHeight: style.minHeight,
+      color: style.color,
+      fontFamily: style.fontFamily,
+      fontSize: style.fontSize,
+      borderRadius: style.borderRadius,
+      width: Math.round(rect.width),
+      height: Math.round(rect.height)
+    };
+  }
+
+  function isTransparentColor(value) {
+    return (
+      !value ||
+      value === 'transparent' ||
+      value === 'rgba(0, 0, 0, 0)' ||
+      value === 'rgba(0,0,0,0)'
+    );
+  }
+
+  function fingerprintSamples(doc) {
+    var selectors = [
+      null,
+      'header',
+      'header a',
+      'header nav',
+      'header nav a',
+      'h1',
+      'h2',
+      'button',
+      'input',
+      '[role="button"]'
+    ];
+    return selectors.map(function(selector){
+      var element = selector ? doc.querySelector(selector) : visualRoot(doc);
+      return styleFingerprint(doc, element);
+    });
+  }
+
+  function normalizedText(element) {
+    return (element.textContent || '').replace(/\\s+/g, ' ').trim();
+  }
+
+  function textLineCount(element) {
+    try {
+      var doc = element.ownerDocument;
+      var walker = doc.createTreeWalker(element, 4);
+      var rects = [];
+      var textNode = walker.nextNode();
+      while (textNode) {
+        if ((textNode.textContent || '').trim()) {
+          var range = doc.createRange();
+          range.selectNodeContents(textNode);
+          var nodeRects = range.getClientRects();
+          for (var index = 0; index < nodeRects.length; index += 1) {
+            var rect = nodeRects[index];
+            if (rect.width > 0 && rect.height > 0) {
+              rects.push(rect);
+            }
+          }
+        }
+        textNode = walker.nextNode();
+      }
+      var lines = [];
+      rects.sort(function(left, right){
+        return left.top - right.top || left.left - right.left;
+      });
+      rects.forEach(function(rect){
+        var center = (rect.top + rect.bottom) / 2;
+        var line = lines.find(function(candidate){
+          // 同一行里的图标/不同字号文字 top 可能不同；按文字盒垂直中心聚类，
+          // 避免把「SVG + span」或上下标误报成换行。
+          return Math.abs(candidate.center - center) <=
+            Math.max(candidate.height, rect.height) * 0.55;
+        });
+        if (line) {
+          line.center = (line.center + center) / 2;
+          line.height = Math.max(line.height, rect.height);
+        } else {
+          lines.push({ center: center, height: rect.height });
+        }
+      });
+      return lines.length;
+    } catch(e) {
+      return 0;
+    }
+  }
+
+  function shortUiTextElements(doc) {
+    var nodes = Array.prototype.slice.call(doc.querySelectorAll(
+      'header a,header button,header [role="button"]'
+    ));
+    return nodes.filter(function(element){
+      var text = normalizedText(element);
+      if (!text || Array.from(text).length > 32 || !doc.defaultView) return false;
+      var style = doc.defaultView.getComputedStyle(element);
+      var rect = element.getBoundingClientRect();
+      return (
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        rect.width > 0 &&
+        rect.height > 0
+      );
+    });
+  }
+
+  function stabilizeShortUiText(clonedDocument) {
+    var sourceElements = shortUiTextElements(document);
+    var clonedElements = shortUiTextElements(clonedDocument);
+    if (sourceElements.length !== clonedElements.length) return false;
+    for (var index = 0; index < sourceElements.length; index += 1) {
+      var source = sourceElements[index];
+      var cloned = clonedElements[index];
+      if (normalizedText(source) !== normalizedText(cloned)) return false;
+      var sourceLines = textLineCount(source);
+      if (sourceLines === 1) {
+        // foreignObject 会再次排版序列化后的文字，emoji + CJK 的字体度量可能与
+        // 源页面略有差异。只冻结源 DOM 当前确实为单行的页头短标签；源页面本来
+        // 多行时绝不强行 nowrap，避免掩盖真实响应式问题。
+        var sourceRect = source.getBoundingClientRect();
+        cloned.style.setProperty('white-space', 'nowrap', 'important');
+        cloned.style.setProperty('word-break', 'keep-all', 'important');
+        cloned.style.setProperty('overflow-wrap', 'normal', 'important');
+        cloned.style.setProperty(
+          'min-width',
+          sourceRect.width.toFixed(3) + 'px',
+          'important'
+        );
+        cloned.style.setProperty(
+          'min-height',
+          sourceRect.height.toFixed(3) + 'px',
+          'important'
+        );
+      }
+      if (sourceLines !== textLineCount(cloned)) return false;
+    }
+    return true;
+  }
+
+  function cloneLostCriticalStyle(source, cloned) {
+    if (!source && !cloned) return false;
+    if (!source || !cloned) return true;
+    if (source.display !== cloned.display) return true;
+    if (
+      source.backgroundImage !== 'none' &&
+      source.backgroundImage !== cloned.backgroundImage
+    ) return true;
+    if (
+      source.padding !== '0px' &&
+      source.padding !== cloned.padding
+    ) return true;
+    if (
+      source.minHeight !== '0px' &&
+      source.minHeight !== 'auto' &&
+      source.minHeight !== cloned.minHeight
+    ) return true;
+    if (
+      !isTransparentColor(source.backgroundColor) &&
+      source.backgroundColor !== cloned.backgroundColor
+    ) return true;
+    if (source.color !== cloned.color) return true;
+    if (source.fontFamily !== cloned.fontFamily) return true;
+    if (source.fontSize !== cloned.fontSize) return true;
+    if (source.borderRadius !== cloned.borderRadius) return true;
+    if (source.width !== cloned.width || source.height !== cloned.height) return true;
+    return false;
+  }
+
+  function cloneLostCriticalStyles(sourceSamples, clonedSamples) {
+    if (sourceSamples.length !== clonedSamples.length) return true;
+    return sourceSamples.some(function(source, index){
+      return cloneLostCriticalStyle(source, clonedSamples[index]);
+    });
+  }
+
+  function hasNonZeroScroll() {
+    if (
+      Math.abs(window.scrollX || window.pageXOffset || 0) > 0 ||
+      Math.abs(window.scrollY || window.pageYOffset || 0) > 0
+    ) return true;
+    var elements = document.getElementsByTagName('*');
+    for (var index = 0; index < elements.length; index += 1) {
+      var element = elements[index];
+      if (Math.abs(element.scrollLeft || 0) > 0 || Math.abs(element.scrollTop || 0) > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function toWebp(canvas) {
+    return new Promise(function(resolve, reject){
+      canvas.toBlob(function(blob){
+        if (blob) resolve(blob);
+        else reject(new Error('浏览器未能编码 WebP 截图'));
+      }, 'image/webp', 0.75);
+    });
+  }
+
+  async function capture(backgroundColor) {
+    await waitForAssets();
+    // html2canvas 1.4.1 的 foreignObject 路径不会序列化 window / 元素内部滚动状态，
+    // 且对非零 x/y 有重复偏移。新 document 正常从顶部加载；若业务主动滚动，宁可无图。
+    if (hasNonZeroScroll()) {
+      throw new Error('当前页面包含滚动位置，无法生成可靠的 DOM 截图');
+    }
+    var vw = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 0);
+    var vh = Math.max(1, window.innerHeight || document.documentElement.clientHeight || 0);
+    var sourceFingerprints = fingerprintSamples(document);
+    var cloneStyleValid = true;
+    var safeBackground = '#ffffff';
+    if (
+      typeof backgroundColor === 'string' &&
+      backgroundColor.length <= 64 &&
+      typeof CSS !== 'undefined' &&
+      CSS.supports('color', backgroundColor)
+    ) {
+      safeBackground = backgroundColor;
+    }
+    var canvas = await html2canvas(document.documentElement, {
+      x: 0,
+      y: 0,
+      width: vw,
+      height: vh,
+      windowWidth: vw,
+      windowHeight: vh,
+      scrollX: 0,
+      scrollY: 0,
+      useCORS: true,
+      allowTaint: false,
+      foreignObjectRendering: true,
+      // 默认值是 devicePixelRatio；先放大再缩回只会徒增内存，并可能触发大画布降质。
+      scale: 1,
+      logging: false,
+      backgroundColor: safeBackground,
+      onclone: function(clonedDocument) {
+        cloneStyleValid = stabilizeShortUiText(clonedDocument);
+        var clonedFingerprints = fingerprintSamples(clonedDocument);
+        cloneStyleValid = (
+          cloneStyleValid &&
+          !cloneLostCriticalStyles(sourceFingerprints, clonedFingerprints)
+        );
+        var freeze = clonedDocument.createElement('style');
+        freeze.textContent =
+          '*,*::before,*::after{' +
+          'animation:none!important;' +
+          'transition:none!important;' +
+          'caret-color:transparent!important;' +
+          '}';
+        clonedDocument.head.appendChild(freeze);
+      }
+    });
+    // onclone 内不抛错，确保 html2canvas 有机会自动移除隐藏 clone iframe；
+    // 完整收尾后再丢弃不可信的 canvas。
+    if (!cloneStyleValid) {
+      throw new Error('截图克隆丢失了页面关键样式');
+    }
+
+    var maxSide = 1280;
+    var scale = Math.min(1, maxSide / Math.max(canvas.width, canvas.height));
+    var width = Math.max(1, Math.round(canvas.width * scale));
+    var height = Math.max(1, Math.round(canvas.height * scale));
+    var output = canvas;
+    if (scale < 1) {
+      output = document.createElement('canvas');
+      output.width = width;
+      output.height = height;
+      var ctx = output.getContext('2d');
+      if (!ctx) throw new Error('浏览器未能创建截图画布');
+      ctx.drawImage(canvas, 0, 0, width, height);
+    }
+
+    var blob = await toWebp(output);
+    return {
+      blob: blob,
+      width: width,
+      height: height,
+      path: location.pathname + location.search + location.hash
+    };
+  }
+
+  function captureCloneSnapshot() {
+    return Array.prototype.slice.call(
+      document.querySelectorAll('iframe.html2canvas-container')
+    );
+  }
+
+  function removeNewCaptureClones(existingClones) {
+    var clones = captureCloneSnapshot();
+    clones.forEach(function(clone){
+      if (existingClones.indexOf(clone) === -1) clone.remove();
+    });
+  }
+
+  function captureWithTimeout(backgroundColor) {
+    // 只清理由本次调用新建的 clone，不能误删待检查页面自己正在使用的 html2canvas。
+    var existingClones = captureCloneSnapshot();
+    return new Promise(function(resolve, reject){
+      var settled = false;
+      var finish = function(callback, value) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        callback(value);
+      };
+      var timer = setTimeout(function(){
+        removeNewCaptureClones(existingClones);
+        finish(reject, new Error('预览截图渲染超时'));
+      }, 8000);
+      capture(backgroundColor).then(function(shot){
+        finish(resolve, shot);
+      }, function(error){
+        removeNewCaptureClones(existingClones);
+        finish(reject, error);
+      });
+    });
+  }
+
+  window.addEventListener('message', async function(event){
+    var data = event.data;
+    if (!data || data.type !== 'xiaozhu-capture-request' || event.source !== window.parent) return;
+    var id = typeof data.id === 'string' ? data.id : '';
+    if (!id || data.documentId !== documentId) return;
+    try {
+      var shot = await captureWithTimeout(data.background);
+      var bytes = await shot.blob.arrayBuffer();
+      window.parent.postMessage({
+        type: 'xiaozhu-capture-result',
+        id: id,
+        documentId: documentId,
+        ok: true,
+        bytes: bytes,
+        mime: shot.blob.type || 'image/webp',
+        width: shot.width,
+        height: shot.height,
+        path: shot.path
+      }, event.origin, [bytes]);
+    } catch(error) {
+      var message = error instanceof Error ? error.message : String(error);
+      window.parent.postMessage({
+        type: 'xiaozhu-capture-result',
+        id: id,
+        documentId: documentId,
+        ok: false,
+        error: message.slice(0, 500)
+      }, event.origin);
+    }
+  });
+
+  async function announceReady() {
+    try {
+      await waitForAssets();
+      window.parent.postMessage({
+        type: 'xiaozhu-capture-ready',
+        documentId: documentId,
+        width: Math.max(1, window.innerWidth || document.documentElement.clientWidth || 0),
+        height: Math.max(1, window.innerHeight || document.documentElement.clientHeight || 0)
+      }, '*');
+    } catch(e) {}
+  }
+
+  if (document.readyState === 'complete') {
+    setTimeout(announceReady, 0);
+  } else {
+    window.addEventListener('load', announceReady, { once: true });
+  }
+})();</script>`
+
 /** 把一段脚本注入 index.html 的 <head> 末尾（没有 </head> 就放 <body> 前）。
  *  flag 用于幂等判断：html 里已含该标记就跳过，避免重复注入。 */
 function injectScript(files: FileMap, script: string, flag: string): FileMap {
@@ -453,12 +1058,40 @@ function injectScript(files: FileMap, script: string, flag: string): FileMap {
   return { ...files, 'index.html': next }
 }
 
-/** 把 console、路由导航、布局验收桥都注入到 index.html（幂等）。
- *  三处脚本互相独立，分别用各自的旗标判断是否已注入。 */
+/** 老会话的 package.json 来自旧模板，不含 html2canvas。
+ *  截图桥是平台运行时能力，因此只在写进 WebContainer 的瞬时副本里补依赖：
+ *  不改会话 DB 源文件，同时让依赖 key 与新版预置快照一致。 */
+function ensureScreenshotDependency(files: FileMap): FileMap {
+  const raw = files['package.json']
+  if (!raw) return files
+  try {
+    const pkg = JSON.parse(raw) as {
+      dependencies?: Record<string, string>
+      [key: string]: unknown
+    }
+    if (pkg.dependencies?.html2canvas === '^1.4.1') return files
+    pkg.dependencies = {
+      ...(pkg.dependencies ?? {}),
+      html2canvas: '^1.4.1',
+    }
+    return {
+      ...files,
+      'package.json': `${JSON.stringify(pkg, null, 2)}\n`,
+    }
+  } catch {
+    // package.json 本身非法时保留原始内容，后续 vite/npm 会给出权威构建错误。
+    return files
+  }
+}
+
+/** 把 console、路由导航、布局验收、截图桥都注入到 index.html（幂等）。
+ *  各脚本互相独立，分别用自己的旗标判断是否已注入。 */
 function injectConsoleBridge(files: FileMap): FileMap {
-  let next = injectScript(files, CONSOLE_BRIDGE_SCRIPT, '__vibuildConsoleBridged')
+  let next = ensureScreenshotDependency(files)
+  next = injectScript(next, CONSOLE_BRIDGE_SCRIPT, '__vibuildConsoleBridged')
   next = injectScript(next, NAV_BRIDGE_SCRIPT, '__vibuildNavBridged')
   next = injectScript(next, LAYOUT_BRIDGE_SCRIPT, '__xiaozhuLayoutBridged')
+  next = injectScript(next, SCREENSHOT_BRIDGE_SCRIPT, '__xiaozhuCaptureBridged')
   return next
 }
 
@@ -647,14 +1280,22 @@ export async function bootAndRun(
     onBootOk?: (info: { cold: boolean; elapsedMs: number }) => void
   },
 ): Promise<void> {
+  const lifecycleEpoch = ++containerLifecycleEpoch
+  const ensureCurrent = () => {
+    if (lifecycleEpoch !== containerLifecycleEpoch) {
+      throw new ContainerLifecycleCancelled()
+    }
+  }
   // 记录当前阶段：失败上报时要知道卡在 booting 还是后续哪一步。
   let stage = 'booting'
   // 进来时是否已有容器：若已 boot 过（复用实例），这次并不会真的触发 boot，
   // 不能把上一次的成功埋点误报成本次。只有「这次真的新 boot 了」才上报 onBootOk。
   const willBoot = !isBooted()
   try {
+    ensureCurrent()
     hooks.onStatus('booting')
     const wc = await getContainer()
+    ensureCurrent()
     // 仅当这次确实新 boot 了才上报成功耗时（避免复用实例时误报旧埋点）。
     if (willBoot) {
       const okMeta = getLastBootMeta()
@@ -667,10 +1308,12 @@ export async function bootAndRun(
     // 都能被父页面收到
     const filesWithBridge = injectConsoleBridge(files)
     await wc.mount(toFileTree(filesWithBridge))
+    ensureCurrent()
     lastFiles = { ...filesWithBridge }
 
     // 监听 server-ready 事件（vite preview 端口 ready 时触发）：iframe 加载预览 URL
     wc.on('server-ready', (_port, url) => {
+      if (lifecycleEpoch !== containerLifecycleEpoch) return
       hooks.onUrl(url)
       hooks.onStatus('ready')
       hooks.onLog('preview ready')
@@ -681,23 +1324,28 @@ export async function bootAndRun(
     hooks.onStatus('installing')
     // 依赖哈希作为缓存 key —— 模板固定 → 哈希恒定 → 跨项目/刷新共享同一份依赖
     const depsKey = await computeDepsKey(filesWithBridge['package.json'])
+    ensureCurrent()
     let restored = false
 
     if (depsKey) {
       // ── 第一级：IndexedDB 快照（老用户，最快，纯本地无网络）──
       const snapshot = await getSnapshot(depsKey)
+      ensureCurrent()
       if (snapshot) {
         try {
           hooks.onLog('从缓存恢复依赖')
           broadcast('\x1b[36m\r\n— 从缓存恢复 node_modules —\x1b[0m\r\n')
           await mountSnapshotAndRelink(wc, snapshot)
+          ensureCurrent()
           restored = true
         } catch (e) {
+          ensureCurrent()
           // 恢复失败：删掉这份损坏快照，继续往下尝试预置快照 / npm install
           const reason = e instanceof Error ? e.message : String(e)
           broadcast(`\x1b[31m\r\n[diag] IndexedDB 快照恢复失败：${reason}\x1b[0m\r\n`)
           console.warn('IndexedDB 快照恢复失败', e)
           await deleteSnapshot(depsKey)
+          ensureCurrent()
           restored = false
         }
       }
@@ -710,17 +1358,22 @@ export async function bootAndRun(
         if (warmup) {
           broadcast('\x1b[36m\r\n— 等待后台预热完成 —\x1b[0m\r\n')
           await warmup.catch(() => {})  // 预热失败无所谓，下面照常走
+          ensureCurrent()
           const cached = await getSnapshot(depsKey)
+          ensureCurrent()
           if (cached) {
             try {
               hooks.onLog('从预热缓存恢复依赖')
               broadcast('\x1b[36m\r\n— 从预热缓存恢复 node_modules —\x1b[0m\r\n')
               await mountSnapshotAndRelink(wc, cached)
+              ensureCurrent()
               restored = true
             } catch (e) {
+              ensureCurrent()
               const reason = e instanceof Error ? e.message : String(e)
               broadcast(`\x1b[31m\r\n[diag] 预热缓存恢复失败：${reason}\x1b[0m\r\n`)
               await deleteSnapshot(depsKey)
+              ensureCurrent()
             }
           }
         }
@@ -728,19 +1381,24 @@ export async function bootAndRun(
 
       if (!restored) {
         const prebuilt = await fetchPrebuiltSnapshot(depsKey)
+        ensureCurrent()
         if (prebuilt) {
           try {
             hooks.onLog('从预置快照恢复依赖')
             broadcast('\x1b[36m\r\n— 从预置快照恢复 node_modules —\x1b[0m\r\n')
             await mountSnapshotAndRelink(wc, prebuilt)
+            ensureCurrent()
             restored = true
             // 命中预置快照后写入本地 IndexedDB，让该用户下次走最快的第一级
             try {
               await saveSnapshot(depsKey, prebuilt)
+              ensureCurrent()
             } catch (e) {
+              ensureCurrent()
               console.warn('预置快照写入 IndexedDB 失败（不影响运行）', e)
             }
           } catch (e) {
+            ensureCurrent()
             const reason = e instanceof Error ? e.message : String(e)
             broadcast(`\x1b[31m\r\n[diag] 预置快照恢复失败：${reason}\x1b[0m\r\n`)
             console.warn('预置快照恢复失败', e)
@@ -754,8 +1412,10 @@ export async function bootAndRun(
       // ── 第三级：正常 npm install（前两级都未命中时的兜底）──
       hooks.onLog('npm install')
       const install = await wc.spawn('npm', ['install'])
+      ensureCurrent()
       pipeRawToBus(install.output, 'npm install')
       const installCode = await install.exit
+      ensureCurrent()
       if (installCode !== 0) {
         throw new Error(`npm install 失败 (exit ${installCode})`)
       }
@@ -763,8 +1423,11 @@ export async function bootAndRun(
       if (depsKey) {
         try {
           const snapshot = await wc.export('node_modules', { format: 'binary' })
+          ensureCurrent()
           await saveSnapshot(depsKey, snapshot)
+          ensureCurrent()
         } catch (e) {
+          ensureCurrent()
           console.warn('依赖快照导出失败（不影响本次运行）', e)
         }
       }
@@ -779,26 +1442,33 @@ export async function bootAndRun(
     hooks.onStatus('building')
     stage = 'building'
     const bootKey = await computeFilesKey(filesWithBridge)
+    ensureCurrent()
     let restoredDist = false
     if (bootKey) {
       const cached = await lookupDist(bootKey)
+      ensureCurrent()
       if (cached) {
         hooks.onLog('命中 dist 缓存，跳过首次构建')
         broadcast('\x1b[36m\r\n— 命中 dist 缓存，跳过首次构建 —\x1b[0m\r\n')
         await restoreDist(wc, cached)
+        ensureCurrent()
         restoredDist = true
       }
     }
     if (!restoredDist) {
       const first = await runBuild(wc, { onLog: hooks.onLog })
+      ensureCurrent()
       if (!first.ok) {
         throw new Error(first.error ?? '首次构建失败，请查看控制台的构建报错后让 AI 修复')
       }
       // 缓存首屏 dist（两级）：之后切回这份内容、或刷新重开，都能直接还原、不再 build。
       if (bootKey) {
         try {
-          storeDist(bootKey, await readDistFiles(wc))
+          const distFiles = await readDistFiles(wc)
+          ensureCurrent()
+          storeDist(bootKey, distFiles)
         } catch (e) {
+          ensureCurrent()
           console.warn('首屏 dist 缓存写入失败（不影响运行）', e)
         }
       }
@@ -809,10 +1479,16 @@ export async function bootAndRun(
     stage = 'starting'
     hooks.onLog('vite preview')
     const preview = await wc.spawn('npx', ['vite', 'preview', '--port', '4173'])
+    ensureCurrent()
     previewStarted = true
     pipeRawToBus(preview.output, 'vite preview')
     // 不 await preview.exit —— 它是常驻进程
   } catch (e) {
+    // reset/新一轮启动已取得容器所有权：旧任务静默退出，不能把新项目打成 error。
+    if (
+      e instanceof ContainerLifecycleCancelled
+      || lifecycleEpoch !== containerLifecycleEpoch
+    ) return
     const msg = e instanceof Error ? e.message : String(e)
     hooks.onError(msg)
     hooks.onStatus('error')
@@ -1062,6 +1738,8 @@ export function isPreviewRunning(): boolean {
  * 都会残留串台。teardown 后所有派生对象（进程、fs…）即失效。
  */
 export async function resetContainer(): Promise<void> {
+  // 先失效旧 bootAndRun，再等待/teardown；旧任务在下一个 await 边界会静默退出。
+  containerLifecycleEpoch += 1
   if (containerPromise) {
     try {
       const wc = await containerPromise

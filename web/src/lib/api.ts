@@ -4,6 +4,7 @@
 
 import axios from 'axios'
 import { toast } from '@/lib/toast'
+import type { PreviewScreenshot } from '@/types/project'
 
 // ── 登录 token 的存取 ───────────────────────────────────────────
 // token 存在 localStorage：刷新页面 / 重开标签页都还在，做到"记住登录"。
@@ -89,13 +90,13 @@ export type SSEEvent =
   | { type: 'reasoning_discard'; id: string }
   | { type: 'file_write'; path: string; content: string }
   | { type: 'file_delete'; path: string }
-  // AI 调 check_build 时推这个：把暂存的文件揭晓到预览并触发重新构建（无 payload，纯信号）
-  | { type: 'preview_refresh' }
+  // AI 调 check_build 时推这个：id 是 tool_call_id，用它把构建、截图和工具卡串成同一次检查
+  | { type: 'preview_refresh'; id: string }
   | { type: 'plan_update'; todos: unknown[] }
   // tool_call 带 id（后端的 tool_call_id），用于把随后到达的 tool_result 关联回这张卡
   | { type: 'tool_call'; name: string; args: object; id: string }
   // tool_result：某次工具调用执行完的结果（按 id 关联到对应工具卡，已截断）
-  | { type: 'tool_result'; id: string; result: string }
+  | { type: 'tool_result'; id: string; result: string; screenshot?: PreviewScreenshot | null }
   | { type: 'version'; version_id: number; seq: number }
   | { type: 'error'; message: string }
   | { type: 'done' }
@@ -441,7 +442,14 @@ export async function getResumeState(sessionId: string): Promise<boolean> {
 // 走原生 fetch 而非 axios：best-effort 旁路数据，失败要静默，不弹 toast 骚扰用户。
 export async function postBuildResult(
   sessionId: string,
-  result: { ok: boolean; errors: string; runtime?: boolean; visual?: boolean },
+  result: {
+    check_id: string
+    ok: boolean
+    errors: string
+    runtime?: boolean
+    visual?: boolean
+    screenshot_id?: string
+  },
 ): Promise<void> {
   try {
     await fetch(`/api/sessions/${sessionId}/build-result`, {
@@ -452,6 +460,66 @@ export async function postBuildResult(
   } catch {
     // 回报失败就算了：后端 check_build 有超时兜底，不会永久卡住
   }
+}
+
+/** 把 iframe 返回的原始截图上传并换取可持久化引用。
+ *  上传是 check_build 的旁路增强：超时/失败返回 null，不能拖死构建结果回报。 */
+export async function uploadPreviewScreenshot(
+  sessionId: string,
+  checkId: string,
+  blob: Blob,
+  meta: { width: number; height: number; path: string },
+): Promise<PreviewScreenshot | null> {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), 8000)
+  try {
+    const response = await fetch(`/api/sessions/${sessionId}/preview-screenshots`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': blob.type || 'image/webp',
+        'X-Screenshot-Width': String(meta.width),
+        'X-Screenshot-Height': String(meta.height),
+        // 后端据此校验这张图属于当前已 arm 的 check_build，且同一轮只能上传一张。
+        'X-Check-Id': checkId,
+        // Header 只接受 Latin-1；路由里可能有中文，统一编码后交给后端解码。
+        'X-Screenshot-Path': encodeURIComponent(meta.path),
+        ...authHeaders(),
+      },
+      body: blob,
+      signal: controller.signal,
+    })
+    if (!response.ok) return null
+    const data: unknown = await response.json()
+    if (!isPreviewScreenshot(data)) return null
+    return data
+  } catch {
+    return null
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
+/** 私有截图地址不能直接交给 <img>（它不会带 JWT），先鉴权拉成 Blob。 */
+export async function fetchAuthenticatedImage(url: string, signal?: AbortSignal): Promise<Blob> {
+  const response = await fetch(url, {
+    headers: authHeaders(),
+    signal,
+  })
+  if (!response.ok) throw new Error(`截图加载失败 (${response.status})`)
+  return response.blob()
+}
+
+function isPreviewScreenshot(value: unknown): value is PreviewScreenshot {
+  if (typeof value !== 'object' || value === null) return false
+  const item = value as Record<string, unknown>
+  return (
+    typeof item.id === 'string' &&
+    typeof item.url === 'string' &&
+    typeof item.width === 'number' &&
+    typeof item.height === 'number' &&
+    typeof item.path === 'string' &&
+    typeof item.mime === 'string'
+  )
 }
 
 // ── boot 结果上报（best-effort 旁路监控）───────────────────────

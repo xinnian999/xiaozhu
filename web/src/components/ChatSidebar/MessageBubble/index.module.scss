@@ -442,6 +442,105 @@
     animation: version-spin 0.8s linear infinite;
   }
 
+  // check_build 的截图自检记录：收在同一张工具卡内，缩略图可点开全局预览层。
+  .toolScreenshot {
+    display: flex;
+    flex-direction: column;
+    gap: $space-1;
+    width: min(280px, calc(100vw - 64px));
+    padding: 0 $space-2 $space-2;
+
+    .toolScreenshotButton {
+      @include button-reset;
+      position: relative;
+      display: block;
+      width: 100%;
+      overflow: hidden;
+      border: 1px solid var(--color-border);
+      border-radius: $radius-sm;
+      background: var(--color-bg);
+      cursor: zoom-in;
+      text-align: left;
+      transition:
+        border-color $dur-base $ease-out,
+        transform $dur-base $ease-out;
+
+      &:hover {
+        border-color: var(--color-border-strong);
+        transform: translateY(-1px);
+      }
+
+      .toolScreenshotImage {
+        display: block;
+        width: 100%;
+        height: 148px;
+        object-fit: cover;
+        object-position: top;
+        background: var(--color-bg-mute);
+      }
+
+      .toolScreenshotCaption {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: $space-2;
+        padding: $space-1 $space-2;
+        color: var(--color-text-dim);
+
+        > span {
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          min-width: 0;
+          font-size: $fs-10;
+        }
+
+        small {
+          flex-shrink: 0;
+          color: var(--color-text-mute);
+          font-size: $fs-10;
+        }
+      }
+    }
+
+    .toolScreenshotPlaceholder {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: $space-2;
+      width: 100%;
+      height: 82px;
+      border: 1px solid var(--color-border);
+      border-radius: $radius-sm;
+      background: var(--color-bg);
+      color: var(--color-text-mute);
+
+      .toolScreenshotLoader {
+        animation: version-spin 0.8s linear infinite;
+      }
+    }
+
+    .toolScreenshotMeta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: $space-2;
+      color: var(--color-text-faint);
+      font-size: $fs-10;
+
+      > span {
+        @include truncate;
+        min-width: 0;
+      }
+
+      small {
+        flex-shrink: 0;
+        color: var(--color-success);
+        font-size: $fs-10;
+      }
+    }
+  }
+
   // 参数面板：可滚动，文件内容再长也不会撑爆布局
   // 展开区：放「参数」「结果」两段，顶部用虚线和头部分隔
   .toolChipDetail {
@@ -886,6 +985,18 @@
 
 // ── 响应式（移动端）─────────────────────────────
 @include mobile {
+  .toolChip {
+    .toolScreenshot {
+      width: min(260px, calc(100vw - 48px));
+
+      .toolScreenshotButton {
+        .toolScreenshotImage {
+          height: 136px;
+        }
+      }
+    }
+  }
+
   .askChip {
     .askChipTab {
       max-width: 120px;

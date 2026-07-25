@@ -21,11 +21,14 @@ from app.agents.loop import (
     _file_tree_note,
     build_round_agent,
     latest_round_thread_id,
+    restore_round_build_reuse_state,
     sse,
     with_heartbeat,
 )
+from app.agents.tools import BuildCheckReuseState
 from app.db import get_db
 from app.deps import get_owned_session
+from app.generation_control import managed_generation, reserve_generation
 from app.llm import allowed_model_ids, default_model_id, validate_thinking_option
 from app.models.message import Message as DBMessage
 from app.models.session import Session
@@ -77,6 +80,14 @@ async def _resume_stream(session_id: str, body: AskResult, db: AsyncSession, use
 
         db_lock = asyncio.Lock()
         tree_note = await _file_tree_note(db, session_id)
+        build_reuse_state = BuildCheckReuseState()
+        await restore_round_build_reuse_state(
+            db,
+            session_id,
+            thread_id,
+            db_lock,
+            build_reuse_state,
+        )
         agent = build_round_agent(
             db,
             session_id,
@@ -84,6 +95,7 @@ async def _resume_stream(session_id: str, body: AskResult, db: AsyncSession, use
             db_lock,
             tree_note,
             thinking=body.thinking,
+            build_reuse_state=build_reuse_state,
         )
 
         config = {"configurable": {"thread_id": thread_id}}
@@ -148,6 +160,7 @@ async def _resume_stream(session_id: str, body: AskResult, db: AsyncSession, use
             user_id=user_id,
             initial_pending={ask_call["id"]: ("ask_user", ask_call["args"], tool_msg)},
             emit_reasoning=body.thinking is not False,
+            build_reuse_state=build_reuse_state,
         ):
             yield event
     except HTTPException as e:
@@ -167,8 +180,14 @@ async def report_ask_result(
     会话归属由 get_owned_session 把关；顺手拿到的 session.user_id 是这一轮的原始
     请求者，传给 _consume 用于「成功才扣」的计费收尾。
     """
+    lease = reserve_generation(session_id)
+    if lease is None:
+        raise HTTPException(status_code=409, detail="项目正在删除，无法继续生成")
     return StreamingResponse(
-        with_heartbeat(_resume_stream(session_id, body, db, session.user_id)),
+        managed_generation(
+            lease,
+            with_heartbeat(_resume_stream(session_id, body, db, session.user_id)),
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

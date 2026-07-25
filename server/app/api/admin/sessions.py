@@ -7,9 +7,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import build_store
 from app.db import get_db
+from app.checkpointer import delete_session_checkpoints
+from app.generation_control import (
+    allow_session_generations,
+    cancel_session_generations,
+)
 from app.models.session import Session, SessionAdminRead
 from app.models.user import User
+from app.preview_screenshots import remove_session_screenshots
 
 router = APIRouter(prefix="/sessions", tags=["admin-sessions"])
 
@@ -50,6 +57,17 @@ async def delete_session(session_id: str, db: AsyncSession = Depends(get_db)) ->
     session = await db.get(Session, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="会话不存在")
-    await db.delete(session)
-    await db.commit()
+    await cancel_session_generations(session_id, prevent_new=True)
+    deleted = False
+    try:
+        await delete_session_checkpoints(db, session_id)
+        build_store.disarm_session(session_id)
+        await db.delete(session)
+        await db.commit()
+        deleted = True
+        await remove_session_screenshots(session_id)
+    except BaseException:
+        if not deleted:
+            allow_session_generations(session_id)
+        raise
     return Response(status_code=204)

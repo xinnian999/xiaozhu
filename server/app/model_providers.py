@@ -21,6 +21,8 @@ from langchain_openai import ChatOpenAI
 from langchain_qwq import ChatQwen
 from langchain_xai import ChatXAI
 
+from app.config import settings
+
 
 @dataclass(frozen=True)
 class ProviderSpec:
@@ -569,6 +571,10 @@ def build_chat_model(meta: dict, *, thinking: bool | None = None) -> BaseChatMod
             "base_url": base_url,
             "max_tokens": 16384,
             "max_retries": 2,
+            # 这里限制的是连续无内容分片的时间，不是整轮生成时间。Qwen 生成
+            # 大文件工具参数时可能经过中转长时间停顿，默认放宽到 300 秒；
+            # 仍可按部署网络状况单独覆盖，不影响其他 OpenAI 兼容模型。
+            "stream_chunk_timeout": settings.qwen_stream_chunk_timeout_s,
         }
         if thinking is not None:
             kwargs["enable_thinking"] = thinking

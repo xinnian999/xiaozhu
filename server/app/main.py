@@ -26,6 +26,7 @@ from app.api import (
     chat,
     files,
     messages,
+    preview_screenshots,
     resume,
     sessions,
     share,
@@ -212,6 +213,7 @@ app.include_router(share.router)
 app.include_router(files.router)
 app.include_router(versions.router)
 app.include_router(messages.router)
+app.include_router(preview_screenshots.router)
 app.include_router(build_result.router)
 app.include_router(boot_failure.router)
 app.include_router(ask_result.router)
@@ -274,4 +276,3 @@ async def serve_snapshot(request: Request) -> FileResponse:
 #   html=True：访问 "/" 自动返回 index.html（单页应用入口）。
 if STATIC_DIR.is_dir():
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
-

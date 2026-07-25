@@ -8,6 +8,7 @@ pydantic-settings 的核心思路：
 
 import os
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,6 +26,16 @@ class Settings(BaseSettings):
     # 正常运行时每个模型的 provider/base_url/api_key 都来自 llm_models；这里保留
     # OPENAI_BASE_URL 与 API_KEY_*，只为旧部署首次播种数据库时平滑迁移。
     openai_base_url: str | None = None
+
+    # ── LLM 流式连接保护 ──────────────────────────────────────
+    # 这是“相邻两个已解析内容分片之间”的空闲超时，不是整轮生成时长。
+    # 大文件会作为 write_file 的 content 工具参数持续生成；Qwen 经中转偶发长时间
+    # 不吐新分片，因此默认比 LangChain 的 120 秒更宽松，但仍保留上限避免永久挂起。
+    qwen_stream_chunk_timeout_s: float = Field(
+        default=300.0,
+        gt=0,
+        allow_inf_nan=False,
+    )
 
     @property
     def api_keys(self) -> dict[str, str]:

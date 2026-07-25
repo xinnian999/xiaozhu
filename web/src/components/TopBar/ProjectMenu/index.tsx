@@ -34,16 +34,16 @@ export default function ProjectMenu() {
   }, [])
   useClickOutside(rootRef, close)
 
-  const handleSelect = (id: string) => {
-    switchTo(id)
+  const handleSelect = async (id: string) => {
+    await switchTo(id)
     close()
   }
 
   // 「新建项目」= 回到空态首屏（不立即建库），等用户发首条消息时再真正创建
   // 行为与首屏一致，避免出现空项目占位
-  const handleCreate = () => {
+  const handleCreate = async () => {
+    await goToEmpty()
     close()
-    goToEmpty()
   }
 
   // ── 重命名 ───────────────────────────────────────────
@@ -148,7 +148,7 @@ export default function ProjectMenu() {
                       type="button"
                       role="menuitem"
                       className={styles.itemSelect}
-                      onClick={() => handleSelect(s.id)}
+                      onClick={() => void handleSelect(s.id)}
                     >
                       <span className={styles.itemMain}>
                         <span className={styles.itemName}>{s.title}</span>
@@ -167,8 +167,9 @@ export default function ProjectMenu() {
                     <button
                       type="button"
                       className={`${styles.actionBtn} ${styles.actionDelete}`}
-                      title="删除"
-                      aria-label="删除"
+                      title={s.id === activeId ? '当前项目不能删除，请先切换项目' : '删除'}
+                      aria-label={s.id === activeId ? '当前项目不能删除' : '删除'}
+                      disabled={s.id === activeId}
                       onClick={() => setConfirmId(s.id)}
                     >
                       <Trash2 size={13} />
@@ -178,7 +179,7 @@ export default function ProjectMenu() {
               </li>
             ))}
           </ul>
-          <button type="button" className={styles.createBtn} onClick={handleCreate}>
+          <button type="button" className={styles.createBtn} onClick={() => void handleCreate()}>
             <Plus size={14} />
             <span>新建项目</span>
           </button>

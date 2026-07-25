@@ -8,6 +8,19 @@
 /** 文件路径 → 内容 */
 export type FileMap = Record<string, string>
 
+/** check_build 在预览 iframe 内生成的一张 DOM 光栅化截图。
+ *  url 可能是刚截图后的 blob URL，也可能是后端返回的私有持久化地址。 */
+export type PreviewScreenshot = {
+  id: string
+  url: string
+  width: number
+  height: number
+  path: string
+  mime: string
+  /** 本地截图尚未被后端持久化；仅用于卡片即时展示。 */
+  local?: boolean
+}
+
 export type Version = {
   id: string
   label: string
@@ -48,6 +61,8 @@ export type Message = {
   toolCallId?: string
   /** kind === 'tool' 时使用：工具执行结果文本（写入回执 / 文件内容 / 报错等，已截断） */
   toolResult?: string
+  /** kind === 'tool' 且 toolName === 'check_build'：本次截图自检记录。 */
+  toolScreenshot?: PreviewScreenshot
   /** kind === 'version' 时使用：版本主键 id（回滚按钮调 restore 用） */
   versionId?: number
   /** kind === 'version' 时使用：版本序号（卡片显示 vN） */

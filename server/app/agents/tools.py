@@ -20,8 +20,11 @@ app.agents.loop 里 thread_id / checkpointer 的说明），所以这两个工�
 """
 
 import asyncio
+import hashlib
 import json
+from dataclasses import dataclass, field
 
+from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
 from langgraph.types import interrupt
 from sqlalchemy import select
@@ -29,13 +32,134 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import build_store
 from app.models.file import File
+from app.preview_screenshots import build_screenshot_artifact
 
 
-def build_tools(db: AsyncSession, session_id: str, db_lock: asyncio.Lock) -> list:
+@dataclass
+class BuildCheckReuseState:
+    """同一轮 Agent 内的构建幂等状态。
+
+    ``check_build`` 真正执行前，loop 已经要决定是否向浏览器发 ``preview_refresh``；
+    因此判定状态必须由 loop 与工具闭包共享，不能只在工具内部做结果缓存。
+    """
+
+    _decisions: dict[str, str] = field(default_factory=dict)
+    _cacheable_results: dict[str, bool | None] = field(default_factory=dict)
+    _cached_fingerprint: str | None = None
+    _cached_content: str | None = None
+
+    def prepare_check(
+        self,
+        check_id: str,
+        fingerprint: str | None,
+        *,
+        force_fresh: bool = False,
+    ) -> bool:
+        """登记一次检查；返回 True 表示可直接复用上次结果。"""
+        reuse = bool(
+            not force_fresh
+            and fingerprint
+            and self._cached_content
+            and fingerprint == self._cached_fingerprint
+        )
+        self._decisions[check_id] = "reuse" if reuse else "fresh"
+        return reuse
+
+    def should_reuse(self, check_id: str) -> bool:
+        return self._decisions.get(check_id) == "reuse"
+
+    def has_decision(self, check_id: str) -> bool:
+        return check_id in self._decisions
+
+    def restore(self, fingerprint: str, content: str) -> None:
+        """从同一 LangGraph 轮的持久化工具记录恢复可靠缓存。"""
+        if fingerprint and content:
+            self._cached_fingerprint = fingerprint
+            self._cached_content = content
+
+    def reused_content(self) -> str:
+        previous = self._cached_content or "上一次检查结果仍然有效。"
+        return (
+            "本轮上次自检后未检测到文件变化，已跳过重复构建和截图，"
+            "直接复用上一次结论：\n"
+            f"{previous}\n"
+            "请直接依据该结论继续处理；除非先实际修改文件，否则不要再次调用 check_build。"
+        )
+
+    def note_fresh_result(
+        self,
+        check_id: str,
+        *,
+        cacheable: bool | None,
+    ) -> None:
+        """由工具记录真实检查是否足够可靠，等 tools 节点结束后再绑定文件指纹。"""
+        self._cacheable_results[check_id] = cacheable
+
+    def has_result_classification(self, check_id: str) -> bool:
+        return check_id in self._cacheable_results
+
+    def finish_check(
+        self,
+        check_id: str,
+        fingerprint: str | None,
+        content: str,
+    ) -> str:
+        """在整批工具都完成后提交缓存，并返回持久化动作。"""
+        decision = self._decisions.pop(check_id, None)
+        cacheable = self._cacheable_results.pop(check_id, False)
+        if decision == "reuse":
+            return "reuse"
+        if cacheable is None:
+            # 同批额外 check_build 的合成错误不代表预览状态，不覆盖已有缓存。
+            return "ignore"
+        if cacheable and fingerprint:
+            self._cached_fingerprint = fingerprint
+            self._cached_content = content
+            return "store"
+        # 超时、取消或成功但没有可靠截图都属于瞬态不完整结果，允许下一次真实重试。
+        self._cached_fingerprint = None
+        self._cached_content = None
+        return "clear"
+
+
+async def project_files_fingerprint(
+    db: AsyncSession,
+    session_id: str,
+    db_lock: asyncio.Lock,
+) -> str:
+    """对当前完整文件集做稳定摘要，识别真正的内容变化。
+
+    不依赖工具调用次数或 SQLite 时间精度；写回相同内容、失败编辑、手动回滚都能得到
+    与实际文件状态一致的判断。
+    """
+    async with db_lock:
+        result = await db.execute(
+            select(File.path, File.content)
+            .where(File.session_id == session_id)
+            .order_by(File.path.asc())
+        )
+        rows = list(result.all())
+
+    digest = hashlib.sha256()
+    for path, content in rows:
+        for value in (path, content):
+            encoded = value.encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+    return digest.hexdigest()
+
+
+def build_tools(
+    db: AsyncSession,
+    session_id: str,
+    db_lock: asyncio.Lock,
+    build_reuse_state: BuildCheckReuseState | None = None,
+) -> list:
     """构造一组绑定到指定 session 的工具。
 
     db_lock：agent_loop 传入的请求级 asyncio.Lock，与消费端共用，串行化所有 db 操作。
     """
+    build_reuse_state = build_reuse_state or BuildCheckReuseState()
 
     @tool
     async def write_file(path: str, content: str) -> str:
@@ -121,8 +245,8 @@ def build_tools(db: AsyncSession, session_id: str, db_lock: asyncio.Lock) -> lis
             paths = result.scalars().all()
         return json.dumps(paths, ensure_ascii=False)
 
-    @tool
-    async def check_build() -> str:
+    @tool(response_format="content_and_artifact")
+    async def check_build(runtime: ToolRuntime) -> tuple[str, dict | None]:
         """把刚写的改动应用到预览、构建一次，并返回构建/运行报错。
 
         写完一组完整、能渲染的改动后调用它：前端会把暂存文件同步进容器、跑一次
@@ -134,6 +258,7 @@ def build_tools(db: AsyncSession, session_id: str, db_lock: asyncio.Lock) -> lis
         务必调一次 check_build 才会真正构建 + 揭晓，也才能拿到报错。
 
         典型用法：write_file 写完所有相关文件 → check_build → 有报错就修、再 check_build。
+        如果本轮上一次检查后文件没有变化，不要再次调用；工具层会跳过重复构建和截图。
         """
         # 时序：本工具的 tool_call 一出现，agent_loop 就会先 build_store.arm() 架好会合点、
         # 再推 preview_refresh 信号给前端（工具闭包里没法 yield 事件，所以放在 loop 里做，
@@ -143,20 +268,98 @@ def build_tools(db: AsyncSession, session_id: str, db_lock: asyncio.Lock) -> lis
         #
         # 所以这里只需纯等一个结果：前端多快回、这里多快返回，不靠固定窗口猜。
         # timeout=90 只是「前端彻底失联（构建卡死/断线）」的兜底，正常情况远用不到。
-        result = await build_store.wait(session_id, timeout=90.0)
+        check_id = runtime.tool_call_id
+        if not check_id:
+            return "构建检查内部错误：缺少 tool_call_id，请重新检查。", None
+
+        # 断线续跑不会重放 model 节点里的 prepare_check。此时用恢复出的同轮缓存与
+        # 当前文件摘要补判一次；真实待构建请求已由 resume API 重新 arm。
+        if not build_reuse_state.has_decision(check_id):
+            try:
+                fingerprint = await project_files_fingerprint(
+                    db,
+                    session_id,
+                    db_lock,
+                )
+            except Exception as exc:
+                print(
+                    "[check_build] 续跑摘要计算失败，不能复用旧结果: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                fingerprint = None
+            build_reuse_state.prepare_check(check_id, fingerprint)
+
+        if build_reuse_state.should_reuse(check_id):
+            return build_reuse_state.reused_content(), None
+
+        result = await build_store.wait(session_id, check_id, timeout=90.0)
         if result is None:
-            return "构建超时：预览迟迟没有回报结果，可能构建卡住或预览断开，请提示用户检查预览。"
+            build_reuse_state.note_fresh_result(check_id, cacheable=False)
+            return (
+                "构建超时：预览迟迟没有回报结果，可能构建卡住或预览断开，"
+                "请提示用户检查预览。",
+                None,
+            )
+
+        # 截图是附加能力：文件读取失败时只打印诊断，构建文本结果仍照常回给 Agent。
+        artifact = None
+        screenshot_id = result.get("screenshot_id")
+        if screenshot_id:
+            try:
+                artifact = await build_screenshot_artifact(
+                    session_id,
+                    str(screenshot_id),
+                )
+            except Exception as exc:
+                print(
+                    "[check_build] 截图读取失败，本次仅返回构建结果: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+        # 同一批里额外出现的 check_build 是 loop 合成的内部结果，不代表真实预览状态。
+        synthetic = bool(result.get("_synthetic"))
         if result.get("ok"):
-            return "构建通过，预览正常，没有报错。"
+            if artifact is not None:
+                build_reuse_state.note_fresh_result(
+                    check_id,
+                    cacheable=None if synthetic else True,
+                )
+                return (
+                    "编译、运行时与浏览器基础布局规则通过；"
+                    "这不代表视觉截图已经合格，附带截图仍需由支持视觉的模型严格审查。",
+                    artifact,
+                )
+            build_reuse_state.note_fresh_result(check_id, cacheable=False)
+            return (
+                "编译、运行时与浏览器基础布局规则通过，但本次没有取得可靠截图，"
+                "视觉效果尚未验证。",
+                None,
+            )
+        build_reuse_state.note_fresh_result(
+            check_id,
+            cacheable=None if synthetic else True,
+        )
         errors = str(result.get("errors") or "").strip() or "（无详细错误信息）"
         if result.get("visual") and result.get("runtime"):
-            return f"构建通过，但预览同时存在运行与布局问题，请全部修复后再次检查：\n{errors}"
+            return (
+                f"构建通过，但预览同时存在运行与布局问题，请全部修复后再次检查：\n{errors}",
+                artifact,
+            )
         if result.get("visual"):
-            return f"构建通过，但预览布局验收失败，请按报告修复后再次检查：\n{errors}"
+            return (
+                f"构建通过，但预览布局验收失败，请按报告修复后再次检查：\n{errors}",
+                artifact,
+            )
         if result.get("runtime"):
             # 编译过了、但 iframe 渲染时崩（如 undefined is not a function）
-            return f"构建通过，但预览运行时报错，请定位并修复：\n{errors}"
-        return f"预览构建失败（编译没通过），请定位并修复：\n{errors}"
+            return (
+                f"构建通过，但预览运行时报错，请定位并修复：\n{errors}",
+                artifact,
+            )
+        return (
+            f"预览构建失败（编译没通过），请定位并修复：\n{errors}",
+            artifact,
+        )
 
     @tool
     async def ask_user(questions: list[dict]) -> str:

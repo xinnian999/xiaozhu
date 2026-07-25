@@ -15,6 +15,7 @@ import {
 } from '@/store/session'
 import { useUIStore } from '@/store/ui'
 import { streamChat, streamAskResult, streamResume, type SSEEvent } from '@/lib/api'
+import { registerSessionStream } from '@/lib/sessionStream'
 import { toast } from '@/lib/toast'
 import { useClickOutside } from '@/hooks/useClickOutside'
 import type { Message } from '@/types/project'
@@ -214,6 +215,7 @@ export default function ChatSidebar() {
   // 会话标记为可续跑，让用户点「继续生成」从断点接着跑，而不用从头重来。
   const consumeStream = async (
     stream: AsyncGenerator<SSEEvent>,
+    ownerSessionId: string,
     showReasoning = true,
   ): Promise<boolean> => {
     // 逐 token 累积到本地变量，再统一冲刷给 store
@@ -268,7 +270,7 @@ export default function ChatSidebar() {
         upsertToolCall(event.id, event.name, event.args as Record<string, unknown>)
       } else if (event.type === 'tool_result') {
         // 工具执行完 → 按 id 找到对应工具卡，把结果填上（卡片展开即可查看）
-        setToolResult(event.id, event.result)
+        setToolResult(event.id, event.result, event.screenshot)
       } else if (event.type === 'file_write') {
         // LLM 写文件 —— 只更新本地 files 快照（代码视图/文件树实时跟着变）。
         // 注意：流式途中 PreviewPane 不会自动构建，运行中的预览保持上一个稳定态，
@@ -278,7 +280,8 @@ export default function ChatSidebar() {
         applyFileDelete(event.path)
       } else if (event.type === 'preview_refresh') {
         // AI 调 check_build：这一组改动写完、可渲染了 —— 把暂存文件应用进预览并重新构建
-        requestPreviewApply()
+        // 请求显式带上流所属会话，切换后仍在完成的旧构建不会污染新项目。
+        requestPreviewApply(event.id, ownerSessionId)
       } else if (event.type === 'version') {
         // 产生了新版本：先把本轮已累积的叙述固化成消息（让最终回复气泡先落位），
         // 再插一张版本卡，保证卡片排在回复之后
@@ -361,6 +364,7 @@ export default function ChatSidebar() {
     beginStreaming()
     const controller = new AbortController()
     abortRef.current = controller
+    const finishStream = registerSessionStream(targetSessionId, controller)
 
     // 3. 流式消费 SSE
     try {
@@ -374,6 +378,7 @@ export default function ChatSidebar() {
           false,
           thinkingForRequest,
         ),
+        targetSessionId,
         thinkingForRequest !== false,
       )
       // 流没正常收场（既非 done/error，也非 ask_user 暂停）= 连接中途断了。
@@ -384,8 +389,9 @@ export default function ChatSidebar() {
       //    退出流式态会让 PreviewPane 的构建 effect 重跑：若本轮有改动还没构建过
       //    （AI 没在最后调 check_build），它会兜底构建最终态 + 刷新预览，所以这里
       //    不必再手动刷——手动刷只会重载到旧 dist（没重新构建），没有意义。
-      abortRef.current = null
+      if (abortRef.current === controller) abortRef.current = null
       endStreaming()
+      finishStream()
       // 一轮结束刷新额度：成功跑完后端已扣点，这里把「今日剩余」拉到最新。
       // 中断 / 报错没扣点，刷新拿到的还是原值，UI 也对。
       loadBilling()
@@ -413,6 +419,7 @@ export default function ChatSidebar() {
     beginStreaming()
     const controller = new AbortController()
     abortRef.current = controller
+    const finishStream = registerSessionStream(session.id, controller)
 
     try {
       // message 传空串、retry=true：真正的 prompt 由后端取最后一条用户消息
@@ -426,12 +433,14 @@ export default function ChatSidebar() {
           true,
           thinkingForRequest,
         ),
+        session.id,
         thinkingForRequest !== false,
       )
       if (!settled) setResumable(session.id, true)
     } finally {
-      abortRef.current = null
+      if (abortRef.current === controller) abortRef.current = null
       endStreaming()
+      finishStream()
       loadBilling() // 重试一轮同样可能扣点，结束后刷新今日剩余
     }
   }
@@ -447,16 +456,19 @@ export default function ChatSidebar() {
     beginStreaming()
     const controller = new AbortController()
     abortRef.current = controller
+    const finishStream = registerSessionStream(session.id, controller)
 
     try {
       const settled = await consumeStream(
         streamResume(session.id, selectedModel, controller.signal, thinkingForRequest),
+        session.id,
         thinkingForRequest !== false,
       )
       if (!settled) setResumable(session.id, true)
     } finally {
-      abortRef.current = null
+      if (abortRef.current === controller) abortRef.current = null
       endStreaming()
+      finishStream()
       loadBilling()
     }
   }
@@ -487,6 +499,7 @@ export default function ChatSidebar() {
       beginStreaming()
       const controller = new AbortController()
       abortRef.current = controller
+      const finishStream = registerSessionStream(session.id, controller)
       try {
         const settled = await consumeStream(
           streamAskResult(
@@ -497,6 +510,7 @@ export default function ChatSidebar() {
             controller.signal,
             thinkingForRequest,
           ),
+          session.id,
           thinkingForRequest !== false,
         )
         if (!settled) setResumable(session.id, true)
@@ -506,8 +520,9 @@ export default function ChatSidebar() {
         beginAwaitingAnswer()
         throw error
       } finally {
-        abortRef.current = null
+        if (abortRef.current === controller) abortRef.current = null
         endStreaming()
+        finishStream()
         loadBilling()
       }
       return

@@ -13,20 +13,30 @@ import asyncio
 import json
 import re
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass, field
 from datetime import date
 
 from fastapi import HTTPException
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import build_store
-from app.agents.middleware import NoBluffMiddleware
+from app.agents.message_content import build_human_content
+from app.agents.middleware import (
+    NoBluffMiddleware,
+    ScreenshotVisionMiddleware,
+    screenshot_from_artifact,
+)
 from app.agents.prompts import SYSTEM_PROMPT
-from app.agents.tools import build_tools
+from app.agents.tools import (
+    BuildCheckReuseState,
+    build_tools,
+    project_files_fingerprint,
+)
 from app.checkpointer import get_checkpointer
 from app.llm import build_llm, models_by_id
 from app.model_providers import (
@@ -99,7 +109,14 @@ async def with_heartbeat(
             yield item
             next_task = asyncio.ensure_future(it.__anext__())
     finally:
-        next_task.cancel()
+        # cancel 只是发出请求，不是完成屏障。必须等待当前 __anext__ 真正退出，再显式
+        # aclose 暂停在 yield 处的内层生成器，确保 _consume/build_store 的 finally 已执行。
+        if not next_task.done():
+            next_task.cancel()
+        await asyncio.gather(next_task, return_exceptions=True)
+        aclose = getattr(it, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
 
 def extract_text(response) -> str:
@@ -139,26 +156,42 @@ def _is_truncation_reason(reason: object) -> bool:
     } or normalized.endswith(".max_tokens")
 
 
-def build_human_content(text: str, images: list[str] | None) -> str | list[dict]:
-    """把「文本 + 图片」拼成 LLM 的 HumanMessage content。
+def _restored_check_cacheability(
+    content: str,
+    *,
+    has_screenshot: bool,
+) -> bool | None:
+    """断线恰好发生在 tools 节点后时，从 ToolMessage 恢复结果分类。
 
-    没图片就直接返回纯字符串 —— 最省事、最省 token,行为和以前完全一样。
-    有图片时使用 LangChain 标准内容块，由各厂商适配器转换成自己的 wire format。
-    这样 Anthropic / Gemini 不会再收到硬编码的 OpenAI ``image_url`` 结构。
+    正常路径由 check_build 工具直接登记；这里只处理旧工具闭包状态已经随请求消失、
+    但 ToolMessage 被 checkpointer 保存下来的续跑边界。
     """
-    if not images:
-        return text
-    blocks: list[dict] = []
-    if text:
-        blocks.append({"type": "text", "text": text})
-    for url in images:
-        if url.startswith("data:") and ";base64," in url:
-            header, data = url.split(",", 1)
-            mime_type = header[5:].split(";", 1)[0] or "image/png"
-            blocks.append({"type": "image", "base64": data, "mime_type": mime_type})
-        else:
-            blocks.append({"type": "image", "url": url})
-    return blocks
+    if "同一批工具调用里出现了多个 check_build" in content:
+        return None
+    if has_screenshot:
+        return True
+    if content.startswith("预览构建失败（编译没通过）"):
+        return True
+    if content.startswith("构建通过，但预览") and any(
+        marker in content for marker in ("报错", "失败", "问题")
+    ):
+        return True
+    return False
+
+
+def _synthetic_duplicate_check_result() -> dict:
+    """给同一 AIMessage 里的额外 check_build 一个即时内部结果。"""
+    return {
+        "ok": False,
+        "errors": (
+            "同一批工具调用里出现了多个 check_build；"
+            "本次只执行第一项，请等待其结果后再检查。"
+        ),
+        "runtime": False,
+        "visual": False,
+        "screenshot_id": None,
+        "_synthetic": True,
+    }
 
 
 # ── Agentic Loop（消费图的事件流）─────────────────────────────────────────────────
@@ -378,6 +411,23 @@ async def _save_message(
     return msg
 
 
+def _stored_tool_args(args: dict | None, tool_call_id: str) -> dict:
+    """工具行额外保存 LangGraph 的调用 ID，刷新后仍能幂等更新同一张卡。"""
+    return {
+        **(args or {}),
+        "_tool_call_id": tool_call_id,
+    }
+
+
+def _public_tool_args(args: dict | None) -> dict:
+    """去掉只供恢复/缓存使用的内部字段，得到模型原始工具参数。"""
+    return {
+        key: value
+        for key, value in (args or {}).items()
+        if key != "_tool_call_id" and not key.startswith("_build_")
+    }
+
+
 async def _save_reasoning_message(
     db: AsyncSession,
     db_lock: asyncio.Lock,
@@ -441,10 +491,12 @@ async def _early_file_write(
                 )
             )
             content = res.scalar_one_or_none()
-        # 只有唯一命中才敢提前折算，和 edit_file 工具本身同款守卫；含糊 / 找不到就不抢发。
-        if content is None or content.count(old) != 1:
+        if content is None:
             return None
-        return {"type": "file_write", "path": path, "content": content.replace(old, new, 1)}
+        # 唯一命中时预应用编辑后的内容；找不到/多处命中意味着 edit_file 最终会拒绝写入，
+        # 此时把数据库当前原文发给前端，仍能保证紧随其后的 check_build 构建真实文件态。
+        next_content = content.replace(old, new, 1) if content.count(old) == 1 else content
+        return {"type": "file_write", "path": path, "content": next_content}
     return None
 
 
@@ -508,6 +560,53 @@ async def latest_round_thread_id(db: AsyncSession, session_id: str) -> str | Non
     return f"{session_id}:{last_user.id}" if last_user is not None else None
 
 
+async def restore_round_build_reuse_state(
+    db: AsyncSession,
+    session_id: str,
+    thread_id: str,
+    db_lock: asyncio.Lock,
+    build_reuse_state: BuildCheckReuseState,
+) -> bool:
+    """恢复同一用户消息触发轮次里的最近一次有效构建缓存。
+
+    ``ignore`` 是同批额外 check_build 的合成结果，向前继续找；``clear`` 或没有新元数据
+    表示最近一次真实检查不完整，必须停止，不能误用更早的截图。
+    """
+    try:
+        last_user_id = int(thread_id.rsplit(":", 1)[1])
+    except (ValueError, IndexError):
+        return False
+
+    async with db_lock:
+        result = await db.execute(
+            select(DBMessage)
+            .where(
+                DBMessage.session_id == session_id,
+                DBMessage.id > last_user_id,
+                DBMessage.kind == "tool",
+                DBMessage.tool_name == "check_build",
+                DBMessage.text != "",
+            )
+            .order_by(DBMessage.id.desc())
+            .limit(50)
+        )
+        rows = list(result.scalars().all())
+
+    for row in rows:
+        metadata = row.tool_args or {}
+        action = metadata.get("_build_cache")
+        if action in ("ignore", "reuse"):
+            continue
+        if action != "store":
+            return False
+        fingerprint = metadata.get("_build_fingerprint")
+        if not isinstance(fingerprint, str) or not fingerprint or not row.text:
+            return False
+        build_reuse_state.restore(fingerprint, row.text)
+        return True
+    return False
+
+
 def build_round_agent(
     db: AsyncSession,
     session_id: str,
@@ -515,83 +614,360 @@ def build_round_agent(
     db_lock: asyncio.Lock,
     tree_note: str,
     thinking: bool | None = None,
+    build_reuse_state: BuildCheckReuseState | None = None,
 ):
     """按本轮选的模型重建 llm/tools/agent（含 checkpointer + NoBluffMiddleware）。
 
     与 agent_loop 首次创建 agent 的装配方式完全一致，供 resume / ask_result 复用。
-    调用方负责先算好 tree_note（当下真实文件状态）和 db_lock。
+    调用方负责先算好 tree_note（当下真实文件状态）和 db_lock；真正进入 _consume 时
+    还要把同一个 build_reuse_state 传过去，让触发层和工具层共享幂等判定。
     """
     llm = build_llm(model, thinking=thinking)
-    tools = build_tools(db, session_id, db_lock)
+    tools = build_tools(
+        db,
+        session_id,
+        db_lock,
+        build_reuse_state=build_reuse_state,
+    )
+    model_meta = models_by_id().get(model, {})
     agent = create_agent(
         llm,
         tools,
         system_prompt=SYSTEM_PROMPT + tree_note,
         checkpointer=get_checkpointer(),
-        middleware=[NoBluffMiddleware(llm)],
+        middleware=[
+            ScreenshotVisionMiddleware(
+                enabled=bool(model_meta.get("vision")),
+                session_id=session_id,
+            ),
+            NoBluffMiddleware(llm),
+        ],
     )
     return agent
 
 
-async def reseed_pending_from_state(
-    db: AsyncSession, session_id: str, state
-) -> dict[str, tuple[str, dict, DBMessage]]:
-    """从检查点图状态里找出「还没有 ToolMessage 回填」的 tool_calls，补种 pending 字典。
+@dataclass
+class PendingToolRecovery:
+    """从检查点恢复出的工具批次及其 UI/构建处理方式。"""
 
-    resume / 续跑都是一次全新的 astream() 调用：那些 tool_call 是在【上一次】被打断的调用
-    里产出的，这次不会重新产出对应的 "model" 节点事件，pending 天然是空的。不补种的话，
-    续跑后 "tools" 节点回传的 ToolMessage 会因按 tool_call_id 查不到而被静默丢弃（结果存不
-    进 DB、前端也收不到 tool_result）。见 _consume 的 initial_pending 参数说明。
+    pending: dict[str, tuple[str, dict, DBMessage]] = field(default_factory=dict)
+    open_calls: list[dict] = field(default_factory=list)
+    completed_calls: list[dict] = field(default_factory=list)
+    replay_events: list[dict] = field(default_factory=list)
+    primary_check_ids: set[str] = field(default_factory=set)
+    suppressed_check_ids: set[str] = field(default_factory=set)
+    synthetic_check_ids: set[str] = field(default_factory=set)
+    wrote_files: bool = False
 
-    做法：扫描 state.values["messages"]，收集所有已出现的 ToolMessage.tool_call_id（=已完成），
-    再遍历 AIMessage.tool_calls，把「尚未完成」的那些，逐个匹配 DB 里对应的待回填工具行
-    （kind='tool' 且 text=''，按 tool_name + tool_args 精确匹配），拼成 {id: (name, args, DBMessage)}。
 
-    这是 ask_result 里单个 ask_user 补种逻辑的推广——覆盖「断连时正卡在 tools 节点
-    （check_build / write_file 尚未回传结果）」这一续跑最常见场景。
-    """
+def _checkpoint_tool_state(
+    state,
+) -> tuple[list[list[dict]], dict[str, dict], list[ToolMessage], set[str]]:
+    """拆出 open 批次、调用索引、尾部已完成结果和同批 secondary 检查。"""
     messages = state.values.get("messages", []) if state and state.values else []
+    done_ids = {
+        tcid
+        for message in messages
+        if (tcid := getattr(message, "tool_call_id", None))
+    }
+    open_batches: list[list[dict]] = []
+    calls_by_id: dict[str, dict] = {}
+    secondary_check_ids: set[str] = set()
+    for message in messages:
+        calls = list(getattr(message, "tool_calls", None) or [])
+        calls_by_id.update({tc["id"]: tc for tc in calls})
+        check_ids = [tc["id"] for tc in calls if tc["name"] == "check_build"]
+        secondary_check_ids.update(check_ids[1:])
+        batch = [
+            tc
+            for tc in calls
+            if tc["id"] not in done_ids
+        ]
+        if batch:
+            open_batches.append(batch)
 
-    # 已有 ToolMessage 的 tool_call_id = 该工具已执行完，不用补种
-    done_ids: set[str] = set()
-    for m in messages:
-        tcid = getattr(m, "tool_call_id", None)
-        if tcid:
-            done_ids.add(tcid)
-
-    # 收集所有「已发起但还没回结果」的 tool_call
-    open_calls: list[dict] = []
-    for m in messages:
-        for tc in getattr(m, "tool_calls", None) or []:
-            if tc["id"] not in done_ids:
-                open_calls.append(tc)
-    if not open_calls:
-        return {}
-
-    # 把这些 open_calls 匹配到 DB 里等着回填的工具行（_consume 当初为每个 tool_call 存了
-    # 一条 kind='tool' text='' 的行）。同名同参可能有多条，用 used 集合避免一行被认领两次。
-    result = await db.execute(
-        select(DBMessage)
-        .where(
-            DBMessage.session_id == session_id,
-            DBMessage.kind == "tool",
-            DBMessage.text == "",
-        )
-        .order_by(DBMessage.id.asc())
+    # state.next 已到 model、但 _consume 还没处理 tools update 时，消息尾部是一组
+    # ToolMessage。只对账这一组；更早的结果早已正常落库，不能重新生成重复卡。
+    trailing_tool_messages: list[ToolMessage] = []
+    for message in reversed(messages):
+        if isinstance(message, AIMessage):
+            break
+        if isinstance(message, ToolMessage):
+            trailing_tool_messages.append(message)
+    trailing_tool_messages.reverse()
+    return (
+        open_batches,
+        calls_by_id,
+        trailing_tool_messages,
+        secondary_check_ids,
     )
-    tool_rows = list(result.scalars().all())
 
-    pending: dict[str, tuple[str, dict, DBMessage]] = {}
-    used: set[int] = set()
-    for tc in open_calls:
+
+async def reseed_pending_from_state(
+    db: AsyncSession,
+    session_id: str,
+    thread_id: str,
+    state,
+    db_lock: asyncio.Lock,
+    build_reuse_state: BuildCheckReuseState,
+) -> PendingToolRecovery:
+    """从检查点完整重建断线时尚未完成的工具批次。
+
+    不能只查数据库空工具行：客户端可能在 ``tool_call`` / ``preview_refresh`` 的 yield
+    边界断开，此时 LangGraph 已保存 AIMessage，但消费端尚未来得及落工具行。这里以
+    checkpoint 为真相源，匹配已有行并为缺失的可见调用补行；同批额外 check_build 和
+    命中同轮缓存的检查继续保持隐藏，不会因续跑变成新的自检卡。
+    """
+    (
+        batches,
+        calls_by_id,
+        trailing_tool_messages,
+        secondary_check_ids,
+    ) = _checkpoint_tool_state(state)
+    recovery = PendingToolRecovery(
+        open_calls=[tc for batch in batches for tc in batch],
+    )
+    completed_pairs: list[tuple[dict, ToolMessage]] = []
+    for tool_message in trailing_tool_messages:
+        tc = calls_by_id.get(tool_message.tool_call_id)
+        if tc is not None:
+            completed_pairs.append((tc, tool_message))
+    relevant_calls = [
+        *[tc for tc, _tool_message in completed_pairs],
+        *recovery.open_calls,
+    ]
+    if not relevant_calls:
+        return recovery
+
+    conditions = [
+        DBMessage.session_id == session_id,
+        DBMessage.kind == "tool",
+    ]
+    try:
+        conditions.append(DBMessage.id > int(thread_id.rsplit(":", 1)[1]))
+    except (ValueError, IndexError):
+        pass
+
+    async with db_lock:
+        result = await db.execute(
+            select(DBMessage)
+            .where(*conditions)
+            .order_by(DBMessage.id.asc())
+        )
+        tool_rows = list(result.scalars().all())
+
+    # 优先按持久化 tool_call_id 精确认领。只有旧数据完全没有 ID 时，才允许按
+    # name + public args 兜底；带着其它 ID 的陈旧空行绝不能抢占本次调用。
+    matched_rows: dict[str, DBMessage] = {}
+    used_row_ids: set[int] = set()
+    for tc in relevant_calls:
         for row in tool_rows:
-            if row.id in used:
+            if row.id in used_row_ids:
                 continue
-            if row.tool_name == tc["name"] and (row.tool_args or {}) == (tc.get("args") or {}):
-                pending[tc["id"]] = (tc["name"], tc.get("args") or {}, row)
-                used.add(row.id)
+            stored_id = (row.tool_args or {}).get("_tool_call_id")
+            if stored_id == tc["id"]:
+                matched_rows[tc["id"]] = row
+                used_row_ids.add(row.id)
                 break
-    return pending
+
+    for tc in relevant_calls:
+        if tc["id"] in matched_rows:
+            continue
+        args = tc.get("args") or {}
+        for row in reversed(tool_rows):
+            if row.id in used_row_ids:
+                continue
+            stored_id = (row.tool_args or {}).get("_tool_call_id")
+            if (
+                not stored_id
+                and not row.text
+                and row.tool_name == tc["name"]
+                and _public_tool_args(row.tool_args) == args
+            ):
+                matched_rows[tc["id"]] = row
+                used_row_ids.add(row.id)
+                break
+
+    # 旧空行可能尚未保存 tool_call_id；补齐后，页面刷新再续跑仍能 upsert 同一张卡。
+    if matched_rows:
+        async with db_lock:
+            for call_id, row in matched_rows.items():
+                row.tool_args = {
+                    **(row.tool_args or {}),
+                    "_tool_call_id": call_id,
+                }
+            await db.commit()
+
+    # ── tools 节点已完成、消费端尚未来得及落库：从 checkpoint 对账回填 ──
+    for tc, tool_message in completed_pairs:
+        call_id = tc["id"]
+        name = tc["name"]
+        args = tc.get("args") or {}
+        tool_result = str(tool_message.content or "")
+
+        hidden_check = name == "check_build" and (
+            call_id in secondary_check_ids
+            or "已跳过重复构建和截图" in tool_result
+            or "同一批工具调用里出现了多个 check_build" in tool_result
+        )
+        if hidden_check:
+            recovery.suppressed_check_ids.add(call_id)
+            continue
+
+        row = matched_rows.get(call_id)
+        was_persisted = bool(row is not None and row.text)
+        if row is None:
+            row = await _save_message(
+                db,
+                db_lock,
+                session_id,
+                "assistant",
+                "",
+                kind="tool",
+                tool_name=name,
+                tool_args=_stored_tool_args(args, call_id),
+            )
+
+        capped = (
+            tool_result
+            if len(tool_result) <= TOOL_RESULT_CAP
+            else tool_result[:TOOL_RESULT_CAP] + "\n…（结果过长已截断）"
+        )
+        row.text = capped
+        screenshot_ref = None
+        screenshot = screenshot_from_artifact(tool_message.artifact)
+        if screenshot is not None:
+            screenshot_ref = screenshot[1]
+            row.images = [str(screenshot_ref["url"])]
+
+        if name == "check_build":
+            if not was_persisted:
+                # ToolMessage 没携带“检查发生时”的文件摘要。断线后用户可能已经回滚/
+                # 手动保存，绝不能拿恢复时的当前摘要给旧截图背书；只回填卡片并清缓存。
+                build_reuse_state.prepare_check(
+                    call_id,
+                    None,
+                    force_fresh=True,
+                )
+                build_reuse_state.note_fresh_result(
+                    call_id,
+                    cacheable=False,
+                )
+                build_reuse_state.finish_check(call_id, None, capped)
+                row.tool_args = {
+                    **_stored_tool_args(args, call_id),
+                    "_build_cache": "clear",
+                }
+        else:
+            row.tool_args = _stored_tool_args(args, call_id)
+
+        result_event = {
+            "type": "tool_result",
+            "id": call_id,
+            "result": capped,
+        }
+        if screenshot_ref is not None:
+            result_event["screenshot"] = screenshot_ref
+        recovery.completed_calls.append(tc)
+        recovery.replay_events.append(result_event)
+
+        write_succeeded = (
+            name == "write_file"
+            and tool_result == f"已写入 {args.get('path')}"
+        ) or (
+            name == "edit_file"
+            and tool_result == f"已编辑 {args.get('path')}"
+        )
+        path = args.get("path")
+        if write_succeeded and isinstance(path, str):
+            # 旧 write_file args 可能已被用户回滚。恢复 UI 必须以数据库此刻的真相为准，
+            # 和 edit_file 一样重读当前内容；文件已不存在则显式删除本地草稿。
+            async with db_lock:
+                current = await db.execute(
+                    select(File.content).where(
+                        File.session_id == session_id,
+                        File.path == path,
+                    )
+                )
+                content = current.scalar_one_or_none()
+            recovery.wrote_files = True
+            recovery.replay_events.append(
+                (
+                    {"type": "file_write", "path": path, "content": content}
+                    if content is not None
+                    else {"type": "file_delete", "path": path}
+                )
+            )
+
+    if recovery.completed_calls:
+        async with db_lock:
+            await db.commit()
+
+    for batch in batches:
+        has_same_batch_write = any(
+            tc["name"] in ("write_file", "edit_file")
+            for tc in batch
+        )
+        check_calls = [tc for tc in batch if tc["name"] == "check_build"]
+        primary_check_id = check_calls[0]["id"] if check_calls else None
+        fingerprint = None
+        if check_calls and not has_same_batch_write:
+            try:
+                fingerprint = await project_files_fingerprint(
+                    db,
+                    session_id,
+                    db_lock,
+                )
+            except Exception as exc:
+                print(
+                    "[resume] 文件摘要计算失败，本批检查执行真实构建: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+        for tc in batch:
+            call_id = tc["id"]
+            name = tc["name"]
+            args = tc.get("args") or {}
+            row = matched_rows.get(call_id)
+
+            if name == "check_build":
+                if call_id != primary_check_id:
+                    build_reuse_state.prepare_check(
+                        call_id,
+                        fingerprint,
+                        force_fresh=has_same_batch_write,
+                    )
+                    recovery.suppressed_check_ids.add(call_id)
+                    if not build_reuse_state.should_reuse(call_id):
+                        recovery.synthetic_check_ids.add(call_id)
+                    continue
+
+                # 已经有空行说明这张真实检查卡在断线前已落库；即使内容后来恰好回滚成
+                # 旧摘要，也应完成原卡，不能把它悄悄留成永久 loading。
+                reuse = build_reuse_state.prepare_check(
+                    call_id,
+                    fingerprint,
+                    force_fresh=has_same_batch_write or row is not None,
+                )
+                if reuse:
+                    recovery.suppressed_check_ids.add(call_id)
+                    continue
+                recovery.primary_check_ids.add(call_id)
+
+            if row is None:
+                row = await _save_message(
+                    db,
+                    db_lock,
+                    session_id,
+                    "assistant",
+                    "",
+                    kind="tool",
+                    tool_name=name,
+                    tool_args=_stored_tool_args(args, call_id),
+                )
+            recovery.pending[call_id] = (name, args, row)
+
+    return recovery
 
 
 async def _consume(
@@ -606,7 +982,11 @@ async def _consume(
     db_lock: asyncio.Lock,
     user_id: str,
     initial_pending: dict[str, tuple[str, dict, DBMessage]] | None = None,
+    initial_early_written: set[str] | None = None,
+    initial_suppressed_check_ids: set[str] | None = None,
+    initial_wrote_files: bool = False,
     emit_reasoning: bool = True,
+    build_reuse_state: BuildCheckReuseState | None = None,
 ) -> AsyncGenerator[str, None]:
     """消费 agent.astream(...) 的事件流,翻译成 SSE + 落库副作用。
 
@@ -621,20 +1001,35 @@ async def _consume(
     (答案存不进 DB、前端也收不到 tool_result)。调用方(ask_result)负责从 DB 查出那条
     待回填的 kind='tool' 消息,连同 tool_call_id 一并传进来。
 
+    initial_early_written / initial_suppressed_check_ids / initial_wrote_files 由断线续跑
+    恢复器提供：分别避免重复发送预应用文件、保持隐藏检查身份，并确保 tools 节点已经
+    完成但消费端尚未处理时，最终仍会为已落库的文件改动生成版本快照。
+
     emit_reasoning=False 表示本轮显式关闭思考：即使厂商仍返回推理字段，也不下发
     reasoning SSE、不生成兜底卡，并且不把 reasoning 消息持久化到数据库。
+
+    build_reuse_state 必须与 build_round_agent 构造工具时使用的是同一个对象；否则 loop
+    虽能跳过 preview_refresh，check_build 工具却看不到复用决定。
     """
     final_assistant_text = ""
     final_reasoning_payload: dict | None = None
     reasoning_seq = 0
     active_reasoning_id: str | None = None
     active_reasoning_text = ""
-    wrote_files = False
+    wrote_files = initial_wrote_files
     truncated = False
+    build_reuse_state = build_reuse_state or BuildCheckReuseState()
     pending: dict[str, tuple[str, dict, DBMessage]] = dict(initial_pending or {})
     # 「同批含 check_build」时被抢先补发过 file_write 的 tool_call_id 集合 ——
     # tools 节点回收结果时据此跳过重发，避免同一文件的 file_write 发两遍（见 _early_file_write）。
-    early_written: set[str] = set()
+    early_written: set[str] = set(initial_early_written or ())
+    # model 节点 arm 发生在 preview_refresh yield 之前；若客户端恰在该帧断开，
+    # ToolNode 可能还没启动、wait() 也就无从 finally 清理。函数级 finally 用此集合
+    # 撤销所有残留会合点（正常已由 wait 清掉的调用是 no-op）。
+    armed_check_ids: set[str] = set()
+    # 复用检查只在 LangGraph 内部回一条 ToolMessage 给模型，不落库、不发 SSE 工具卡；
+    # 用户时间线继续保留上一次真实构建卡，避免看起来又自检了一遍。
+    suppressed_check_ids: set[str] = set(initial_suppressed_check_ids or ())
 
     # ── 工具卡「流式提前亮」用的累积状态 ──
     announced_tools: set[str] = set()
@@ -736,6 +1131,10 @@ async def _consume(
                             continue
                         name = tool_chunk_name.get(cid, "")
                         if name and cid not in announced_tools:
+                            # check_build 要等完整 model update 才能知道是否命中同轮幂等缓存；
+                            # 先不亮卡，避免随后判定为复用时留下一张空的重复自检卡。
+                            if name == "check_build":
+                                continue
                             announced_tools.add(cid)
                             print(f"[tool_call·流式提前·出卡] name={name}")
                             yield sse({"type": "tool_call", "name": name, "args": {}, "id": cid})
@@ -823,9 +1222,24 @@ async def _consume(
                                 # （见 middleware.aafter_model 第一行判断),此刻就能放心下发。
                                 yield sse({"type": "message_delta", "text": text})
                                 await _save_message(db, db_lock, session_id, "assistant", text)
+                            # 极少数 provider 会无视 parallel_tool_calls=False。若同一批给出
+                            # 多个 check_build，前端只有一个 WebContainer，不能并发构建；
+                            # 只执行第一项，后续项仍 arm 后立即回一条可读错误，避免它们各等
+                            # 90 秒或让 scalar preview 请求互相覆盖。
+                            primary_check_id = next(
+                                (
+                                    call["id"]
+                                    for call in m.tool_calls
+                                    if call["name"] == "check_build"
+                                ),
+                                None,
+                            )
+                            has_same_batch_write = any(
+                                call["name"] in ("write_file", "edit_file")
+                                for call in m.tool_calls
+                            )
                             for tc in m.tool_calls:
                                 print(f"[tool_call] name={tc['name']} args={list(tc['args'].keys())}")
-                                yield sse({"type": "tool_call", "name": tc["name"], "args": tc["args"], "id": tc["id"]})
                                 if tc["name"] == "check_build":
                                     # ── 竞态防护：同批若还有 write_file/edit_file，它们真正的 file_write
                                     # 事件会被 tools 节点屏障拖到 check_build 之后才发（见 _early_file_write
@@ -843,15 +1257,87 @@ async def _consume(
                                             wrote_files = True
                                             early_written.add(other["id"])
                                             yield sse(ev)
-                                    build_store.arm(session_id)
-                                    yield sse({"type": "preview_refresh"})
+
+                                    # ── 同轮幂等：可靠检查之后文件摘要完全相同，就不再触发浏览器。
+                                    # 同批带写工具时 DB 可能尚未提交，无法安全比较最终摘要，必须
+                                    # 强制真实检查；整批 tools 完成后再由 finish_check 记录新摘要。
+                                    fingerprint = None
+                                    if not has_same_batch_write:
+                                        try:
+                                            fingerprint = await project_files_fingerprint(
+                                                db,
+                                                session_id,
+                                                db_lock,
+                                            )
+                                        except Exception as exc:
+                                            print(
+                                                "[check_build] 文件摘要计算失败，本次执行真实检查: "
+                                                f"{type(exc).__name__}: {exc}"
+                                            )
+                                    reuse = build_reuse_state.prepare_check(
+                                        tc["id"],
+                                        fingerprint,
+                                        force_fresh=has_same_batch_write,
+                                    )
+                                    if reuse:
+                                        suppressed_check_ids.add(tc["id"])
+                                        print(
+                                            "[check_build] 文件未变化，跳过重复构建 "
+                                            f"id={tc['id']}"
+                                        )
+                                        # ToolNode 仍会执行并把缓存结论回给模型，维持
+                                        # AIMessage ↔ ToolMessage 配对；只是不给用户再画一张卡。
+                                        continue
+
+                                    if tc["id"] != primary_check_id:
+                                        # 同一 AIMessage 里额外出现的 check_build 只回一条
+                                        # 合成 ToolMessage 给模型，不触发浏览器，也不生成第二张卡。
+                                        suppressed_check_ids.add(tc["id"])
+                                        build_store.arm(session_id, tc["id"])
+                                        armed_check_ids.add(tc["id"])
+                                        build_store.report(
+                                            session_id,
+                                            tc["id"],
+                                            _synthetic_duplicate_check_result(),
+                                        )
+                                        continue
+
+                                    # check_build 在流式参数阶段被刻意延后到这里才亮卡；此时已
+                                    # 确认它确实会触发一次新的构建。
+                                    announced_tools.add(tc["id"])
+                                    yield sse(
+                                        {
+                                            "type": "tool_call",
+                                            "name": tc["name"],
+                                            "args": tc["args"],
+                                            "id": tc["id"],
+                                        }
+                                    )
+                                    build_store.arm(session_id, tc["id"])
+                                    armed_check_ids.add(tc["id"])
+                                    yield sse(
+                                        {
+                                            "type": "preview_refresh",
+                                            "id": tc["id"],
+                                        }
+                                    )
+                                else:
+                                    yield sse(
+                                        {
+                                            "type": "tool_call",
+                                            "name": tc["name"],
+                                            "args": tc["args"],
+                                            "id": tc["id"],
+                                        }
+                                    )
                                 # ask_user 不需要类似的"武装会合点"：它的问题内容已经通过上面
                                 # 这条 tool_call 事件的 args 字段（questions）下发给前端了，
                                 # 等待 / 恢复完全交给 interrupt() + checkpointer（见上面
                                 # __interrupt__ 分支），不需要在这里额外记录任何东西。
                                 tool_msg = await _save_message(
                                     db, db_lock, session_id, "assistant", "", kind="tool",
-                                    tool_name=tc["name"], tool_args=tc["args"],
+                                    tool_name=tc["name"],
+                                    tool_args=_stored_tool_args(tc["args"], tc["id"]),
                                 )
                                 pending[tc["id"]] = (tc["name"], tc["args"], tool_msg)
                         else:
@@ -871,6 +1357,21 @@ async def _consume(
 
                 elif node_name == "tools":
                     for tm in node_messages:
+                        # tools 节点通常只产 ToolMessage；显式收窄后再访问 tool_call_id /
+                        # artifact，避免 provider 或中间件附带其它消息类型时误处理。
+                        if not isinstance(tm, ToolMessage):
+                            continue
+                        if tm.tool_call_id in suppressed_check_ids:
+                            build_reuse_state.finish_check(
+                                tm.tool_call_id,
+                                None,
+                                "",
+                            )
+                            print(
+                                "[check_build] 已把复用结论回给模型，"
+                                f"不生成重复工具卡 id={tm.tool_call_id}"
+                            )
+                            continue
                         name, args, tool_msg = pending.get(tm.tool_call_id, (None, None, None))
                         if name is None:
                             continue
@@ -882,9 +1383,65 @@ async def _consume(
                             else tool_result[:TOOL_RESULT_CAP] + "\n…（结果过长已截断）"
                         )
                         tool_msg.text = capped
+                        screenshot_ref = None
+                        screenshot = screenshot_from_artifact(tm.artifact)
+                        if screenshot is not None:
+                            screenshot_ref = screenshot[1]
+                            # Message.images 已有持久化与刷新回显能力；这里只保存鉴权 URL，
+                            # 不把 data URL 再复制一份进主数据库。
+                            tool_msg.images = [str(screenshot_ref["url"])]
+                        if name == "check_build":
+                            # 正常路径的工具闭包已经登记分类；断线续跑若换了闭包，则从
+                            # checkpointer 里的 ToolMessage 保守恢复，避免丢掉可靠结果。
+                            if not build_reuse_state.has_result_classification(
+                                tm.tool_call_id
+                            ):
+                                build_reuse_state.note_fresh_result(
+                                    tm.tool_call_id,
+                                    cacheable=_restored_check_cacheability(
+                                        capped,
+                                        has_screenshot=screenshot is not None,
+                                    ),
+                                )
+                            fingerprint = None
+                            try:
+                                fingerprint = await project_files_fingerprint(
+                                    db,
+                                    session_id,
+                                    db_lock,
+                                )
+                            except Exception as exc:
+                                print(
+                                    "[check_build] 结果摘要计算失败，不缓存本次检查: "
+                                    f"{type(exc).__name__}: {exc}"
+                                )
+                            cache_action = build_reuse_state.finish_check(
+                                tm.tool_call_id,
+                                fingerprint,
+                                capped,
+                            )
+                            # ask_user / 断线续跑会重建工具闭包；把本轮缓存动作与摘要放在
+                            # 已有工具行里即可恢复，不增加表结构，也绝不跨用户消息复用。
+                            tool_msg.tool_args = {
+                                **(args or {}),
+                                "_tool_call_id": tm.tool_call_id,
+                                "_build_cache": cache_action,
+                                **(
+                                    {"_build_fingerprint": fingerprint}
+                                    if cache_action == "store" and fingerprint
+                                    else {}
+                                ),
+                            }
                         async with db_lock:
                             await db.commit()
-                        yield sse({"type": "tool_result", "id": tm.tool_call_id, "result": capped})
+                        result_event = {
+                            "type": "tool_result",
+                            "id": tm.tool_call_id,
+                            "result": capped,
+                        }
+                        if screenshot_ref is not None:
+                            result_event["screenshot"] = screenshot_ref
+                        yield sse(result_event)
 
                         if name == "check_build":
                             print(f"[check_build] {tool_result}")
@@ -971,6 +1528,9 @@ async def _consume(
         yield sse({"type": "error", "message": str(e)})
         await _cleanup_thread(thread_id)
         yield sse({"type": "done"})
+    finally:
+        for check_id in armed_check_ids:
+            build_store.disarm(session_id, check_id)
 
 
 async def agent_loop(
@@ -1053,6 +1613,7 @@ async def agent_loop(
     # checkpointer：ask_user 的 interrupt()/resume 需要它持久化图状态(见 app.checkpointer)。
     # 这一步理论上不太会失败,但和上面构造 llm/tools 一样做同款 error+done 兜底,
     # 避免任何异常在 StreamingResponse 内部裸抛,把前端卡在「思考中」出不来。
+    build_reuse_state = BuildCheckReuseState()
     try:
         agent = build_round_agent(
             db,
@@ -1061,6 +1622,7 @@ async def agent_loop(
             db_lock,
             tree_note,
             thinking=req.thinking,
+            build_reuse_state=build_reuse_state,
         )
     except HTTPException as e:
         yield sse({"type": "error", "message": str(e.detail)})
@@ -1089,5 +1651,6 @@ async def agent_loop(
         db_lock=db_lock,
         user_id=user_id,
         emit_reasoning=req.thinking is not False,
+        build_reuse_state=build_reuse_state,
     ):
         yield event

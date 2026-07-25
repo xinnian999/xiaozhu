@@ -12,6 +12,10 @@ set_checkpointer() 存起来；shutdown 时随 lifespan 的 async with 自然关
 """
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.message import Message as DBMessage
 
 _checkpointer: AsyncSqliteSaver | None = None
 
@@ -27,3 +31,19 @@ def get_checkpointer() -> AsyncSqliteSaver:
     if _checkpointer is None:
         raise RuntimeError("checkpointer 尚未初始化：lifespan 是否还没跑完？")
     return _checkpointer
+
+
+async def delete_session_checkpoints(
+    db: AsyncSession,
+    session_id: str,
+) -> None:
+    """删除会话前清掉它所有用户轮次的 LangGraph 临时状态。"""
+    result = await db.execute(
+        select(DBMessage.id).where(
+            DBMessage.session_id == session_id,
+            DBMessage.role == "user",
+            DBMessage.kind == "text",
+        )
+    )
+    for message_id in result.scalars().all():
+        await get_checkpointer().adelete_thread(f"{session_id}:{message_id}")

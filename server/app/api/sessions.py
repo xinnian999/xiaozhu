@@ -10,14 +10,21 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import build_store
+from app.checkpointer import delete_session_checkpoints
 from app.db import get_db
 from app.deps import get_current_user, get_owned_session
+from app.generation_control import (
+    allow_session_generations,
+    cancel_session_generations,
+)
 from app.models.file import File
 from app.models.message import Message
 from app.models.session import Session, SessionCreate, SessionRead, SessionUpdate
 from app.models.shared_asset import SharedAsset
 from app.models.user import User
 from app.models.version import Version, VersionFile
+from app.preview_screenshots import remove_session_screenshots
 from app.templates import load_template
 
 # prefix="/api/sessions" → 这个 router 里所有路由都以 /api/sessions 开头
@@ -141,19 +148,38 @@ async def delete_session(
     不会出现「文件删了但会话还在」这种删一半的脏状态。
     """
     sid = session.id
+    # 客户端 abort 只代表浏览器不再读流；这里再由服务端取消并等待 agent/工具 finally，
+    # 同时阻止已经通过鉴权、但尚未开始输出的旧请求重新启动。
+    await cancel_session_generations(sid, prevent_new=True)
+    deleted = False
 
-    # 1. 版本快照文件：按「属于本会话的版本」收窄删除（子查询）
-    version_ids = select(Version.id).where(Version.session_id == sid)
-    await db.execute(delete(VersionFile).where(VersionFile.version_id.in_(version_ids)))
-    # 2. 版本元信息
-    await db.execute(delete(Version).where(Version.session_id == sid))
-    # 3. 当前工作副本文件
-    await db.execute(delete(File).where(File.session_id == sid))
-    # 4. 对话消息
-    await db.execute(delete(Message).where(Message.session_id == sid))
-    # 5. 分享出去的构建产物
-    await db.execute(delete(SharedAsset).where(SharedAsset.session_id == sid))
-    # 6. 最后删会话本身
-    await db.delete(session)
+    try:
+        # checkpoint 与 build_store 都是数据库事务之外的运行时状态，必须在消息行消失前
+        # 清理；否则删除后无法再由 user message id 推导 thread_id。
+        await delete_session_checkpoints(db, sid)
+        build_store.disarm_session(sid)
 
-    await db.commit()
+        # 1. 版本快照文件：按「属于本会话的版本」收窄删除（子查询）
+        version_ids = select(Version.id).where(Version.session_id == sid)
+        await db.execute(delete(VersionFile).where(VersionFile.version_id.in_(version_ids)))
+        # 2. 版本元信息
+        await db.execute(delete(Version).where(Version.session_id == sid))
+        # 3. 当前工作副本文件
+        await db.execute(delete(File).where(File.session_id == sid))
+        # 4. 对话消息
+        await db.execute(delete(Message).where(Message.session_id == sid))
+        # 5. 分享出去的构建产物
+        await db.execute(delete(SharedAsset).where(SharedAsset.session_id == sid))
+        # 6. 最后删会话本身
+        await db.delete(session)
+
+        await db.commit()
+        deleted = True
+        # 截图不在数据库里，事务提交后再清精确 session 目录。路径 helper 会拒绝任何
+        # ``..``/分隔符，绝不会把删除范围扩到 preview-screenshots 根目录。
+        await remove_session_screenshots(sid)
+    except BaseException:
+        # 事务提交前失败时会话还存在，撤销 tombstone，允许用户修复后继续使用。
+        if not deleted:
+            allow_session_generations(sid)
+        raise

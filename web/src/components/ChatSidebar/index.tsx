@@ -91,7 +91,8 @@ export default function ChatSidebar() {
   const setMobileView = useUIStore((s) => s.setMobileView)
   // 把暂存的文件揭晓到预览并触发重新构建（AI 调 check_build 时触发）
   const requestPreviewApply = useUIStore((s) => s.requestPreviewApply)
-  // Agent 可根据需求把观察画布切到桌面或 H5；只允许当前仍激活的会话改全局 UI。
+  // Agent 仅在明确移动优先时自动切到 H5；默认桌面无需重复设置。
+  // 用户明确要求切回桌面时仍可使用同一事件；只允许当前激活会话改全局 UI。
   const setPreviewDevice = useUIStore((s) => s.setPreviewDevice)
   // 点缩略图放大预览
   const openImagePreview = useUIStore((s) => s.openImagePreview)
@@ -288,8 +289,8 @@ export default function ChatSidebar() {
         // 切项目会中断旧流，但网络上仍可能有一帧迟到事件；再次核对归属，不能让旧项目
         // 把用户正在看的新项目画布切走。
         if (useSessionStore.getState().activeId === ownerSessionId) {
-          // Agent 首次根据需求选择的设备也属于这个项目；持久化后刷新仍沿用，
-          // 但不会额外做“重新判断设备并覆盖用户选择”的自动切换。
+          // Agent 只在明确移动优先时切 H5，或按用户要求切回桌面；选择按项目持久化，
+          // 刷新后继续沿用，不再额外“确认一次”当前设备。
           setPreviewDevice(event.device, ownerSessionId)
         }
       } else if (event.type === 'version') {

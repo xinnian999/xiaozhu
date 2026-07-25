@@ -65,6 +65,9 @@ FROM crpi-a7p27yxlrmekg1a3.cn-beijing.personal.cr.aliyuncs.com/elin-common/pytho
 COPY --from=crpi-a7p27yxlrmekg1a3.cn-beijing.personal.cr.aliyuncs.com/elin-common/uv:latest /uv /uvx /bin/
 # Worker 与主 API 放在同一个部署容器；只把 Bun 可执行文件带入最终镜像。
 COPY --from=sandbox-builder /usr/local/bin/bun /usr/local/bin/bun
+# Vite 的 bin 脚本使用 `#!/usr/bin/env node`。运行阶段不需要再安装完整 Node，
+# 但必须提供这个兼容入口，否则 Worker 能启动、实际构建却会在执行 Vite 前失败。
+RUN ln -s /usr/local/bin/bun /usr/local/bin/node
 
 WORKDIR /app
 
@@ -81,6 +84,9 @@ RUN uv sync --frozen --no-dev --no-install-project
 #   alembic/ + alembic.ini  数据库迁移脚本与配置（启动时 upgrade 用）
 COPY server/app ./app
 COPY --from=sandbox-builder /opt/template ./templates/vite-react
+# 在镜像构建期就执行一次与线上相同的 Vite 入口，避免缺少 node 兼容命令的问题
+# 直到真实用户构建时才暴露。
+RUN node ./templates/vite-react/node_modules/vite/bin/vite.js --version
 COPY server/alembic ./alembic
 COPY server/alembic.ini ./alembic.ini
 # scripts/ 里有 make_admin.py：生产里把自己设为管理员要用

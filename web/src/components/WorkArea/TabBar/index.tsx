@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { Eye, Code2, ChevronLeft, RotateCw, ExternalLink, Terminal, Save, Undo2, Download, Loader2 } from 'lucide-react'
-import { useUIStore, type WorkTab } from '@/store/ui'
+import { Eye, Code2, ChevronLeft, RotateCw, ExternalLink, Terminal, Save, Undo2, Download, Loader2, Monitor, Smartphone } from 'lucide-react'
+import { useUIStore, type PreviewDevice, type WorkTab } from '@/store/ui'
 import { useSessionStore } from '@/store/session'
 import { downloadSourceAsZip } from '@/lib/download'
 import { toast } from '@/lib/toast'
@@ -18,9 +18,20 @@ const TABS: { key: WorkTab; label: string; Icon: typeof Eye }[] = [
   { key: 'code', label: '代码', Icon: Code2 },
 ]
 
+const PREVIEW_DEVICES: {
+  key: PreviewDevice
+  label: string
+  Icon: typeof Monitor
+}[] = [
+  { key: 'desktop', label: '桌面画布', Icon: Monitor },
+  { key: 'mobile', label: 'H5 画布', Icon: Smartphone },
+]
+
 export default function TabBar() {
   const workTab = useUIStore((s) => s.workTab)
   const setWorkTab = useUIStore((s) => s.setWorkTab)
+  const previewDevice = useUIStore((s) => s.previewDevice)
+  const setPreviewDevice = useUIStore((s) => s.setPreviewDevice)
   const chatCollapsed = useUIStore((s) => s.chatCollapsed)
   const toggleChat = useUIStore((s) => s.toggleChatCollapsed)
   // 控制台抽屉开关：终端按钮亮起表示当前打开
@@ -140,61 +151,80 @@ export default function TabBar() {
       {/* 中间：preview 显示地址栏；code tab 留空占位（flex:1 撑开，把右侧按钮顶到最右） */}
       <div className={styles.center}>
         {!isCode && (
-          <div className={styles.urlBar}>
-            <button
-              className={styles.urlIconBtn}
-              onClick={() => sendPreviewNav('back')}
-              disabled={!wcUrl || !canBack}
-              aria-label="后退"
-              title="后退"
-            >
-              <ChevronLeft size={13} />
-            </button>
-            <button
-              className={styles.urlIconBtn}
-              onClick={() => sendPreviewNav('forward')}
-              disabled={!wcUrl || !canForward}
-              aria-label="前进"
-              title="前进"
-            >
-              <ChevronLeft size={13} style={{ transform: 'rotate(180deg)' }} />
-            </button>
-            <button
-              className={styles.urlIconBtn}
-              onClick={() => sendPreviewNav('reload')}
-              disabled={!wcUrl}
-              aria-label="刷新预览"
-              title="刷新预览"
-            >
-              <RotateCw size={12} />
-            </button>
-
-            <div className={styles.urlInput}>
-              <span className={styles.urlBrand} aria-hidden>vb</span>
-              {/* 直接显示当前路由路径（默认 '/'），不再拼假域名 / 版本号 */}
-              <span className={styles.urlPath}>{previewPath || '/'}</span>
+          <>
+            {/* 设备开关改变的是 iframe 的真实 viewport，媒体查询和截图都会跟着切换。 */}
+            <div className={styles.deviceSwitch} aria-label="预览画布设备">
+              {PREVIEW_DEVICES.map(({ key, label, Icon }) => (
+                <button
+                  key={key}
+                  type="button"
+                  className={`${styles.deviceBtn} ${previewDevice === key ? styles.deviceBtnActive : ''}`}
+                  onClick={() => setPreviewDevice(key, activeId)}
+                  aria-label={`切换到${label}`}
+                  aria-pressed={previewDevice === key}
+                  title={label}
+                >
+                  <Icon size={13} />
+                </button>
+              ))}
             </div>
 
-            <button
-              className={styles.urlIconBtn}
-              onClick={handleShare}
-              aria-label="分享预览"
-              title="分享预览"
-            >
-              <ExternalLink size={12} />
-            </button>
+            <div className={styles.urlBar}>
+              <button
+                className={styles.urlIconBtn}
+                onClick={() => sendPreviewNav('back')}
+                disabled={!wcUrl || !canBack}
+                aria-label="后退"
+                title="后退"
+              >
+                <ChevronLeft size={13} />
+              </button>
+              <button
+                className={styles.urlIconBtn}
+                onClick={() => sendPreviewNav('forward')}
+                disabled={!wcUrl || !canForward}
+                aria-label="前进"
+                title="前进"
+              >
+                <ChevronLeft size={13} style={{ transform: 'rotate(180deg)' }} />
+              </button>
+              <button
+                className={styles.urlIconBtn}
+                onClick={() => sendPreviewNav('reload')}
+                disabled={!wcUrl}
+                aria-label="刷新预览"
+                title="刷新预览"
+              >
+                <RotateCw size={12} />
+              </button>
 
-            {/* 下载源码：放在分享按钮旁边，做成同款地址栏图标按钮 */}
-            <button
-              className={styles.urlIconBtn}
-              onClick={handleDownload}
-              disabled={downloading}
-              aria-label="下载源码"
-              title="下载源码"
-            >
-              {downloading ? <Loader2 size={12} className={styles.spin} /> : <Download size={12} />}
-            </button>
-          </div>
+              <div className={styles.urlInput}>
+                <span className={styles.urlBrand} aria-hidden>vb</span>
+                {/* 直接显示当前路由路径（默认 '/'），不再拼假域名 / 版本号 */}
+                <span className={styles.urlPath}>{previewPath || '/'}</span>
+              </div>
+
+              <button
+                className={styles.urlIconBtn}
+                onClick={handleShare}
+                aria-label="分享预览"
+                title="分享预览"
+              >
+                <ExternalLink size={12} />
+              </button>
+
+              {/* 下载源码：放在分享按钮旁边，做成同款地址栏图标按钮 */}
+              <button
+                className={styles.urlIconBtn}
+                onClick={handleDownload}
+                disabled={downloading}
+                aria-label="下载源码"
+                title="下载源码"
+              >
+                {downloading ? <Loader2 size={12} className={styles.spin} /> : <Download size={12} />}
+              </button>
+            </div>
+          </>
         )}
       </div>
 

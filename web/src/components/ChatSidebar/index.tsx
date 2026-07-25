@@ -91,6 +91,8 @@ export default function ChatSidebar() {
   const setMobileView = useUIStore((s) => s.setMobileView)
   // 把暂存的文件揭晓到预览并触发重新构建（AI 调 check_build 时触发）
   const requestPreviewApply = useUIStore((s) => s.requestPreviewApply)
+  // Agent 可根据需求把观察画布切到桌面或 H5；只允许当前仍激活的会话改全局 UI。
+  const setPreviewDevice = useUIStore((s) => s.setPreviewDevice)
   // 点缩略图放大预览
   const openImagePreview = useUIStore((s) => s.openImagePreview)
 
@@ -282,6 +284,14 @@ export default function ChatSidebar() {
         // AI 调 check_build：这一组改动写完、可渲染了 —— 把暂存文件应用进预览并重新构建
         // 请求显式带上流所属会话，切换后仍在完成的旧构建不会污染新项目。
         requestPreviewApply(event.id, ownerSessionId)
+      } else if (event.type === 'preview_device') {
+        // 切项目会中断旧流，但网络上仍可能有一帧迟到事件；再次核对归属，不能让旧项目
+        // 把用户正在看的新项目画布切走。
+        if (useSessionStore.getState().activeId === ownerSessionId) {
+          // Agent 首次根据需求选择的设备也属于这个项目；持久化后刷新仍沿用，
+          // 但不会额外做“重新判断设备并覆盖用户选择”的自动切换。
+          setPreviewDevice(event.device, ownerSessionId)
+        }
       } else if (event.type === 'version') {
         // 产生了新版本：先把本轮已累积的叙述固化成消息（让最终回复气泡先落位），
         // 再插一张版本卡，保证卡片排在回复之后

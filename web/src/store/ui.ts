@@ -6,6 +6,54 @@ import { create } from 'zustand'
 
 export type WorkTab = 'preview' | 'code'
 
+/** 预览画布设备。它只决定 iframe 的 viewport，不改变生成页面必须响应式的原则。 */
+export type PreviewDevice = 'desktop' | 'mobile'
+
+const PREVIEW_DEVICE_STORAGE_KEY = 'xiaozhu:preview-device-by-session'
+
+/** 画布偏好按会话保存，避免 H5 项目与桌面项目互相污染。
+ *  localStorage 不可用或内容损坏时静默退回空表，不能让 UI store 初始化失败。 */
+function getStoredPreviewDevices(): Record<string, PreviewDevice> {
+  if (typeof window === 'undefined') return {}
+  try {
+    const parsed: unknown = JSON.parse(
+      window.localStorage.getItem(PREVIEW_DEVICE_STORAGE_KEY) ?? '{}',
+    )
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        ([sessionId, device]) => (
+          sessionId.length > 0 && (device === 'desktop' || device === 'mobile')
+        ),
+      ),
+    )
+  } catch {
+    return {}
+  }
+}
+
+/** 首次加载直接从 URL 中当前会话恢复，避免先闪一下桌面画布再切回 H5。 */
+function getInitialPreviewDevice(): PreviewDevice {
+  if (typeof window === 'undefined') return 'desktop'
+  const sessionId = new URL(window.location.href).searchParams.get('sessionId')
+  if (!sessionId) return 'desktop'
+  return getStoredPreviewDevices()[sessionId] ?? 'desktop'
+}
+
+function storePreviewDevice(sessionId: string, device: PreviewDevice) {
+  try {
+    window.localStorage.setItem(
+      PREVIEW_DEVICE_STORAGE_KEY,
+      JSON.stringify({
+        ...getStoredPreviewDevices(),
+        [sessionId]: device,
+      }),
+    )
+  } catch {
+    // 隐私模式或存储空间不足时退化为仅当前页面有效，画布切换本身仍然可用。
+  }
+}
+
 /** 移动端顶层视图：一次只全屏展示「聊天」或「工作区（预览/代码）」，靠顶部分段开关切换。
  *  桌面端两栏并排、不受它影响。 */
 export type MobileView = 'chat' | 'work'
@@ -39,6 +87,13 @@ type UIState = {
   /** 当前激活的工作区 tab */
   workTab: WorkTab
   setWorkTab: (t: WorkTab) => void
+
+  /** 当前预览 iframe 的画布设备：桌面铺满，H5 使用真实窄 viewport。 */
+  previewDevice: PreviewDevice
+  /** 切换并保存当前会话的选择；sessionId 由触发切换的 UI / Agent 事件显式传入。 */
+  setPreviewDevice: (device: PreviewDevice, sessionId?: string | null) => void
+  /** 切换项目时恢复该项目上一次使用的画布，没有记录的新项目默认桌面。 */
+  restorePreviewDevice: (sessionId: string | null) => void
 
   /** 左侧 Chat 是否折叠 */
   chatCollapsed: boolean
@@ -116,6 +171,18 @@ let logIdSeq = 0
 export const useUIStore = create<UIState>((set) => ({
   workTab: 'preview',
   setWorkTab: (workTab) => set({ workTab }),
+
+  previewDevice: getInitialPreviewDevice(),
+  setPreviewDevice: (previewDevice, sessionId) => {
+    if (sessionId) storePreviewDevice(sessionId, previewDevice)
+    set({ previewDevice })
+  },
+  restorePreviewDevice: (sessionId) =>
+    set({
+      previewDevice: sessionId
+        ? (getStoredPreviewDevices()[sessionId] ?? 'desktop')
+        : 'desktop',
+    }),
 
   chatCollapsed: false,
   toggleChatCollapsed: () => set((s) => ({ chatCollapsed: !s.chatCollapsed })),

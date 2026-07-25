@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from app.agents.loop import (
     PendingToolRecovery,
     _consume,
+    preview_device_event,
     reseed_pending_from_state,
     restore_round_build_reuse_state,
     sse,
@@ -236,6 +237,32 @@ class _SameBatchChecksAgent:
 
 
 class CheckBuildIdempotencyTests(IsolatedAsyncioTestCase):
+    def test_preview_device_event_only_accepts_complete_valid_tool_call(self):
+        self.assertEqual(
+            preview_device_event(
+                _tool_call(
+                    "set_preview_device",
+                    "device-1",
+                    {"device": "mobile", "reason": "小程序"},
+                )
+            ),
+            {
+                "type": "preview_device",
+                "device": "mobile",
+                "id": "device-1",
+            },
+        )
+        self.assertIsNone(
+            preview_device_event(
+                _tool_call("set_preview_device", "device-2", {})
+            )
+        )
+        self.assertIsNone(
+            preview_device_event(
+                _tool_call("set_preview_device", "device-3", {"device": "tablet"})
+            )
+        )
+
     async def _run_agent(
         self,
         agent: _TwoChecksAgent,

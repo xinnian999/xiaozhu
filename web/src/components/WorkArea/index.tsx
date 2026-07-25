@@ -1,4 +1,6 @@
+import { useEffect } from 'react'
 import { useUIStore } from '@/store/ui'
+import { useSessionStore } from '@/store/session'
 import TabBar from './TabBar'
 import PreviewPane from './PreviewPane'
 import CodePane from './CodePane'
@@ -10,6 +12,14 @@ import styles from './index.module.scss'
 // ============================================
 export default function WorkArea() {
   const workTab = useUIStore((s) => s.workTab)
+  const restorePreviewDevice = useUIStore((s) => s.restorePreviewDevice)
+  const activeId = useSessionStore((s) => s.activeId)
+
+  // WorkArea 在项目间切换时不会卸载，因此显式按项目恢复用户最后选择的画布。
+  // 首次刷新已由 UI store 根据 URL 同步初始化，这里同时覆盖应用内切换项目的场景。
+  useEffect(() => {
+    restorePreviewDevice(activeId)
+  }, [activeId, restorePreviewDevice])
 
   return (
     <section className={styles.work}>

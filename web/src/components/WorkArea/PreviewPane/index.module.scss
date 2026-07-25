@@ -175,6 +175,40 @@
       }
     }
   }
+
+  // H5 模式使用真实窄 iframe viewport，媒体查询、布局检测和截图看到的是同一尺寸。
+  // 展示层按可用宽高等比缩放并居中，不再让外层为了 844px 高度出现滚动条。
+  // 这里只改变观察画布，不代表生成页面可以放弃桌面响应式。
+  &.mobileCanvas {
+    overflow: hidden;
+    padding: $space-5;
+
+    .frame {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 390px;
+      height: 844px;
+      min-height: 844px;
+      margin: 0;
+      overflow: hidden;
+      border-radius: $radius-lg;
+      // 用内阴影画边框，避免实体 border 挤占 iframe 的 390×844 viewport。
+      box-shadow:
+        inset 0 0 0 1px var(--color-border-strong),
+        0 18px 48px rgba(0, 0, 0, 0.24);
+      transform:
+        translate(-50%, -50%)
+        scale(var(--preview-mobile-scale, 1));
+      transform-origin: center;
+    }
+  }
 }
 
-
+@include mobile {
+  .preview {
+    &.mobileCanvas {
+      padding: $space-2;
+    }
+  }
+}

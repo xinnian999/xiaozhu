@@ -4,7 +4,7 @@
 会话归属鉴权，前端需带 JWT fetch 成 Blob 后再展示，不能把私有文件当公开静态资源。
 """
 
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
@@ -41,6 +41,7 @@ class PreviewScreenshotRead(BaseModel):
     height: int
     path: str
     mime: str
+    device: Literal["desktop", "mobile"]
 
 
 async def _read_limited_body(request: Request) -> bytes:
@@ -98,6 +99,10 @@ async def upload_preview_screenshot(
         str,
         Header(alias="X-Check-Id", min_length=1, max_length=512),
     ],
+    device: Annotated[
+        Literal["desktop", "mobile"],
+        Header(alias="X-Screenshot-Device"),
+    ] = "desktop",
 ) -> PreviewScreenshotRead:
     """保存 iframe 自己生成的截图，并返回后续只需携带的 screenshot_id。"""
     mime = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
@@ -136,6 +141,7 @@ async def upload_preview_screenshot(
             width,
             height,
             decoded_page_path,
+            device,
         )
         # save_screenshot 在线程池落盘；删除可能在这段 await 中开始。二次检查保证迟到
         # 文件不会在 remove_session_screenshots 之后重新创建会话目录。

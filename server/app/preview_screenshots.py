@@ -6,9 +6,9 @@
   3. 会话删除：精确清掉这一会话名下的图片。
 
 图片本体放在 DATABASE_URL 同目录的 ``preview-screenshots/{session_id}`` 下，不把
-几百 KB 的二进制继续塞进 SQLite。又因为不新增数据库表，宽高、页面路径和 MIME 用
-同名 ``.json`` sidecar 保存；截图 ID 始终是服务端生成的 UUID，读取时不会接受任意
-文件名。
+几百 KB 的二进制继续塞进 SQLite。又因为不新增数据库表，宽高、页面路径、画布设备和
+MIME 用同名 ``.json`` sidecar 保存；截图 ID 始终是服务端生成的 UUID，读取时不会接受
+任意文件名。
 """
 
 import asyncio
@@ -95,6 +95,7 @@ class ScreenshotRecord:
     width: int
     height: int
     page_path: str
+    device: str
     file_path: Path
 
     def ref(self) -> dict[str, Any]:
@@ -108,6 +109,7 @@ class ScreenshotRecord:
             "height": self.height,
             "path": self.page_path,
             "mime": self.mime,
+            "device": self.device,
         }
 
 
@@ -118,6 +120,7 @@ def _write_screenshot(
     width: int,
     height: int,
     page_path: str,
+    device: str,
 ) -> ScreenshotRecord:
     """同步写入图片与 sidecar；由异步 API 放到线程池执行。"""
     suffix = _MIME_TO_SUFFIX[mime]
@@ -136,6 +139,7 @@ def _write_screenshot(
         "width": width,
         "height": height,
         "path": page_path,
+        "device": device,
         "filename": image_path.name,
     }
 
@@ -159,6 +163,7 @@ def _write_screenshot(
         width=width,
         height=height,
         page_path=page_path,
+        device=device,
         file_path=image_path,
     )
 
@@ -170,6 +175,7 @@ async def save_screenshot(
     width: int,
     height: int,
     page_path: str,
+    device: str = "desktop",
 ) -> ScreenshotRecord:
     """持久化一张已通过 API 校验的截图。"""
     if mime not in _MIME_TO_SUFFIX:
@@ -178,6 +184,8 @@ async def save_screenshot(
         raise ValueError("截图大小不合法")
     if not _matches_image_signature(raw, mime):
         raise ValueError("截图内容与声明格式不匹配")
+    if device not in {"desktop", "mobile"}:
+        raise ValueError("截图画布类型不合法")
     return await asyncio.to_thread(
         _write_screenshot,
         session_id,
@@ -186,6 +194,7 @@ async def save_screenshot(
         width,
         height,
         page_path,
+        device,
     )
 
 
@@ -206,6 +215,8 @@ def _load_screenshot(session_id: str, screenshot_id: str) -> ScreenshotRecord | 
         width = int(metadata["width"])
         height = int(metadata["height"])
         page_path = str(metadata.get("path") or "/")
+        # 旧 sidecar 没有设备字段，按上线前唯一存在的桌面画布兼容读取。
+        device = str(metadata.get("device") or "desktop")
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
 
@@ -213,6 +224,7 @@ def _load_screenshot(session_id: str, screenshot_id: str) -> ScreenshotRecord | 
         metadata.get("id") != normalized_id
         or width <= 0
         or height <= 0
+        or device not in {"desktop", "mobile"}
         or not image_path.is_file()
     ):
         return None
@@ -224,6 +236,7 @@ def _load_screenshot(session_id: str, screenshot_id: str) -> ScreenshotRecord | 
         width=width,
         height=height,
         page_path=page_path,
+        device=device,
         file_path=image_path,
     )
 

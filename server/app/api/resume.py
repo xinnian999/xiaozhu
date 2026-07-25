@@ -34,6 +34,7 @@ from app.agents.loop import (
     _synthetic_duplicate_check_result,
     build_round_agent,
     latest_round_thread_id,
+    preview_device_event,
     reseed_pending_from_state,
     restore_round_build_reuse_state,
     sse,
@@ -205,6 +206,13 @@ async def _resume_stream(session_id: str, body: ResumeStart, db: AsyncSession, u
                 )
             for event in recovery.replay_events:
                 yield sse(event)
+
+            # 断线前的画布 SSE 可能没有送达。先恢复目标设备，再重放任何
+            # preview_refresh，确保续跑的自检仍截取正确 viewport。
+            for tc in [*recovery.completed_calls, *recovery.open_calls]:
+                device_event = preview_device_event(tc)
+                if device_event is not None:
+                    yield sse(device_event)
 
             for tc in recovery.open_calls:
                 if tc["id"] in recovery.suppressed_check_ids:

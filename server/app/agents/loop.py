@@ -85,6 +85,21 @@ def sse(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
+def preview_device_event(tool_call: dict) -> dict | None:
+    """把画布工具调用翻译成前端事件；完整参数到齐后才允许实际切换。"""
+    if tool_call.get("name") != "set_preview_device":
+        return None
+    args = tool_call.get("args") or {}
+    device = args.get("device")
+    if device not in {"desktop", "mobile"}:
+        return None
+    return {
+        "type": "preview_device",
+        "device": device,
+        "id": tool_call.get("id") or "",
+    }
+
+
 # check_build 最多等 90s，生产环境的反代（Caddy）如果配了较短的 idle/read timeout，
 # 可能会把这条长时间「有连接但没数据」的 SSE 中途掐断。/api/chat 和 /ask-result（resume）
 # 都可能触发 check_build 这段长等待，所以两边共用这一层心跳包装。
@@ -858,6 +873,11 @@ async def reseed_pending_from_state(
                     **_stored_tool_args(args, call_id),
                     "_build_cache": "clear",
                 }
+            if screenshot_ref is not None:
+                row.tool_args = {
+                    **(row.tool_args or _stored_tool_args(args, call_id)),
+                    "_screenshot": screenshot_ref,
+                }
         else:
             row.tool_args = _stored_tool_args(args, call_id)
 
@@ -1238,6 +1258,12 @@ async def _consume(
                                 call["name"] in ("write_file", "edit_file")
                                 for call in m.tool_calls
                             )
+                            # 画布切换必须先于同一批里的 preview_refresh：无论 provider
+                            # 把工具按什么顺序返回，后续 iframe 重载和截图都要使用目标 viewport。
+                            for call in m.tool_calls:
+                                device_event = preview_device_event(call)
+                                if device_event is not None:
+                                    yield sse(device_event)
                             for tc in m.tool_calls:
                                 print(f"[tool_call] name={tc['name']} args={list(tc['args'].keys())}")
                                 if tc["name"] == "check_build":
@@ -1388,7 +1414,8 @@ async def _consume(
                         if screenshot is not None:
                             screenshot_ref = screenshot[1]
                             # Message.images 已有持久化与刷新回显能力；这里只保存鉴权 URL，
-                            # 不把 data URL 再复制一份进主数据库。
+                            # 不把 data URL 再复制一份进主数据库。完整 ref 放 tool_args，
+                            # 让刷新后的历史卡仍能显示画布、尺寸和路由。
                             tool_msg.images = [str(screenshot_ref["url"])]
                         if name == "check_build":
                             # 正常路径的工具闭包已经登记分类；断线续跑若换了闭包，则从
@@ -1425,6 +1452,11 @@ async def _consume(
                             tool_msg.tool_args = {
                                 **(args or {}),
                                 "_tool_call_id": tm.tool_call_id,
+                                **(
+                                    {"_screenshot": screenshot_ref}
+                                    if screenshot_ref is not None
+                                    else {}
+                                ),
                                 "_build_cache": cache_action,
                                 **(
                                     {"_build_fingerprint": fingerprint}

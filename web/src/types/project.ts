@@ -17,6 +17,8 @@ export type PreviewScreenshot = {
   height: number
   path: string
   mime: string
+  /** 截图时 iframe 使用的真实画布；旧历史记录可能没有该字段。 */
+  device?: 'desktop' | 'mobile'
   /** 本地截图尚未被后端持久化；仅用于卡片即时展示。 */
   local?: boolean
 }

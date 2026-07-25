@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { AlertTriangle } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
-import { useUIStore, type WCStatus, type LogLevel } from '@/store/ui'
+import { useUIStore, type WCStatus, type LogLevel, type PreviewDevice } from '@/store/ui'
 import { bootAndRun, syncFiles, resetContainer, isBooted, isPreviewRunning } from '@/lib/webcontainer'
 import { postBuildResult, reportBootResult, uploadPreviewScreenshot } from '@/lib/api'
 import styles from './index.module.scss'
@@ -17,6 +17,9 @@ const CAPTURE_TIMEOUT_MS = 10000
 const MAX_SCREENSHOT_BYTES = 2 * 1024 * 1024
 const MAX_SCREENSHOT_SIDE = 1280
 const SCREENSHOT_MIMES = new Set(['image/webp', 'image/png', 'image/jpeg'])
+// H5 iframe 始终保留真实 viewport；屏幕空间不足时只缩放外观，不改变媒体查询与截图尺寸。
+const MOBILE_CANVAS_WIDTH = 390
+const MOBILE_CANVAS_HEIGHT = 844
 
 type BuildCheckResult = {
   ok: boolean
@@ -47,10 +50,12 @@ type CapturedScreenshot = {
   height: number
   path: string
   mime: string
+  device: PreviewDevice
 }
 
 type PendingCapture = {
   documentId: string
+  device: PreviewDevice
   resolve: (screenshot: CapturedScreenshot) => void
   reject: (error: Error) => void
   timer: ReturnType<typeof setTimeout>
@@ -77,6 +82,7 @@ export default function PreviewPane() {
   const wcUrl = useUIStore((s) => s.wcUrl)
   const wcLog = useUIStore((s) => s.wcLog)
   const wcError = useUIStore((s) => s.wcError)
+  const previewDevice = useUIStore((s) => s.previewDevice)
   const setWCStatus = useUIStore((s) => s.setWCStatus)
   const setWCUrl = useUIStore((s) => s.setWCUrl)
   const setWCLog = useUIStore((s) => s.setWCLog)
@@ -111,6 +117,12 @@ export default function PreviewPane() {
   // 切会话时 files 常会稍后才拉到；两次 effect 共用同一个 reset Promise，保证新 boot
   // 一定排在旧容器 teardown 之后，不会因“空文件 → 文件到位”连续触发而并发启动。
   const containerResetRef = useRef<Promise<void> | null>(null)
+  // preview iframe 可能还保留着旧画面，但底层 WebContainer 已被异常 teardown。
+  // check_build 命中这种“看起来正常、实际已死”的状态时，推进序号强制重启运行环境。
+  const [previewRecoverySeq, setPreviewRecoverySeq] = useState(0)
+  const handledRecoverySeqRef = useRef(0)
+  // 同一个 check_build 最多自动恢复一次；第二次仍失败就明确回报，不能继续干等 90 秒。
+  const recoveringApplySeqRef = useRef<number | null>(null)
   const ensureContainerReset = useCallback(() => {
     const current = containerResetRef.current
     if (current) return current
@@ -122,8 +134,52 @@ export default function PreviewPane() {
     void reset.then(clear, clear)
     return reset
   }, [])
+  const requestPreviewRecovery = useCallback((applySeq: number) => {
+    if (recoveringApplySeqRef.current === applySeq) return
+    recoveringApplySeqRef.current = applySeq
+    setPreviewRecoverySeq((seq) => seq + 1)
+  }, [])
+  // 预览根节点用于计算 H5 画布的展示缩放比例。
+  const previewRootRef = useRef<HTMLDivElement | null>(null)
   // 当前 iframe 的引用，用于校验 postMessage 来源
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
+
+  // H5 画布以 390×844 真实尺寸参与布局和截图，但展示时完整收进当前可用区域。
+  // transform 不会改变 iframe.clientWidth/Height，因此响应式断点与截图仍保持真实手机尺寸。
+  useLayoutEffect(() => {
+    const root = previewRootRef.current
+    if (!root) return
+    if (previewDevice !== 'mobile') {
+      root.style.removeProperty('--preview-mobile-scale')
+      return
+    }
+
+    const updateScale = () => {
+      const computed = getComputedStyle(root)
+      const horizontalPadding =
+        Number.parseFloat(computed.paddingLeft) + Number.parseFloat(computed.paddingRight)
+      const verticalPadding =
+        Number.parseFloat(computed.paddingTop) + Number.parseFloat(computed.paddingBottom)
+      const availableWidth = root.clientWidth - horizontalPadding
+      const availableHeight = root.clientHeight - verticalPadding
+      // display:none 时先保留上一次比例，重新可见后 ResizeObserver 会立即补算。
+      if (availableWidth <= 0 || availableHeight <= 0) return
+      const scale = Math.min(
+        1,
+        availableWidth / MOBILE_CANVAS_WIDTH,
+        availableHeight / MOBILE_CANVAS_HEIGHT,
+      )
+      root.style.setProperty('--preview-mobile-scale', scale.toFixed(4))
+    }
+
+    updateScale()
+    const observer = new ResizeObserver(updateScale)
+    observer.observe(root)
+    return () => {
+      observer.disconnect()
+      root.style.removeProperty('--preview-mobile-scale')
+    }
+  }, [previewDevice])
 
   // —— 预览历史栈：父页面侧重建一份 iframe 内的浏览历史，用来算「能否前进/后退」——
   // iframe 跨域拿不到它真实的 history.length / 当前位置，只能靠导航桥上报的
@@ -251,12 +307,15 @@ export default function PreviewPane() {
       }
 
       return await new Promise<CapturedScreenshot>((resolve, reject) => {
+        // 画布状态与请求一起锁定，避免用户恰好在截图编码期间切换后元数据串台。
+        const device = useUIStore.getState().previewDevice
         const timer = setTimeout(() => {
           pendingCaptureRef.current.delete(requestId)
           reject(new Error('预览截图超时'))
         }, CAPTURE_TIMEOUT_MS)
         pendingCaptureRef.current.set(requestId, {
           documentId: expectedDocumentId,
+          device,
           resolve,
           reject,
           timer,
@@ -319,6 +378,7 @@ export default function PreviewPane() {
             height: captured.height,
             path: captured.path,
             mime: captured.mime,
+            device: captured.device,
             local: true,
           },
           r.sessionId,
@@ -331,6 +391,7 @@ export default function PreviewPane() {
             width: captured.width,
             height: captured.height,
             path: captured.path,
+            device: captured.device,
           },
         )
         if (uploaded) {
@@ -347,6 +408,7 @@ export default function PreviewPane() {
       await postBuildResult(r.sessionId, {
         check_id: r.checkId,
         ...result,
+        device: useUIStore.getState().previewDevice,
         ...(screenshotId ? { screenshot_id: screenshotId } : {}),
       })
     })()
@@ -379,8 +441,16 @@ export default function PreviewPane() {
   useEffect(() => {
     const prevSession = containerSessionRef.current
     const sessionChanged = prevSession !== activeId
+    const recoveryRequested = previewRecoverySeq !== handledRecoverySeqRef.current
+    // 当前 effect 已接管这次恢复请求；先记账，避免异步启动期间被重复触发。
+    if (recoveryRequested) handledRecoverySeqRef.current = previewRecoverySeq
     // 容器已经服务于当前会话且在运行：交给下面的「切版本」effect 做增量同步
-    if (!sessionChanged && isBooted() && !containerResetRef.current) return
+    if (
+      !sessionChanged
+      && !recoveryRequested
+      && isPreviewRunning()
+      && !containerResetRef.current
+    ) return
 
     if (sessionChanged) {
       // files 尚未返回也要立刻切换归属并清空旧预览；等文件到位后的下一次 effect
@@ -401,6 +471,14 @@ export default function PreviewPane() {
         runtime: false,
         visual: false,
       }
+      recoveringApplySeqRef.current = null
+    } else if (recoveryRequested) {
+      // iframe 里的旧页面可能仍能显示，但它已不再对应可写、可构建的容器。
+      // 清掉旧文档身份，恢复完成后只接受新 preview server 发出的 ready。
+      captureDocumentRef.current = null
+      if (revealCollectTimerRef.current) clearTimeout(revealCollectTimerRef.current)
+      if (revealFallbackTimerRef.current) clearTimeout(revealFallbackTimerRef.current)
+      revealRef.current = null
     }
 
     const bootSessionId = activeId
@@ -409,7 +487,7 @@ export default function PreviewPane() {
     let cancelled = false
     ;(async () => {
       // 切到了不同会话：销毁旧容器 + 清空两处日志面板
-      if (isBooted() && prevSession !== activeId) {
+      if (recoveryRequested || (isBooted() && prevSession !== activeId)) {
         setWCStatus('booting')
         setWCUrl(null)
         const reset = ensureContainerReset()
@@ -458,6 +536,30 @@ export default function PreviewPane() {
       })
       if (cancelled) return
       if (containerSessionRef.current !== bootSessionId) return
+      if (recoveryRequested && !isPreviewRunning()) {
+        // 自动恢复本身失败时，直接唤醒仍在等待的 check_build。
+        // bootAndRun 已把具体失败原因写进 UI store；这里不能再让后端等到 90 秒超时。
+        const pending = useUIStore.getState().previewApplyRequest
+        if (
+          pending.sessionId === bootSessionId
+          && pending.checkId
+          && recoveringApplySeqRef.current === pending.seq
+        ) {
+          appliedSeqRef.current = pending.seq
+          recoveringApplySeqRef.current = null
+          void postBuildResult(bootSessionId, {
+            check_id: pending.checkId,
+            ok: false,
+            errors:
+              useUIStore.getState().wcError
+              || '预览运行环境恢复失败，请刷新页面后重试',
+            runtime: false,
+            visual: false,
+            device: useUIStore.getState().previewDevice,
+          })
+        }
+        return
+      }
       syncedVersionRef.current = bootVersionId
     })()
 
@@ -465,7 +567,7 @@ export default function PreviewPane() {
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeId, hasCurrentFiles])
+  }, [activeId, hasCurrentFiles, previewRecoverySeq])
 
   // —— 把文件变更同步进容器并重新构建预览（无 HMR，构建成功后整页刷新 iframe）——
   // 触发来源有两类：
@@ -475,7 +577,6 @@ export default function PreviewPane() {
   // 流式途中每个 file_write 都会 bump version，但我们故意不跟着构建 ——
   // 否则会把半成品（甚至构建失败的中间态）闪给用户，也白白浪费多次全量构建。
   useEffect(() => {
-    if (!isPreviewRunning()) return
     // 只构建「当前会话自己的」版本变更；切会话的重挂由上面的 effect 负责，
     // 这里若不挡住，会把新会话的文件 sync 进尚未销毁的旧容器。
     if (containerSessionRef.current !== activeId) return
@@ -491,6 +592,32 @@ export default function PreviewPane() {
       && applyRequest.sessionId === buildSessionId
     )
     const checkId = isReveal ? applyRequest.checkId : null
+
+    // iframe 还能显示旧 dist，不代表底层 WebContainer / vite preview 仍活着。
+    // 旧逻辑在这里直接 return，会把 preview_refresh 永久丢掉，后端只能等满 90 秒。
+    // 现在保留 appliedSeqRef 不动并自动恢复；恢复成功后 wcUrl/wcStatus 变化会让同一请求重跑。
+    const previewReady = isPreviewRunning() && wcStatus === 'ready' && Boolean(wcUrl)
+    if (!previewReady) {
+      if (!isReveal || !checkId) return
+
+      // 正常冷启动尚未完成时保留请求等待即可；wcStatus 继续推进会再次触发本 effect。
+      // syncing 却没有 preview 进程属于异常状态，需要走下面的恢复。
+      if (
+        wcStatus === 'booting'
+        || wcStatus === 'mounting'
+        || wcStatus === 'installing'
+        || wcStatus === 'building'
+        || wcStatus === 'starting'
+        || (wcStatus === 'syncing' && isPreviewRunning())
+      ) return
+
+      if (recoveringApplySeqRef.current !== applyRequest.seq) {
+        requestPreviewRecovery(applyRequest.seq)
+      }
+      return
+    }
+    recoveringApplySeqRef.current = null
+
     // 流式途中、非揭晓 → 暂不构建，保持上一个稳定态
     if (isStreaming && !isReveal) return
 
@@ -507,6 +634,7 @@ export default function PreviewPane() {
           void postBuildResult(buildSessionId, {
             check_id: checkId,
             ...lastBuildResultRef.current,
+            device: useUIStore.getState().previewDevice,
           })
         }
       }
@@ -547,7 +675,11 @@ export default function PreviewPane() {
           lastBuildResultRef.current = result
           if (res.buildError) pushWcLog({ level: 'error', text: res.buildError })
           if (isReveal && checkId) {
-            void postBuildResult(buildSessionId, { check_id: checkId, ...result })
+            void postBuildResult(buildSessionId, {
+              check_id: checkId,
+              ...result,
+              device: useUIStore.getState().previewDevice,
+            })
           }
         }
       })
@@ -569,7 +701,11 @@ export default function PreviewPane() {
         lastBuildResultRef.current = result
         // 同步/构建本身抛异常（容器挂了等）也要回报，否则 check_build 同样会干等。
         if (isReveal && checkId) {
-          void postBuildResult(buildSessionId, { check_id: checkId, ...result })
+          void postBuildResult(buildSessionId, {
+            check_id: checkId,
+            ...result,
+            device: useUIStore.getState().previewDevice,
+          })
         }
       })
   }, [
@@ -580,12 +716,14 @@ export default function PreviewPane() {
     applyRequest.checkId,
     applyRequest.sessionId,
     isStreaming,
+    wcStatus,
     wcUrl,
     setWCStatus,
     setWCLog,
     setWCError,
     reloadPreview,
     pushWcLog,
+    requestPreviewRecovery,
     startReveal,
   ])
 
@@ -689,6 +827,7 @@ export default function PreviewPane() {
             height: Math.max(1, Math.round(data.height)),
             path: typeof data.path === 'string' ? data.path.slice(0, 2048) : '/',
             mime,
+            device: pending.device,
           })
         } else {
           pending.reject(new Error(
@@ -799,7 +938,11 @@ export default function PreviewPane() {
   const isErrored = wcStatus === 'error'
 
   return (
-    <div className={styles.preview}>
+    <div
+      ref={previewRootRef}
+      className={`${styles.preview} ${previewDevice === 'mobile' ? styles.mobileCanvas : ''}`}
+      data-preview-device={previewDevice}
+    >
       <div className={styles.bgGrid} aria-hidden />
       <div className={styles.bgGlow} aria-hidden />
 

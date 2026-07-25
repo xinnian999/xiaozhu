@@ -7,6 +7,8 @@
 详见 build_store.py 对这条「前端事件 → 后端 await」会合机制的说明。
 """
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
@@ -41,6 +43,8 @@ class BuildResult(BaseModel):
     visual: bool = False  # 是否命中浏览器端布局完整性检查
     # 截图先通过独立原始 body 接口上传，这里只关联服务端生成的轻量 ID。
     screenshot_id: str | None = None
+    # 没有截图（如编译失败）时也要告诉 Agent 这次验证的是哪种画布。
+    device: Literal["desktop", "mobile"] = "desktop"
 
 
 @router.post("", status_code=204)
@@ -85,6 +89,7 @@ async def report_build_result(session_id: str, body: BuildResult) -> None:
             "runtime": body.runtime,
             "visual": body.visual,
             "screenshot_id": screenshot_id,
+            "device": screenshot.device if screenshot is not None else body.device,
         },
     )
     if not accepted:

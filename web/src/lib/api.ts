@@ -92,6 +92,8 @@ export type SSEEvent =
   | { type: 'file_delete'; path: string }
   // AI 调 check_build 时推这个：id 是 tool_call_id，用它把构建、截图和工具卡串成同一次检查
   | { type: 'preview_refresh'; id: string }
+  // AI 根据需求切换预览 iframe 的真实 viewport；页面代码仍必须同时响应式兼容两端
+  | { type: 'preview_device'; device: 'desktop' | 'mobile'; id: string }
   | { type: 'plan_update'; todos: unknown[] }
   // tool_call 带 id（后端的 tool_call_id），用于把随后到达的 tool_result 关联回这张卡
   | { type: 'tool_call'; name: string; args: object; id: string }
@@ -449,6 +451,7 @@ export async function postBuildResult(
     runtime?: boolean
     visual?: boolean
     screenshot_id?: string
+    device?: 'desktop' | 'mobile'
   },
 ): Promise<void> {
   try {
@@ -468,7 +471,12 @@ export async function uploadPreviewScreenshot(
   sessionId: string,
   checkId: string,
   blob: Blob,
-  meta: { width: number; height: number; path: string },
+  meta: {
+    width: number
+    height: number
+    path: string
+    device: 'desktop' | 'mobile'
+  },
 ): Promise<PreviewScreenshot | null> {
   const controller = new AbortController()
   const timer = window.setTimeout(() => controller.abort(), 8000)
@@ -479,6 +487,7 @@ export async function uploadPreviewScreenshot(
         'Content-Type': blob.type || 'image/webp',
         'X-Screenshot-Width': String(meta.width),
         'X-Screenshot-Height': String(meta.height),
+        'X-Screenshot-Device': meta.device,
         // 后端据此校验这张图属于当前已 arm 的 check_build，且同一轮只能上传一张。
         'X-Check-Id': checkId,
         // Header 只接受 Latin-1；路由里可能有中文，统一编码后交给后端解码。
@@ -518,7 +527,12 @@ function isPreviewScreenshot(value: unknown): value is PreviewScreenshot {
     typeof item.width === 'number' &&
     typeof item.height === 'number' &&
     typeof item.path === 'string' &&
-    typeof item.mime === 'string'
+    typeof item.mime === 'string' &&
+    (
+      item.device === undefined ||
+      item.device === 'desktop' ||
+      item.device === 'mobile'
+    )
   )
 }
 

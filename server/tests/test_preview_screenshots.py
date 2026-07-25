@@ -134,11 +134,13 @@ class PreviewScreenshotStorageTests(IsolatedAsyncioTestCase):
                     1,
                     1,
                     "/中文?tab=preview",
+                    "mobile",
                 )
                 loaded = await get_screenshot("session-safe", record.id)
                 self.assertIsNotNone(loaded)
                 assert loaded is not None
                 self.assertEqual(loaded.page_path, "/中文?tab=preview")
+                self.assertEqual(loaded.device, "mobile")
 
                 artifact = await build_screenshot_artifact(
                     "session-safe",
@@ -154,6 +156,10 @@ class PreviewScreenshotStorageTests(IsolatedAsyncioTestCase):
                         "/api/sessions/session-safe/preview-screenshots/"
                         f"{record.id}"
                     ),
+                )
+                self.assertEqual(
+                    artifact["screenshot"]["ref"]["device"],
+                    "mobile",
                 )
                 data_url = await load_screenshot_data_url(
                     "session-safe",

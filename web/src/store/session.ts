@@ -178,6 +178,33 @@ function fromApi(api: ApiSession): ChatSession {
   }
 }
 
+/** 校验工具消息里持久化的截图引用。旧消息没有完整 ref，会走 URL 兼容分支。 */
+function storedPreviewScreenshot(value: unknown): PreviewScreenshot | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const item = value as Record<string, unknown>
+  if (
+    typeof item.id !== 'string' ||
+    typeof item.url !== 'string' ||
+    typeof item.width !== 'number' ||
+    typeof item.height !== 'number' ||
+    typeof item.path !== 'string' ||
+    typeof item.mime !== 'string'
+  ) {
+    return null
+  }
+  const device = item.device
+  if (device !== undefined && device !== 'desktop' && device !== 'mobile') return null
+  return {
+    id: item.id,
+    url: item.url,
+    width: item.width,
+    height: item.height,
+    path: item.path,
+    mime: item.mime,
+    ...(device ? { device } : {}),
+  }
+}
+
 /** 把后端的 ApiMessage 转成前端 Message 类型。
  *  branchId 现阶段统一 'main'，后端没有这个概念但前端类型要求有。
  *  kind='tool' 还原成工具卡；kind='version' 还原成版本卡（从 tool_args 取 version_id/seq）。 */
@@ -202,12 +229,16 @@ function fromApiMessage(m: ApiMessage): Message {
     // 工具卡展开时仍只展示模型真正传入的公开参数。
     const toolArgs = Object.fromEntries(
       Object.entries(storedArgs).filter(
-        ([key]) => key !== '_tool_call_id' && !key.startsWith('_build_'),
+        ([key]) => (
+          key !== '_tool_call_id' &&
+          key !== '_screenshot' &&
+          !key.startsWith('_build_')
+        ),
       ),
     )
-    // 历史工具消息只持久化了私有截图 URL；尺寸/路由会在本轮实时 ref 中展示，
-    // 刷新后的历史卡仍保留可点击缩略图即可。
+    // 新消息持久化完整 ref；旧消息只保存了私有 URL，继续兼容可点击缩略图。
     const screenshotUrl = m.images?.[0]
+    const screenshotRef = storedPreviewScreenshot(storedArgs._screenshot)
     return {
       ...base,
       kind: 'tool',
@@ -216,11 +247,11 @@ function fromApiMessage(m: ApiMessage): Message {
       ...(toolCallId ? { toolCallId } : {}),
       // 工具消息的 text 存的是「工具执行结果」，刷新后还原到 toolResult 供卡片展示
       toolResult: m.text || undefined,
-      ...(screenshotUrl && m.tool_name === 'check_build'
+      ...((screenshotRef || screenshotUrl) && m.tool_name === 'check_build'
         ? {
-            toolScreenshot: {
+            toolScreenshot: screenshotRef ?? {
               id: `history-${m.id}`,
-              url: screenshotUrl,
+              url: screenshotUrl!,
               width: 0,
               height: 0,
               path: '',

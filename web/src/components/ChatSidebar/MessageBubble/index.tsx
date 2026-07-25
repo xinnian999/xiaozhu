@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { FileText, FilePlus, FilePen, FolderOpen, Wrench, Bug, ChevronRight, GitCommit, RotateCcw, Loader2, Check, AlertCircle, HelpCircle, BrainCircuit, Image as ImageIcon } from 'lucide-react'
+import { FileText, FilePlus, FilePen, FolderOpen, Wrench, Bug, ChevronRight, GitCommit, RotateCcw, Loader2, Check, AlertCircle, HelpCircle, BrainCircuit, Image as ImageIcon, MonitorSmartphone } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useSessionStore } from '@/store/session'
@@ -309,9 +309,13 @@ function CheckBuildScreenshot({ screenshot }: { screenshot: PreviewScreenshot })
       ? fetched.src
       : null
   const failed = !direct && failedUrl === screenshot.url
+  const device = screenshot.device ?? (
+    screenshot.width > 0 && screenshot.width <= 500 ? 'mobile' : 'desktop'
+  )
+  const deviceLabel = device === 'mobile' ? 'H5' : 'PC'
   const dimensions = screenshot.width > 0 && screenshot.height > 0
-    ? `${screenshot.width} × ${screenshot.height}`
-    : '预览截图'
+    ? `${deviceLabel} · ${screenshot.width} × ${screenshot.height}`
+    : `${deviceLabel} 画布`
 
   return (
     <div className={styles.toolScreenshot}>
@@ -961,6 +965,14 @@ function describeToolCall(
       return { icon: <FolderOpen size={12} />, label: '查看项目结构' }
     case 'check_build':
       return { icon: <Bug size={12} />, label: '构建预览并检查报错' }
+    case 'set_preview_device': {
+      const label = args?.device === 'mobile'
+        ? '切换到 H5 画布'
+        : args?.device === 'desktop'
+          ? '切换到桌面画布'
+          : '切换预览画布'
+      return { icon: <MonitorSmartphone size={12} />, label }
+    }
     case 'ask_user':
       // 正常不会走到这条通用渲染路径（ask_user 由 AskUserChip 接管），
       // 这里只是兜底一致性，理论上不该被渲染出来。

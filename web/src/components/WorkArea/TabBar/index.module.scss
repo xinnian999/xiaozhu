@@ -99,15 +99,54 @@
   .center {
     flex: 1;
     display: flex;
+    align-items: center;
     justify-content: center;
+    gap: $space-2;
     min-width: 0;
+
+    .deviceSwitch {
+      display: inline-flex;
+      align-items: center;
+      flex-shrink: 0;
+      height: 28px;
+      padding: 2px;
+      background: var(--color-bg-soft);
+      border: 1px solid var(--color-border);
+      border-radius: $radius-md;
+
+      .deviceBtn {
+        @include button-reset;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 22px;
+        border-radius: $radius-xs;
+        color: var(--color-text-mute);
+        transition:
+          background $dur-base $ease-out,
+          color $dur-base $ease-out;
+
+        &:hover {
+          color: var(--color-text);
+        }
+
+        &.deviceBtnActive {
+          background: var(--color-bg-elev);
+          color: var(--color-accent);
+          box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03);
+        }
+      }
+    }
 
     .urlBar {
       display: flex;
       align-items: center;
+      flex: 1;
       gap: 2px;
       height: 28px;
       width: min(560px, 100%);
+      max-width: 560px;
       padding: 0 4px;
       background: var(--color-bg-soft);
       border: 1px solid var(--color-border);
@@ -288,14 +327,18 @@
       display: none;
     }
 
-    .center .urlBar {
-      .urlIconBtn:nth-child(1),
-      .urlIconBtn:nth-child(2) {
-        display: none;
-      }
+    .center {
+      gap: $space-1;
 
-      .urlInput .urlBrand {
-        display: none;
+      .urlBar {
+        .urlIconBtn:nth-child(1),
+        .urlIconBtn:nth-child(2) {
+          display: none;
+        }
+
+        .urlInput .urlBrand {
+          display: none;
+        }
       }
     }
 

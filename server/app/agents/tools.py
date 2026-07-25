@@ -14,15 +14,17 @@
 tool_result）并发，撞同一个会话就报 "concurrent operations are not permitted" /
 "transaction is closed"。所以由 agent_loop 建一把请求级 asyncio.Lock 传进来，**工具和
 消费端共用同一把锁**，把所有碰 db 的操作串起来。check_build 不碰 db、且会长等（最多
-90s）；ask_user 同理不碰 db，但等待方式不同——它用 LangGraph 的 interrupt() 把整个
-调用暂停 + 图状态存进 checkpointer，直接结束这次请求，不占着一条长连接干等（详见
-app.agents.loop 里 thread_id / checkpointer 的说明），所以这两个工具都不纳入 db_lock。
+90s）；set_preview_device 只是通过 loop 下发 UI 事件，同样不碰 db；ask_user 也不碰 db，
+但等待方式不同——它用 LangGraph 的 interrupt() 把整个调用暂停 + 图状态存进
+checkpointer，直接结束这次请求，不占着一条长连接干等（详见 app.agents.loop 里
+thread_id / checkpointer 的说明），所以这三个工具都不纳入 db_lock。
 """
 
 import asyncio
 import hashlib
 import json
 from dataclasses import dataclass, field
+from typing import Literal
 
 from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
@@ -318,6 +320,8 @@ def build_tools(
 
         # 同一批里额外出现的 check_build 是 loop 合成的内部结果，不代表真实预览状态。
         synthetic = bool(result.get("_synthetic"))
+        device_label = "H5" if result.get("device") == "mobile" else "桌面"
+        device_note = f"本次检查使用{device_label}画布；页面仍需兼容另一端。"
         if result.get("ok"):
             if artifact is not None:
                 build_reuse_state.note_fresh_result(
@@ -325,13 +329,13 @@ def build_tools(
                     cacheable=None if synthetic else True,
                 )
                 return (
-                    "编译、运行时与浏览器基础布局规则通过；"
+                    f"{device_note}编译、运行时与浏览器基础布局规则通过；"
                     "这不代表视觉截图已经合格，附带截图仍需由支持视觉的模型严格审查。",
                     artifact,
                 )
             build_reuse_state.note_fresh_result(check_id, cacheable=False)
             return (
-                "编译、运行时与浏览器基础布局规则通过，但本次没有取得可靠截图，"
+                f"{device_note}编译、运行时与浏览器基础布局规则通过，但本次没有取得可靠截图，"
                 "视觉效果尚未验证。",
                 None,
             )
@@ -342,24 +346,43 @@ def build_tools(
         errors = str(result.get("errors") or "").strip() or "（无详细错误信息）"
         if result.get("visual") and result.get("runtime"):
             return (
-                f"构建通过，但预览同时存在运行与布局问题，请全部修复后再次检查：\n{errors}",
+                f"{device_note}构建通过，但预览同时存在运行与布局问题，请全部修复后再次检查：\n{errors}",
                 artifact,
             )
         if result.get("visual"):
             return (
-                f"构建通过，但预览布局验收失败，请按报告修复后再次检查：\n{errors}",
+                f"{device_note}构建通过，但预览布局验收失败，请按报告修复后再次检查：\n{errors}",
                 artifact,
             )
         if result.get("runtime"):
             # 编译过了、但 iframe 渲染时崩（如 undefined is not a function）
             return (
-                f"构建通过，但预览运行时报错，请定位并修复：\n{errors}",
+                f"{device_note}构建通过，但预览运行时报错，请定位并修复：\n{errors}",
                 artifact,
             )
         return (
-            f"预览构建失败（编译没通过），请定位并修复：\n{errors}",
+            f"{device_note}预览构建失败（编译没通过），请定位并修复：\n{errors}",
             artifact,
         )
+
+    @tool
+    async def set_preview_device(
+        device: Literal["desktop", "mobile"],
+        reason: str = "",
+    ) -> str:
+        """切换用户预览区的观察画布。
+
+        当需求明显以桌面网站/后台为主时传 ``desktop``；当需求是 App、小程序、
+        移动 Web 或 H5 时传 ``mobile``。这只切换 iframe 的真实 viewport 与截图尺寸，
+        不代表页面只需适配一种设备：无论选哪个画布，生成代码都必须同时响应式兼容
+        手机与桌面。
+
+        ``reason`` 用一句短话说明判断依据，供用户在工具卡里查看。设备方向不明确时
+        不必为此追问，也不要反复切换；保留用户当前画布即可。
+        """
+        label = "H5" if device == "mobile" else "桌面"
+        suffix = f"（{reason.strip()}）" if reason.strip() else ""
+        return f"已切换到{label}画布{suffix}；页面仍需同时兼容桌面与移动端。"
 
     @tool
     async def ask_user(questions: list[dict]) -> str:
@@ -418,4 +441,12 @@ def build_tools(
         # 重跑一遍没问题。
         return interrupt({"questions": questions})
 
-    return [write_file, edit_file, read_files, list_files, check_build, ask_user]
+    return [
+        write_file,
+        edit_file,
+        read_files,
+        list_files,
+        set_preview_device,
+        check_build,
+        ask_user,
+    ]

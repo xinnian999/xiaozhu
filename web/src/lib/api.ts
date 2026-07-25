@@ -465,6 +465,79 @@ export async function postBuildResult(
   }
 }
 
+// ── 后端预览沙箱（实验功能）──────────────────────────────────
+
+export type PreviewRuntime = 'webcontainer' | 'server'
+
+export type SandboxBuildResult = {
+  ok: boolean
+  build_id: string | null
+  preview_url: string | null
+  logs: string
+  errors: string
+}
+
+/** 运行时开关是部署级配置；读取失败时静默退回成熟的 WebContainer 路径。 */
+export async function getPreviewRuntime(): Promise<PreviewRuntime> {
+  try {
+    const response = await fetch('/api/preview-runtime')
+    if (!response.ok) return 'webcontainer'
+    const data: unknown = await response.json()
+    if (
+      typeof data === 'object'
+      && data !== null
+      && (data as Record<string, unknown>).runtime === 'server'
+    ) return 'server'
+  } catch {
+    // 配置探测不能阻断预览，失败就继续使用原实现。
+  }
+  return 'webcontainer'
+}
+
+/** 提交浏览器当前完整文件快照；沿用原生 fetch，避免全局 axios 的 10 秒超时。 */
+export async function buildServerPreview(
+  sessionId: string,
+  files: Record<string, string>,
+  device: 'desktop' | 'mobile',
+): Promise<SandboxBuildResult> {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), 90_000)
+  try {
+    const response = await fetch(`/api/sessions/${sessionId}/sandbox-build`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ files, device }),
+      signal: controller.signal,
+    })
+    const data: unknown = await response.json().catch(() => null)
+    if (!response.ok) {
+      const detail =
+        typeof data === 'object'
+        && data !== null
+        && typeof (data as Record<string, unknown>).detail === 'string'
+          ? (data as Record<string, string>).detail
+          : `后端沙箱请求失败 (${response.status})`
+      throw new Error(detail)
+    }
+    if (typeof data !== 'object' || data === null) throw new Error('沙箱返回格式无效')
+    const item = data as Record<string, unknown>
+    return {
+      ok: item.ok === true,
+      build_id: typeof item.build_id === 'string' ? item.build_id : null,
+      preview_url: typeof item.preview_url === 'string' ? item.preview_url : null,
+      logs: typeof item.logs === 'string' ? item.logs : '',
+      errors: typeof item.errors === 'string' ? item.errors : '',
+    }
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error('后端沙箱构建超时')
+    }
+    throw error
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
 /** 把 iframe 返回的原始截图上传并换取可持久化引用。
  *  上传是 check_build 的旁路增强：超时/失败返回 null，不能拖死构建结果回报。 */
 export async function uploadPreviewScreenshot(

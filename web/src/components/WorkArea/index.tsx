@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 import { useUIStore } from '@/store/ui'
 import { useSessionStore } from '@/store/session'
 import TabBar from './TabBar'
-import PreviewPane from './PreviewPane'
+import PreviewRuntimePane from './PreviewRuntimePane'
 import CodePane from './CodePane'
 import ConsolePanel from './ConsolePanel'
 import styles from './index.module.scss'
@@ -28,7 +28,7 @@ export default function WorkArea() {
       <div className={styles.body}>
         {/* 用条件渲染保留各自状态：预览 iframe 不会因 tab 切换而被销毁 */}
         <div className={styles.pane} style={{ display: workTab === 'preview' ? 'block' : 'none' }}>
-          <PreviewPane />
+          <PreviewRuntimePane />
         </div>
         <div className={styles.pane} style={{ display: workTab === 'code' ? 'flex' : 'none' }}>
           <CodePane />

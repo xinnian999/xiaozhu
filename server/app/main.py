@@ -28,6 +28,7 @@ from app.api import (
     messages,
     preview_screenshots,
     resume,
+    sandbox,
     sessions,
     share,
     users,
@@ -218,6 +219,7 @@ app.include_router(build_result.router)
 app.include_router(boot_failure.router)
 app.include_router(ask_result.router)
 app.include_router(resume.router)
+app.include_router(sandbox.router)
 app.include_router(chat.router)
 app.include_router(billing.router)
 app.include_router(admin_api.router)

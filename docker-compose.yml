@@ -40,3 +40,37 @@ services:
 
     # 容器异常退出时自动重启；除非手动 stop，否则开机也会自启。
     restart: unless-stopped
+
+  # 实验性的后端预览 Worker。默认 profile 不启动，现有 WebContainer 部署完全不受影响。
+  # 启用：在 .env 配好 PREVIEW_RUNTIME / Worker token 后执行：
+  #   docker compose --profile sandbox up -d
+  sandbox-worker:
+    profiles: ["sandbox"]
+    image: crpi-a7p27yxlrmekg1a3.cn-beijing.personal.cr.aliyuncs.com/elin/xiaozhu-sandbox:latest
+    build:
+      context: .
+      dockerfile: sandbox-worker/Dockerfile
+    container_name: xiaozhu-sandbox-worker
+    env_file:
+      - .env
+    environment:
+      - SANDBOX_PORT=8010
+      - SANDBOX_DATA_DIR=/data
+    ports:
+      # 构建接口有 Bearer token；预览静态文件由 Caddy 的独立子域反代到这个端口。
+      - "8010:8010"
+    volumes:
+      - ./data/sandbox-worker:/data
+    # 2C2G PoC 的硬边界：一次只构建一个任务，宁可单任务失败，也不能拖垮主站。
+    mem_limit: 1200m
+    memswap_limit: 1800m
+    cpus: 1.5
+    pids_limit: 128
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped

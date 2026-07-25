@@ -103,6 +103,20 @@ class Settings(BaseSettings):
     # pydantic-settings 会自动解析成列表。
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
+    # ── 预览运行时（实验功能）──────────────────────────────────
+    # webcontainer：保留现有浏览器内运行时；server：把固定模板项目提交给独立
+    # sandbox-worker 构建。默认仍走 WebContainer，只有显式配置后才切换，便于灰度和回退。
+    preview_runtime: str = "webcontainer"
+    # Worker 只在 Docker 内网暴露构建接口；主 API 代用户转发，浏览器永远拿不到内部 token。
+    sandbox_worker_url: str = "http://sandbox-worker:8010"
+    sandbox_worker_token: str = ""
+    sandbox_build_timeout_s: float = Field(
+        default=75.0,
+        gt=0,
+        le=180,
+        allow_inf_nan=False,
+    )
+
     # ── 个人收款码（微信/支付宝）+ 订单通知 ────────────────────
     # 本项目支付走「手动核对」：用户扫收款码付款 → 点「我已支付」→ 订单转待审核 →
     # 管理员在后台人工核对到账后放行升档（_fulfill_order）。没有第三方支付渠道 / webhook。

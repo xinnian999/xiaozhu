@@ -80,7 +80,9 @@ export default function ServerPreviewPane() {
   const handledApplySeqRef = useRef(0)
   const builtVersionRef = useRef<string | null>(null)
   const buildQueueRef = useRef<Promise<void>>(Promise.resolve())
-  const queuedBuildCountRef = useRef(new Map<string, number>())
+  // key 对应当前会话 epoch。StrictMode 会重放 effect：旧 epoch 的排队任务不能阻止
+  // 新 epoch 补发构建，同时旧任务结束时也不能误删新任务的标记。
+  const queuedBuildEpochRef = useRef(new Map<string, number>())
   const pendingCheckRef = useRef<PendingCheck | null>(null)
   const collectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const readyFallbackRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -422,15 +424,14 @@ export default function ServerPreviewPane() {
   ) => {
     const epoch = activeEpochRef.current
     const queueKey = buildQueueKey(sessionId, versionId)
-    const queuedCount = queuedBuildCountRef.current.get(queueKey) ?? 0
-    queuedBuildCountRef.current.set(queueKey, queuedCount + 1)
+    queuedBuildEpochRef.current.set(queueKey, epoch)
     buildQueueRef.current = buildQueueRef.current
       .catch(() => {})
       .then(() => executeBuild(sessionId, versionId, files, checkId, epoch))
       .finally(() => {
-        const remaining = (queuedBuildCountRef.current.get(queueKey) ?? 1) - 1
-        if (remaining > 0) queuedBuildCountRef.current.set(queueKey, remaining)
-        else queuedBuildCountRef.current.delete(queueKey)
+        if (queuedBuildEpochRef.current.get(queueKey) === epoch) {
+          queuedBuildEpochRef.current.delete(queueKey)
+        }
       })
   }, [executeBuild])
 
@@ -473,7 +474,10 @@ export default function ServerPreviewPane() {
     if (
       !isStreaming
       && builtVersionRef.current !== currentVersion.id
-      && !queuedBuildCountRef.current.has(buildQueueKey(activeId, currentVersion.id))
+      && (
+        queuedBuildEpochRef.current.get(buildQueueKey(activeId, currentVersion.id))
+        !== activeEpochRef.current
+      )
     ) {
       enqueueBuild(activeId, currentVersion.id, currentVersion.files, null)
     }

@@ -723,6 +723,10 @@ async function runViteBuild(jobDir: string): Promise<{ code: number; output: str
       'build',
       '--config',
       path.join(jobDir, 'vite.config.ts'),
+      // 默认 bundle 加载器会向 node_modules/.vite-temp 写入临时配置产物；
+      // 生产镜像把固定依赖保持只读，因此改用 runner 直接执行可信配置。
+      '--configLoader',
+      'runner',
       '--base=./',
       '--emptyOutDir',
     ],

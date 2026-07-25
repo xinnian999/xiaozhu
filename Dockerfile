@@ -1,9 +1,8 @@
 # syntax=docker/dockerfile:1
 #
-# 小筑 生产镜像：一个容器里既跑后端 API，又托管前端静态页面（同源单进程）。
-# 用「多阶段构建」：阶段1 用 bun 把前端编译成静态文件，阶段2 只把编译产物
-# 拷进 python 运行镜像 —— 最终镜像里没有 bun、没有前端源码、没有 node_modules，
-# 体积小、攻击面也小。
+# 小筑生产镜像：一个部署容器内运行 FastAPI 与受限构建 Worker 两个进程。
+# 前端、管理后台和固定预览模板都在镜像构建期完成依赖安装；线上每次任务只运行
+# Vite build，不会在 2G 服务器上临时安装依赖。
 
 # ─────────────────────────────────────────────────────────────
 # 阶段 1：构建前端（bun + vite → 静态产物 dist）
@@ -25,7 +24,7 @@ RUN bun install --frozen-lockfile
 # 再拷前端源码并构建。根脚本 build = 进 web 跑 `tsc -b && vite build`。
 COPY web/ ./web/
 RUN bun run build
-# 产物落在 /app/web/dist，交给阶段 3 取用
+# 产物落在 /app/web/dist，交给阶段 4 取用
 
 
 # ─────────────────────────────────────────────────────────────
@@ -41,16 +40,31 @@ RUN bun install
 
 COPY web-admin/ ./
 RUN bun run build
-# 产物落在 /app/web-admin/dist，交给阶段 3 取用
+# 产物落在 /app/web-admin/dist，交给阶段 4 取用
 
 
 # ─────────────────────────────────────────────────────────────
-# 阶段 3：运行后端（python + uvicorn，并托管阶段1/2 的前端产物）
+# 阶段 3：准备固定的沙箱模板依赖
+# ─────────────────────────────────────────────────────────────
+FROM crpi-a7p27yxlrmekg1a3.cn-beijing.personal.cr.aliyuncs.com/elin-common/bun:1 AS sandbox-builder
+WORKDIR /opt/template
+
+COPY server/templates/vite-react/package.json server/templates/vite-react/.npmrc ./
+RUN bun install
+
+# 可信骨架由镜像持有；用户提交同名配置时会被这些文件覆盖。
+COPY server/templates/vite-react/ ./
+
+
+# ─────────────────────────────────────────────────────────────
+# 阶段 4：运行 FastAPI + Bun Worker，并托管阶段1/2 的前端产物
 # ─────────────────────────────────────────────────────────────
 FROM crpi-a7p27yxlrmekg1a3.cn-beijing.personal.cr.aliyuncs.com/elin-common/python:3.12-slim AS runtime
 
 # 直接从 uv 镜像拷 uv 二进制进来，比在容器里 pip install uv 更快更干净
 COPY --from=crpi-a7p27yxlrmekg1a3.cn-beijing.personal.cr.aliyuncs.com/elin-common/uv:latest /uv /uvx /bin/
+# Worker 与主 API 放在同一个部署容器；只把 Bun 可执行文件带入最终镜像。
+COPY --from=sandbox-builder /usr/local/bin/bun /usr/local/bin/bun
 
 WORKDIR /app
 
@@ -63,15 +77,18 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 # 拷后端运行时真正需要的东西：
 #   app/         业务代码
-#   templates/   新会话用的 vite-react 骨架（templates.py 运行时会读取）
+#   templates/   新会话与 Worker 共用的可信 vite-react 骨架
 #   alembic/ + alembic.ini  数据库迁移脚本与配置（启动时 upgrade 用）
 COPY server/app ./app
-COPY server/templates ./templates
+COPY --from=sandbox-builder /opt/template ./templates/vite-react
 COPY server/alembic ./alembic
 COPY server/alembic.ini ./alembic.ini
 # scripts/ 里有 make_admin.py：生产里把自己设为管理员要用
 #   docker compose exec xiaozhu /app/.venv/bin/python -m scripts.make_admin you@example.com
 COPY server/scripts ./scripts
+COPY sandbox-worker/index.ts ./sandbox-worker/index.ts
+COPY scripts/docker-entrypoint.sh ./docker-entrypoint.sh
+RUN chmod +x ./docker-entrypoint.sh
 
 # 把阶段1构建好的前端产物放到 /app/static
 # main.py 用 Path(__file__).parent.parent / "static" 定位，正好命中这里。
@@ -79,20 +96,8 @@ COPY --from=web-builder /app/web/dist ./static
 # 把阶段2构建好的管理后台产物放到 /app/static-admin，main.py 挂载在 /admin-app。
 COPY --from=admin-builder /app/web-admin/dist ./static-admin
 
-# 容器内监听 8000。OPENAI_API_KEY、DATABASE_URL 等敏感/环境相关配置
-# 不写进镜像，运行时由 docker 用环境变量注入（见 docker-compose）。
+# 公网只映射 8000。Worker 固定监听容器 loopback 的 8010，不对外发布。
 EXPOSE 8000
 
-# 启动命令分两步：先把数据库迁移到最新（alembic upgrade head），再起 uvicorn。
-#   - upgrade head 是幂等的：已是最新就什么都不做；有新迁移才执行，且不丢数据。
-#     这就取代了原来的 create_all，从根上解决「改了模型、线上老库没跟着改」的问题。
-#   - 用 sh -c 串起两条命令；exec 让 uvicorn 接管 PID 1，信号（停容器）能正确传到它。
-# --host 0.0.0.0 让容器外能访问（默认只听 127.0.0.1，在容器里等于谁都连不上）。
-# --proxy-headers + --forwarded-allow-ips=*：信任反代(Caddy)传来的 X-Forwarded-Proto/For。
-#   Caddy 终结 TLS、以 http 转发给容器，默认 uvicorn 只信任 127.0.0.1 的转发头，而 Caddy
-#   来自 docker 网关网段(非 127.0.0.1)，于是 uvicorn 会按 http 生成绝对 URL / 重定向 Location，
-#   在 https 页面下被浏览器当混合内容拦掉。开启后 uvicorn 按 https 生成 URL，反代下一切正常。
-#   Uvicorn 不用 X-Forwarded-Host 改写 Host；反代还必须把浏览器原始 Host 直接传给上游，
-#   预览网关据此区分主站与独立预览 Origin。
-#   容器只经 Caddy 暴露，用 * 信任所有转发来源即可（内网单反代场景）。
-CMD ["sh", "-c", "/app/.venv/bin/alembic upgrade head && exec /app/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=*"]
+# 入口脚本先迁移数据库，再启动 loopback Worker 与 Uvicorn，并统一转发退出信号。
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

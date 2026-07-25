@@ -104,8 +104,8 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
     # ── 后端预览沙箱 ───────────────────────────────────────────
-    # Worker 只在 Docker 内网暴露构建接口；主 API 代用户转发，浏览器永远拿不到内部 token。
-    sandbox_worker_url: str = "http://sandbox-worker:8010"
+    # 生产单容器内 Worker 只监听 loopback；主 API 代用户转发，浏览器拿不到内部 token。
+    sandbox_worker_url: str = "http://127.0.0.1:8010"
     sandbox_worker_token: str = ""
     # Worker 与主服务共享的预览产物目录；主服务直接读文件，不再向 Worker 代理静态资源。
     sandbox_preview_dir: str = "../data/sandbox-worker-dev/previews"

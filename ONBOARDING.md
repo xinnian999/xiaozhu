@@ -3,7 +3,8 @@
 ## 定位
 
 小筑是对话式 AI 前端代码生成平台。前端负责对话、编辑与展示；FastAPI 负责
-Agent、鉴权和持久化；独立 `sandbox-worker` 用固定模板依赖构建并提供预览。
+Agent、鉴权和持久化；独立 Worker 进程用固定模板依赖构建并提供预览。生产部署时
+FastAPI 与 Worker 运行在同一个容器内，本地开发仍由启动脚本分别监管。
 
 ## 仓库
 
@@ -12,7 +13,7 @@ web/                用户前端
 web-admin/          管理后台
 server/app/         FastAPI、Agent 与模型
 server/templates/   可信 React/Vite/Tailwind 模板
-sandbox-worker/     单并发构建与预览服务
+sandbox-worker/     单并发构建 Worker 进程
 ```
 
 ## 一轮生成
@@ -22,7 +23,7 @@ sandbox-worker/     单并发构建与预览服务
 3. `check_build` 先在 `build_store` 建立会合点，再发送 `preview_refresh`。
 4. 前端提交完整文件快照到主 API，主 API 转发给 Worker。
 5. Worker 用固定配置执行 `vite build`，返回 `build_id`。
-6. 主 API 签发 `/api/sandbox-preview/...` capability URL，并从内网 Worker 逐字节代理产物。
+6. 主 API 签发 `/api/sandbox-preview/...` capability URL，并从共享目录直接读取产物。
 7. iframe 在独立预览 Origin（未配置时为 opaque origin）中运行并回传运行时错误、
    基础布局问题和受限截图；前端调用 `build-result`，Agent 被唤醒后决定结束或修复。
 
@@ -32,10 +33,11 @@ sandbox-worker/     单并发构建与预览服务
 ## 沙箱硬约束
 
 - 浏览器不运行 Node；不得重新引入浏览器运行时或依赖快照。
-- 主 FastAPI 不直接执行生成项目，也不接触 Docker Socket。
+- 主 FastAPI 进程不直接执行生成项目，也不接触 Docker Socket。
 - Worker 构建时不得安装客户端声明的依赖。
 - `package.json`、构建配置和 `index.html` 始终由可信模板覆盖。
-- Worker 不得发布公网端口；浏览器只能通过主站 capability 字节代理读取预览。
+- Worker 只监听容器 loopback，不得发布公网端口；浏览器只能通过主站 capability
+  字节代理读取预览。
 - 只有当 `SANDBOX_PREVIEW_ORIGIN` 与主站 Origin 确实不同时，预览 iframe 才能授予
   `allow-same-origin`；同源回退模式必须保持 opaque origin。
 - Worker 保持单并发、文件/体积/时间/内存/PID 限额。

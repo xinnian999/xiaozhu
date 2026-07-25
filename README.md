@@ -1,7 +1,7 @@
 # 小筑（Xiaozhu）
 
-对话式 AI 前端代码生成平台。用户描述需求后，Agent 修改 React 项目文件，独立的
-后端沙箱完成构建并通过 iframe 展示预览。
+对话式 AI 前端代码生成平台。用户描述需求后，Agent 修改 React 项目文件，受限的
+后端 Worker 进程完成构建并通过 iframe 展示预览。
 
 ## 架构
 
@@ -12,7 +12,7 @@
   └─ iframe 加载 preview origin 下的 /api/sandbox-preview/{capability}/...
                          │ 主 API 直接读取共享静态产物
 FastAPI 主服务（鉴权、Agent、SQLite、预览 capability、静态预览）
-                         │ Docker 内网 + Bearer Token（只发构建请求）
+                         │ 容器 loopback + Bearer Token（只发构建请求）
 sandbox-worker（固定依赖、单并发 Vite build）
                          │ 写入共享预览目录
 ```
@@ -20,8 +20,9 @@ sandbox-worker（固定依赖、单并发 Vite build）
 浏览器不运行 Node，不下载运行时或依赖快照。主服务也不持有 Docker Socket；
 它把已鉴权的文件快照转发给 Worker。Worker 按源码内容缓存构建，相同版本直接复用
 已有产物；新版本构建一次并把静态产物写入共享目录，
-主服务通过带不可猜 capability 的路径直接返回产物。Worker 端口只在 Compose 内网
-和宿主机 loopback 可见，浏览器不会直接连接 Worker，公网网卡也不应发布该端口。
+主服务通过带不可猜 capability 的路径直接返回产物。生产环境中 API 与 Worker 是
+同一容器内的两个进程，Worker 只监听 `127.0.0.1:8010`；浏览器和容器外部都不能
+直接连接 Worker。
 
 ## 沙箱边界
 
@@ -29,7 +30,8 @@ sandbox-worker（固定依赖、单并发 Vite build）
 - 客户端提交的 `package.json`、Vite、Tailwind、PostCSS、tsconfig、`.npmrc`
   和 `index.html` 会被可信模板覆盖。
 - 单次最多 200 个文件、源码共 5MB、单文件 512KB，默认 60 秒超时。
-- Worker 单并发，Compose 默认限制 1.5 CPU、1200MB 内存、128 PID。
+- Worker 单并发；Compose 对 API 与 Worker 所在的整个容器设置 2 CPU、1800MB
+  内存和 256 PID 上限。
 - 推荐把 capability 路由暴露到独立预览 Origin。iframe 可使用该 Origin 自己的
   `localStorage`，但不能读取小筑主站 DOM、Cookie 或登录存储。
 - 若未配置独立 Origin，则回退到主站相对 URL，同时移除 `allow-same-origin`，让页面
@@ -76,19 +78,19 @@ bun run dev
 开发地址：前台 `http://localhost:9000`，管理后台
 `http://localhost:9100/admin/`，API `http://localhost:8000`。
 
-完整 Compose 部署使用根目录 `.env`，其中网络地址与端口要改为：
+完整 Compose 部署使用根目录 `.env`：
 
 ```dotenv
-SANDBOX_WORKER_URL=http://sandbox-worker:8010
+SANDBOX_WORKER_URL=http://127.0.0.1:8010
 SANDBOX_PREVIEW_DIR=/app/data/sandbox-worker/previews
 SANDBOX_CAPABILITY_SECRET=只注入主应用的随机长密钥
 SANDBOX_PREVIEW_ORIGIN=http://preview.localhost:8000
 SANDBOX_FRAME_ANCESTORS=http://localhost:8000
 ```
 
-可先执行 `cp server/.env.example .env` 再修改上述值，然后执行
-`docker compose up -d`。不要把宿主机开发的 `127.0.0.1:8010` 原样用于主应用容器；
-容器内的 `127.0.0.1` 指向主应用自身，不是 Worker。
+可先执行 `cp server/.env.example .env` 再修改预览域名和密钥，然后执行
+`docker compose up -d`。容器入口会先迁移数据库，再启动 loopback Worker 与 API；
+任一进程异常退出都会结束容器并由 Compose 统一重启。
 
 ## 验证
 
@@ -102,19 +104,15 @@ SANDBOX_WORKER_TOKEN=config-check-placeholder docker compose config --no-env-res
 
 ## 部署
 
-主应用与 Worker 是两个镜像：
-
-- `elin/xiaozhu`：FastAPI 与前端静态资源；
-- `elin/xiaozhu-sandbox`：固定模板依赖与构建 Worker。
-
-不要在 2GB 生产机上现场构建 Worker 镜像；由 ACR 构建后让服务器直接拉取。
-两个容器共享预览产物目录。主站域名与预览域名都反向代理到主应用的 `8000` 端口；预览域名只承载
-`/api/sandbox-preview/...`。二者都不直接连接 Worker，也不要把 Worker 端口发布公网。
+生产只需要 `elin/xiaozhu` 一个镜像和一个容器。镜像内包含 FastAPI、Bun Worker、
+固定模板依赖以及前后台静态资源；不要在 2GB 生产机上现场构建镜像，由 ACR 构建后
+直接拉取。主站域名与预览域名都反向代理到该容器的 `8000` 端口；预览域名只承载
+`/api/sandbox-preview/...`。`8010` 不映射到宿主机。
 
 生产环境设置：
 
 ```dotenv
-SANDBOX_WORKER_URL=http://sandbox-worker:8010
+SANDBOX_WORKER_URL=http://127.0.0.1:8010
 SANDBOX_PREVIEW_DIR=/app/data/sandbox-worker/previews
 SANDBOX_WORKER_TOKEN=随机长密钥
 SANDBOX_CAPABILITY_SECRET=另一个仅主应用持有的随机长密钥
@@ -137,6 +135,6 @@ web/                    主前端
 web-admin/              管理后台
 server/app/             FastAPI、Agent、数据模型
 server/templates/       Worker 使用的可信项目模板
-sandbox-worker/         独立构建 Worker
+sandbox-worker/         容器内独立构建 Worker 进程
 server/alembic/         数据库迁移
 ```

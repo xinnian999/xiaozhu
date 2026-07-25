@@ -11,6 +11,7 @@ import {
 import path from 'node:path'
 
 const port = Number.parseInt(process.env.SANDBOX_PORT || '8010', 10)
+const hostname = process.env.SANDBOX_HOST || '0.0.0.0'
 const dataDir = process.env.SANDBOX_DATA_DIR || '/data'
 const workerToken = process.env.SANDBOX_WORKER_TOKEN || ''
 const buildTimeoutMs = Math.max(
@@ -849,7 +850,7 @@ await mkdir(previewsDir, { recursive: true })
 
 const server = Bun.serve({
   port,
-  hostname: '0.0.0.0',
+  hostname,
   async fetch(request) {
     const url = new URL(request.url)
     if (request.method === 'GET' && url.pathname === '/health') {

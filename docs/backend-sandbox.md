@@ -31,7 +31,7 @@ capability 是临时 Bearer 凭证。iframe 导航和静态资源请求不会携
 主服务：
 
 ```dotenv
-SANDBOX_WORKER_URL=http://sandbox-worker:8010
+SANDBOX_WORKER_URL=http://127.0.0.1:8010
 SANDBOX_WORKER_TOKEN=随机长密钥
 SANDBOX_CAPABILITY_SECRET=另一个仅主 API 持有的随机长密钥
 SANDBOX_PREVIEW_DIR=/app/data/sandbox-worker/previews
@@ -40,18 +40,20 @@ SANDBOX_PREVIEW_ORIGIN=https://preview.example.com
 SANDBOX_FRAME_ANCESTORS=https://app.example.com
 ```
 
-Worker：
+同一容器内的 Worker 进程：
 
 ```dotenv
 SANDBOX_PORT=8010
-SANDBOX_DATA_DIR=/data
+SANDBOX_HOST=127.0.0.1
+SANDBOX_DATA_DIR=/app/data/sandbox-worker
+SANDBOX_TEMPLATE_DIR=/app/templates/vite-react
 SANDBOX_WORKER_TOKEN=与主服务一致
 ```
 
 Worker 不生成浏览器 URL，也不提供静态预览接口，因此不需要
-`SANDBOX_PUBLIC_BASE_URL`。生产 Compose 把 Worker 的 `/data` 映射到主服务可读取的
-`/app/data/sandbox-worker`；主服务只通过 `sandbox-worker:8010` 发起构建。宿主机
-端口只绑定 `127.0.0.1:8010` 方便源码开发，公网入口只连接主应用。
+`SANDBOX_PUBLIC_BASE_URL`。生产入口脚本在同一个容器内启动 FastAPI 和 Bun Worker；
+两者直接读写 `/app/data/sandbox-worker`，主服务只通过 `127.0.0.1:8010` 发起构建。
+Compose 不发布 8010，公网入口只连接主应用的 8000。
 
 `SANDBOX_WORKER_TOKEN` 只负责主 API → Worker 的内部鉴权；
 `SANDBOX_CAPABILITY_SECRET` 只负责浏览器预览 capability 的签名，绝不能把后者注入
@@ -88,12 +90,12 @@ sandbox，这个回退模式只做运行时和布局检查，不保证自动截�
 把 `allow-scripts` 与 `allow-same-origin` 同时授予主站同源预览会破坏隔离边界；
 前端只会在 URL 的 Origin 与主站不同时加入 `allow-same-origin`。
 
-## 2C2G 试跑建议
+## 单容器与 2C2G 试跑建议
 
 - 保持 Worker 单并发。
-- 先使用 Compose 中的 1200MB 内存与 1.5 CPU 限额。
-- Worker 镜像由 CI/ACR 构建，生产机只拉镜像。
-- Worker 的宿主机端口仅绑定 `127.0.0.1:8010`，不发布到公网网卡。
+- Compose 对 API 与 Worker 的整个容器限制 1800MB 内存与 2 CPU。
+- 单一应用镜像由 CI/ACR 构建，生产机只拉镜像。
+- Worker 只监听容器内 `127.0.0.1:8010`，Compose 不映射该端口。
 - 观察 `docker stats` 与宿主机 OOM 日志；若峰值长期接近 2GB，再升级内存。
 
 ## 当前边界

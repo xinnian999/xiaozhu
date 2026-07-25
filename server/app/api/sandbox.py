@@ -1,7 +1,7 @@
 """后端预览沙箱 API。
 
 主 API 只负责鉴权、限流边界和转发；真正的 Vite 构建在独立 sandbox-worker 中完成。
-这样无需把 Docker Socket 或 Node 执行能力交给公网 Web 进程，也能随时切回 WebContainer。
+公网 Web 进程不接触 Docker Socket，也不直接执行用户项目。
 """
 
 from typing import Literal
@@ -17,10 +17,6 @@ from app.deps import get_owned_session
 router = APIRouter(tags=["sandbox"])
 
 
-class PreviewRuntimeRead(BaseModel):
-    runtime: Literal["webcontainer", "server"]
-
-
 class SandboxBuildRequest(BaseModel):
     files: dict[str, str]
     device: Literal["desktop", "mobile"] = "desktop"
@@ -32,17 +28,6 @@ class SandboxBuildRead(BaseModel):
     preview_url: str | None = None
     logs: str = ""
     errors: str = ""
-
-
-def _preview_runtime() -> Literal["webcontainer", "server"]:
-    """容错解析配置；拼错值时安全退回成熟的 WebContainer 路径。"""
-    return "server" if settings.preview_runtime.strip().lower() == "server" else "webcontainer"
-
-
-@router.get("/api/preview-runtime", response_model=PreviewRuntimeRead)
-async def read_preview_runtime() -> PreviewRuntimeRead:
-    """前端启动预览面板前读取；不含密钥，可以公开。"""
-    return PreviewRuntimeRead(runtime=_preview_runtime())
 
 
 @router.post(
@@ -60,8 +45,6 @@ async def build_sandbox_preview(
     已经拿到了本轮完整文件，而数据库写工具可能尚未全部提交。继续以前端完整快照为准，
     可保留现有 check_build 的时序正确性。
     """
-    if _preview_runtime() != "server":
-        raise HTTPException(status_code=409, detail="后端预览运行时未启用")
     if not settings.sandbox_worker_token:
         raise HTTPException(status_code=503, detail="沙箱 Worker 密钥未配置")
 

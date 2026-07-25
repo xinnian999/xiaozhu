@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { X, Trash2, Server, Globe } from 'lucide-react'
+import { X, Trash2, Globe } from 'lucide-react'
 import { useUIStore, type LogEntry } from '@/store/ui'
-import NodeTerminal from './NodeTerminal'
 import styles from './index.module.scss'
 
 // 拖拽时高度的钳制范围
@@ -9,25 +8,19 @@ const MIN_HEIGHT = 120
 // 至少给上面的 TabBar + 一截预览留出 160px
 const MAX_HEIGHT_PADDING = 160
 
-type TabKey = 'browser' | 'node'
-
 // ============================================
 // 控制台面板：底部抽屉
-// - Node 进程 tab：交给 xterm.js 渲染（NodeTerminal）
-// - 浏览器 tab：浏览器 console 是结构化数据，仍用我们的列表 UI
+// - 展示后端沙箱预览 iframe 回传的浏览器运行时错误
 // - 顶部 4px 拖拽条可调整面板高度
-// - 即使切到浏览器 tab，NodeTerminal 也保持挂载（display:none 隐藏），
-//   否则 xterm 实例销毁会丢失历史输出 —— 上层不能用条件渲染换掉它
 // ============================================
 export default function ConsolePanel() {
   const open = useUIStore((s) => s.consoleOpen)
   const setOpen = useUIStore((s) => s.setConsoleOpen)
   const height = useUIStore((s) => s.consoleHeight)
   const setHeight = useUIStore((s) => s.setConsoleHeight)
-  const logs = useUIStore((s) => s.wcLogs)
-  const clear = useUIStore((s) => s.clearWcLogs)
+  const logs = useUIStore((s) => s.previewLogs)
+  const clear = useUIStore((s) => s.clearPreviewLogs)
 
-  const [tab, setTab] = useState<TabKey>('browser')
   const dragStateRef = useRef<{ startY: number; startHeight: number } | null>(null)
   const [dragging, setDragging] = useState(false)
 
@@ -94,28 +87,19 @@ export default function ConsolePanel() {
             label="浏览器"
             icon={<Globe size={11} />}
             count={logs.length}
-            active={tab === 'browser'}
-            onClick={() => setTab('browser')}
-          />
-          <FilterTab
-            label="Node 进程"
-            icon={<Server size={11} />}
-            active={tab === 'node'}
-            onClick={() => setTab('node')}
+            active
           />
         </div>
 
         <div className={styles.actions}>
-          {tab === 'browser' && (
-            <button
-              className={styles.iconBtn}
-              onClick={clear}
-              aria-label="清空"
-              title="清空"
-            >
-              <Trash2 size={13} />
-            </button>
-          )}
+          <button
+            className={styles.iconBtn}
+            onClick={clear}
+            aria-label="清空"
+            title="清空"
+          >
+            <Trash2 size={13} />
+          </button>
           <button
             className={styles.iconBtn}
             onClick={() => setOpen(false)}
@@ -128,11 +112,7 @@ export default function ConsolePanel() {
       </div>
 
       <div className={styles.body}>
-        {/* xterm 实例必须常驻 —— 切走 tab 时只 display:none，不能 unmount */}
-        <div style={{ display: tab === 'node' ? 'block' : 'none', height: '100%' }}>
-          <NodeTerminal />
-        </div>
-        <div style={{ display: tab === 'browser' ? 'block' : 'none', height: '100%' }}>
+        <div style={{ height: '100%' }}>
           <BrowserLogs logs={logs} />
         </div>
       </div>
@@ -186,23 +166,17 @@ function FilterTab({
   count,
   active,
   icon,
-  onClick,
 }: {
   label: string
   count?: number
   active: boolean
   icon?: React.ReactNode
-  onClick: () => void
 }) {
   return (
-    <button
-      type="button"
-      className={`${styles.tab} ${active ? styles.tabActive : ''}`}
-      onClick={onClick}
-    >
+    <div className={`${styles.tab} ${active ? styles.tabActive : ''}`}>
       {icon}
       <span>{label}</span>
       {count !== undefined && <span className={styles.tabCount}>{count}</span>}
-    </button>
+    </div>
   )
 }

@@ -3,8 +3,8 @@
 为什么把"配置文件"从模板预置而不是让 LLM 生成？
   - 配置文件（package.json / vite.config.ts / tsconfig.json）是确定性样板，
     让 LLM 随机生成会有错版本号、缺依赖、把 eslint 一起塞进来等问题。
-  - WebContainer 跑不起来时排查极难（npm install 失败堆栈在浏览器里）。
-  - 模板就是一份"已验证可在 WebContainer 跑起来"的最小项目，零随机性。
+  - 运行时安装依赖既慢又扩大攻击面，沙箱 Worker 只使用镜像内固定依赖。
+  - 模板就是一份已验证可由 Worker 构建的最小项目，零随机性。
 
 模板放在 server/templates/<name>/ 下面，就是一个真实的 vite 项目，
 本地可以 cd 进去 bun install && bun dev 验证它能跑。

@@ -1,6 +1,6 @@
 """Build result API —— 接收前端 vite build 的结果。
 
-前端在 WebContainer（浏览器沙箱）里跑 `vite build`，构建快慢取决于用户本机，和后端
+独立 sandbox-worker 跑 `vite build`，构建速度取决于 Worker 的资源配额。主后端
 无关。构建一结束，前端就把「成没成、错在哪」POST 到这里；后端的 check_build 工具正
 挂在 build_store 上等这个结果，收到即被唤醒返回 —— 不再靠固定窗口轮询去猜构建多久。
 

@@ -39,7 +39,7 @@ async def create_session(
 ) -> SessionRead:
     """创建一个新会话，并把 Vite + React 模板预置进去，返回完整的 session 对象。
 
-    为什么要预置模板？因为 WebContainer 启动需要一个完整可跑的项目骨架
+    为什么要预置模板？因为后端沙箱构建需要一个完整可跑的项目骨架
     （package.json / vite.config.ts / index.html ...），让 LLM 从零生成
     这些配置文件容易出错且浪费 token，干脆固定下来。
     LLM 只负责改 src/ 下的业务代码。

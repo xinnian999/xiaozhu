@@ -450,7 +450,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const url = new URL(window.location.href)
     url.searchParams.set('sessionId', session.id)
     window.history.replaceState(null, '', url.toString())
-    // 新建会话后端已经预置了模板，立即拉过来给 WebContainer 用
+    // 新建会话后端已经预置了模板，立即拉取为编辑与后端沙箱构建的文件快照。
     await get().switchTo(session.id)
     return session
   },
@@ -939,7 +939,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const id = get().activeId
     if (!id) return
     // 整体替换 files 并 +versionId，PreviewPane 监听到 currentVersion.files 变化后
-    // 会增量同步进 WebContainer（不在这里碰容器，保持 store 纯数据）。
+    // 会由预览面板提交给后端沙箱（store 只维护数据，不负责构建）。
     set((s) => ({
       sessions: s.sessions.map((sess) =>
         sess.id === id ? { ...sess, files, versionId: sess.versionId + 1 } : sess,

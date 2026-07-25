@@ -58,16 +58,11 @@ function storePreviewDevice(sessionId: string, device: PreviewDevice) {
  *  桌面端两栏并排、不受它影响。 */
 export type MobileView = 'chat' | 'work'
 
-/** WebContainer 生命周期状态 */
-export type WCStatus =
+/** 后端沙箱预览生命周期状态 */
+export type PreviewStatus =
   | 'idle'        // 未启动
-  | 'booting'     // 正在 boot WebContainer 实例
-  | 'mounting'    // 正在写入文件树
-  | 'installing'  // 正在 npm install
-  | 'building'    // 正在 vite build 出 dist（build 预览模式）
-  | 'starting'    // 正在 npm run dev / vite preview 等就绪
+  | 'building'    // Worker 正在 vite build
   | 'ready'       // 已 ready，url 可用
-  | 'syncing'     // 增量同步文件中（切版本时）
   | 'error'
 
 /** 浏览器 console 一条日志的级别 */
@@ -113,15 +108,15 @@ type UIState = {
   openImagePreview: (src: string) => void
   closeImagePreview: () => void
 
-  // —— WebContainer 状态 ——
-  wcStatus: WCStatus
-  wcUrl: string | null
-  wcLog: string  // 最近一行日志，用于展示
-  wcError: string | null
-  setWCStatus: (s: WCStatus) => void
-  setWCUrl: (u: string | null) => void
-  setWCLog: (log: string) => void
-  setWCError: (e: string | null) => void
+  // —— 后端沙箱预览状态 ——
+  previewStatus: PreviewStatus
+  previewUrl: string | null
+  previewLog: string  // 最近一行构建日志，用于展示
+  previewError: string | null
+  setPreviewStatus: (s: PreviewStatus) => void
+  setPreviewUrl: (u: string | null) => void
+  setPreviewLog: (log: string) => void
+  setPreviewError: (e: string | null) => void
 
   /** 预览刷新计数：自增即触发 iframe 重挂载（用作 React key 的一部分） */
   previewReloadTick: number
@@ -159,10 +154,10 @@ type UIState = {
   consoleHeight: number
   setConsoleHeight: (h: number) => void
 
-  /** 浏览器 console 日志条目（node 进程走 xterm 自己渲染，不入此处） */
-  wcLogs: LogEntry[]
-  pushWcLog: (entry: Omit<LogEntry, 'id' | 'ts'>) => void
-  clearWcLogs: () => void
+  /** 预览 iframe 回传的浏览器 console 日志 */
+  previewLogs: LogEntry[]
+  pushPreviewLog: (entry: Omit<LogEntry, 'id' | 'ts'>) => void
+  clearPreviewLogs: () => void
 }
 
 // 自增日志 ID，闭包持有，不污染 store
@@ -205,15 +200,15 @@ export const useUIStore = create<UIState>((set) => ({
   openImagePreview: (src) => set({ previewImage: src }),
   closeImagePreview: () => set({ previewImage: null }),
 
-  // —— WebContainer ——
-  wcStatus: 'idle',
-  wcUrl: null,
-  wcLog: '',
-  wcError: null,
-  setWCStatus: (wcStatus) => set({ wcStatus }),
-  setWCUrl: (wcUrl) => set({ wcUrl }),
-  setWCLog: (wcLog) => set({ wcLog }),
-  setWCError: (wcError) => set({ wcError }),
+  // —— 后端沙箱预览 ——
+  previewStatus: 'idle',
+  previewUrl: null,
+  previewLog: '',
+  previewError: null,
+  setPreviewStatus: (previewStatus) => set({ previewStatus }),
+  setPreviewUrl: (previewUrl) => set({ previewUrl }),
+  setPreviewLog: (previewLog) => set({ previewLog }),
+  setPreviewError: (previewError) => set({ previewError }),
 
   previewReloadTick: 0,
   reloadPreview: () => set((s) => ({ previewReloadTick: s.previewReloadTick + 1 })),
@@ -248,18 +243,18 @@ export const useUIStore = create<UIState>((set) => ({
   consoleHeight: 240,
   setConsoleHeight: (consoleHeight) => set({ consoleHeight }),
 
-  wcLogs: [],
-  pushWcLog: (entry) =>
+  previewLogs: [],
+  pushPreviewLog: (entry) =>
     set((s) => {
       const next: LogEntry = {
         ...entry,
         id: ++logIdSeq,
         ts: Date.now(),
       }
-      const logs = s.wcLogs.length >= LOG_CAP
-        ? [...s.wcLogs.slice(-(LOG_CAP - 1)), next]
-        : [...s.wcLogs, next]
-      return { wcLogs: logs }
+      const logs = s.previewLogs.length >= LOG_CAP
+        ? [...s.previewLogs.slice(-(LOG_CAP - 1)), next]
+        : [...s.previewLogs, next]
+      return { previewLogs: logs }
     }),
-  clearWcLogs: () => set({ wcLogs: [] }),
+  clearPreviewLogs: () => set({ previewLogs: [] }),
 }))

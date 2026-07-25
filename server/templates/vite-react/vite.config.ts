@@ -1,13 +1,13 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// WebContainer 里 dev server 默认会监听一个随机端口，
+// 保留固定模板的 Vite 配置，Worker 构建时只执行 build，不启动 dev server。
 // 这里不固定 port，让 vite 自由选择，server-ready 事件会回传 url。
 export default defineConfig({
   plugins: [react()],
   resolve: {
     // ★强制 React / react-router-dom 全局只用一份★
-    // 不加这个，WebContainer 里装了 react-router-dom 后很容易出现「两份 React」或
+    // 避免模板依赖与生成代码引入「两份 React」或
     // 「两份 react-router-dom」，引发两类诡异错误：
     //   1. 正确的路由代码也报 "Invalid hook call"（路由 hook 拿到了另一个 React 实例）；
     //   2. 明明 <HashRouter> 包着 <Routes>，却报 "useRoutes() 必须在 <Router> 内"
@@ -22,7 +22,7 @@ export default defineConfig({
     //
     // 典型翻车场景：初版页面没用路由 → Vite 第一次只优化了 react / react-dom；
     // 之后某次编辑才 import react-router-dom → Vite 把它当「中途新发现的依赖」，
-    // 触发二次重优化 + 页面 reload。在 WebContainer 这点时间差里，新生成的 router
+    // 触发二次重优化 + 页面 reload。生成代码如果在这点时间差里引入 router
     // chunk 调 useRef 时，旧 React chunk 的 dispatcher 已被置 null，于是偶发地报
     // 「Invalid hook call」「Cannot read properties of null (reading 'useRef')」。
     //

@@ -126,7 +126,7 @@ async def restore_version(
     # 4. 回滚即新版：把刚覆盖好的当前态再快照成新版本（复用 snapshot_current_files）
     await snapshot_current_files(db, session_id, summary=f"回滚到 v{version.seq}")
 
-    # 5. 返回新的当前文件，前端据此重挂 WebContainer
+    # 5. 返回新的当前文件，前端据此触发后端沙箱重建
     result = await db.execute(
         select(File).where(File.session_id == session_id).order_by(File.path)
     )

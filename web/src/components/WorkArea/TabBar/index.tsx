@@ -4,7 +4,6 @@ import { useUIStore, type PreviewDevice, type WorkTab } from '@/store/ui'
 import { useSessionStore } from '@/store/session'
 import { downloadSourceAsZip } from '@/lib/download'
 import { toast } from '@/lib/toast'
-import { isPreviewRunning } from '@/lib/webcontainer'
 import ShareDialog from './ShareDialog'
 import styles from './index.module.scss'
 
@@ -37,7 +36,7 @@ export default function TabBar() {
   // 控制台抽屉开关：终端按钮亮起表示当前打开
   const consoleOpen = useUIStore((s) => s.consoleOpen)
   const toggleConsole = useUIStore((s) => s.toggleConsole)
-  const logCount = useUIStore((s) => s.wcLogs.length)
+  const logCount = useUIStore((s) => s.previewLogs.length)
   // 发预览导航指令（后退/前进/刷新）—— PreviewPane 收到后 postMessage 进 iframe。
   // 刷新走 'reload'（iframe 内 location.reload，保留当前路由），不再整页重挂 iframe。
   const sendPreviewNav = useUIStore((s) => s.sendPreviewNav)
@@ -46,7 +45,7 @@ export default function TabBar() {
   const canBack = useUIStore((s) => s.previewCanBack)
   const canForward = useUIStore((s) => s.previewCanForward)
   // 预览只在 dev server ready 时才有 URL，没有 URL 时这些操作没意义
-  const wcUrl = useUIStore((s) => s.wcUrl)
+  const previewUrl = useUIStore((s) => s.previewUrl)
   // 真实会话 id（分享要用它，session.id 是兼容旧组件的占位）
   const activeId = useSessionStore((s) => s.activeId)
   // 未保存草稿数量：代码 tab 且 >0 时才显示保存 / 丢弃（返回 number，selector 稳定）
@@ -81,10 +80,10 @@ export default function TabBar() {
     }
   }
 
-  // 打开分享：必须预览已经跑起来（vite preview ready），否则容器里没法 vite build
+  // Worker 构建成功后，其独立 Origin 地址即可直接分享。
   const handleShare = () => {
     if (!activeId) return
-    if (!isPreviewRunning()) {
+    if (!previewUrl) {
       toast('请等预览加载完成后再分享')
       return
     }
@@ -173,7 +172,7 @@ export default function TabBar() {
               <button
                 className={styles.urlIconBtn}
                 onClick={() => sendPreviewNav('back')}
-                disabled={!wcUrl || !canBack}
+                disabled={!previewUrl || !canBack}
                 aria-label="后退"
                 title="后退"
               >
@@ -182,7 +181,7 @@ export default function TabBar() {
               <button
                 className={styles.urlIconBtn}
                 onClick={() => sendPreviewNav('forward')}
-                disabled={!wcUrl || !canForward}
+                disabled={!previewUrl || !canForward}
                 aria-label="前进"
                 title="前进"
               >
@@ -191,7 +190,7 @@ export default function TabBar() {
               <button
                 className={styles.urlIconBtn}
                 onClick={() => sendPreviewNav('reload')}
-                disabled={!wcUrl}
+                disabled={!previewUrl}
                 aria-label="刷新预览"
                 title="刷新预览"
               >
@@ -273,9 +272,9 @@ export default function TabBar() {
         )}
       </div>
 
-      {/* 分享弹窗：打开即在容器里构建并上传，给出访客链接 */}
-      {shareOpen && activeId && (
-        <ShareDialog sessionId={activeId} onClose={() => setShareOpen(false)} />
+      {/* Worker 预览本身就是独立 Origin，分享弹窗直接提供当前构建地址。 */}
+      {shareOpen && previewUrl && (
+        <ShareDialog previewUrl={previewUrl} onClose={() => setShareOpen(false)} />
       )}
     </div>
   )

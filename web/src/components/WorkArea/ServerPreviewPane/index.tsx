@@ -17,11 +17,7 @@ type PendingCheck = {
   done: boolean
 }
 
-/** 后端构建模式的最小预览面板。
- *
- * 首个 PoC 先复用浏览器 iframe 收集运行时错误；可靠截图将在下一阶段迁到 Worker 的
- * Playwright。构建、预览地址和生命周期已经完全脱离 WebContainer。
- */
+/** 后端沙箱预览面板。构建由独立 Worker 完成，iframe 只负责展示产物与回传运行时错误。 */
 export default function ServerPreviewPane() {
   const currentVersion = useSessionStore((s) => s.currentVersion())
   const activeId = useSessionStore((s) => s.activeId)
@@ -29,19 +25,19 @@ export default function ServerPreviewPane() {
     (s) => s.sessions.find((item) => item.id === s.activeId)?.isStreaming ?? false,
   )
   const previewDevice = useUIStore((s) => s.previewDevice)
-  const wcStatus = useUIStore((s) => s.wcStatus)
-  const wcUrl = useUIStore((s) => s.wcUrl)
-  const wcLog = useUIStore((s) => s.wcLog)
-  const wcError = useUIStore((s) => s.wcError)
+  const previewStatus = useUIStore((s) => s.previewStatus)
+  const previewUrl = useUIStore((s) => s.previewUrl)
+  const previewLog = useUIStore((s) => s.previewLog)
+  const previewError = useUIStore((s) => s.previewError)
   const reloadTick = useUIStore((s) => s.previewReloadTick)
   const applyRequest = useUIStore((s) => s.previewApplyRequest)
   const navCmd = useUIStore((s) => s.previewNavCmd)
-  const setWCStatus = useUIStore((s) => s.setWCStatus)
-  const setWCUrl = useUIStore((s) => s.setWCUrl)
-  const setWCLog = useUIStore((s) => s.setWCLog)
-  const setWCError = useUIStore((s) => s.setWCError)
-  const pushWcLog = useUIStore((s) => s.pushWcLog)
-  const clearWcLogs = useUIStore((s) => s.clearWcLogs)
+  const setPreviewStatus = useUIStore((s) => s.setPreviewStatus)
+  const setPreviewUrl = useUIStore((s) => s.setPreviewUrl)
+  const setPreviewLog = useUIStore((s) => s.setPreviewLog)
+  const setPreviewError = useUIStore((s) => s.setPreviewError)
+  const pushPreviewLog = useUIStore((s) => s.pushPreviewLog)
+  const clearPreviewLogs = useUIStore((s) => s.clearPreviewLogs)
   const setPreviewNav = useUIStore((s) => s.setPreviewNav)
   const resetPreviewNav = useUIStore((s) => s.resetPreviewNav)
 
@@ -117,9 +113,9 @@ export default function ServerPreviewPane() {
     checkId: string | null,
     epoch: number,
   ) => {
-    setWCStatus('building')
-    setWCError(null)
-    setWCLog('正在提交后端沙箱构建…')
+    setPreviewStatus('building')
+    setPreviewError(null)
+    setPreviewLog('正在提交后端沙箱构建…')
     try {
       const result = await buildServerPreview(
         sessionId,
@@ -127,12 +123,12 @@ export default function ServerPreviewPane() {
         useUIStore.getState().previewDevice,
       )
       if (activeEpochRef.current !== epoch) return
-      if (result.logs) setWCLog(result.logs.split('\n').filter(Boolean).at(-1) ?? '')
+      if (result.logs) setPreviewLog(result.logs.split('\n').filter(Boolean).at(-1) ?? '')
       if (!result.ok || !result.preview_url) {
         const message = result.errors || '后端沙箱构建失败'
-        setWCError(message)
-        setWCStatus(wcUrl ? 'ready' : 'error')
-        pushWcLog({ level: 'error', text: message })
+        setPreviewError(message)
+        setPreviewStatus(previewUrl ? 'ready' : 'error')
+        pushPreviewLog({ level: 'error', text: message })
         if (checkId) {
           await postBuildResult(sessionId, {
             check_id: checkId,
@@ -156,14 +152,14 @@ export default function ServerPreviewPane() {
         }
         readyFallbackRef.current = setTimeout(finishPendingCheck, READY_FALLBACK_MS)
       }
-      setWCUrl(result.preview_url)
-      setWCStatus('ready')
+      setPreviewUrl(result.preview_url)
+      setPreviewStatus('ready')
     } catch (error) {
       if (activeEpochRef.current !== epoch) return
       const message = error instanceof Error ? error.message : String(error)
-      setWCError(message)
-      setWCStatus(wcUrl ? 'ready' : 'error')
-      pushWcLog({ level: 'error', text: message })
+      setPreviewError(message)
+      setPreviewStatus(previewUrl ? 'ready' : 'error')
+      pushPreviewLog({ level: 'error', text: message })
       if (checkId) {
         await postBuildResult(sessionId, {
           check_id: checkId,
@@ -177,12 +173,12 @@ export default function ServerPreviewPane() {
     }
   }, [
     finishPendingCheck,
-    pushWcLog,
-    setWCError,
-    setWCLog,
-    setWCStatus,
-    setWCUrl,
-    wcUrl,
+    pushPreviewLog,
+    setPreviewError,
+    setPreviewLog,
+    setPreviewStatus,
+    setPreviewUrl,
+    previewUrl,
   ])
 
   const enqueueBuild = useCallback((
@@ -210,10 +206,10 @@ export default function ServerPreviewPane() {
     )
     if (collectTimerRef.current) clearTimeout(collectTimerRef.current)
     if (readyFallbackRef.current) clearTimeout(readyFallbackRef.current)
-    setWCUrl(null)
-    setWCError(null)
-    setWCStatus('idle')
-    clearWcLogs()
+    setPreviewUrl(null)
+    setPreviewError(null)
+    setPreviewStatus('idle')
+    clearPreviewLogs()
     resetPreviewNav()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId])
@@ -260,7 +256,7 @@ export default function ServerPreviewPane() {
         const message = typeof data.message === 'string' ? data.message.slice(0, 4000) : ''
         if (message && pendingCheckRef.current && !pendingCheckRef.current.done) {
           pendingCheckRef.current.runtimeErrors.push(message)
-          pushWcLog({ level: 'error', text: message })
+          pushPreviewLog({ level: 'error', text: message })
         }
       } else if (data.type === 'xiaozhu-server-ready') {
         beginRuntimeCollection()
@@ -271,7 +267,7 @@ export default function ServerPreviewPane() {
     }
     window.addEventListener('message', handle)
     return () => window.removeEventListener('message', handle)
-  }, [beginRuntimeCollection, pushWcLog, setPreviewNav])
+  }, [beginRuntimeCollection, pushPreviewLog, setPreviewNav])
 
   useEffect(() => {
     if (!navCmd.seq) return
@@ -287,7 +283,7 @@ export default function ServerPreviewPane() {
     if (readyFallbackRef.current) clearTimeout(readyFallbackRef.current)
   }, [])
 
-  const showIframe = wcStatus === 'ready' && Boolean(wcUrl)
+  const showIframe = previewStatus === 'ready' && Boolean(previewUrl)
   return (
     <div
       ref={rootRef}
@@ -301,9 +297,9 @@ export default function ServerPreviewPane() {
           <div className={styles.viewport}>
             {showIframe && (
               <iframe
-                key={`${wcUrl}-${reloadTick}`}
+                key={`${previewUrl}-${reloadTick}`}
                 ref={iframeRef}
-                src={wcUrl!}
+                src={previewUrl!}
                 className={styles.iframe}
                 title="后端沙箱预览"
                 sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups"
@@ -311,20 +307,20 @@ export default function ServerPreviewPane() {
             )}
             {!showIframe && (
               <div className={styles.overlay}>
-                {wcStatus === 'error' ? (
+                {previewStatus === 'error' ? (
                   <div className={styles.errBlock}>
                     <AlertTriangle size={20} />
                     <h3>后端沙箱启动失败</h3>
-                    <p>{wcError ?? '未知错误'}</p>
+                    <p>{previewError ?? '未知错误'}</p>
                     <p className={styles.errHint}>检查 Worker 状态、密钥和预览域名配置。</p>
                   </div>
                 ) : (
                   <div className={styles.booting}>
                     <div className={styles.pctNumber}>…</div>
                     <p className={styles.statusLabel}>
-                      {wcStatus === 'building' ? '正在后端隔离环境中构建…' : '正在准备后端沙箱…'}
+                      {previewStatus === 'building' ? '正在后端隔离环境中构建…' : '正在准备后端沙箱…'}
                     </p>
-                    {wcLog && <pre className={styles.bootLog}>{wcLog}</pre>}
+                    {previewLog && <pre className={styles.bootLog}>{previewLog}</pre>}
                   </div>
                 )}
               </div>

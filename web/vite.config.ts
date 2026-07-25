@@ -5,12 +5,7 @@ import path from "node:path";
 // 后端 dev server 地址。前台经 vite(9000) 代理到它，做到「开发期只用一个端口」。
 const BACKEND = "http://localhost:8000";
 
-// changeOrigin 不能开：一旦开启，代理转发给后端的 Host 头会被改成 localhost:8000，
-// 后端（SQLAdmin 的 request.url_for / base_url）就会按这个 Host 生成 http://localhost:8000/...
-// 的绝对地址（重定向 Location、静态资源 <link>/<script>）。这些资源实际由浏览器直接请求 8000，
-// 而 vite 又给页面开了 COEP: require-corp（WebContainer 需要），8000 的响应没有对应的
-// Cross-Origin-Resource-Policy 头，于是被浏览器整体拦掉 —— 后台页面直接裸奔、没有样式。
-// 保持 Host 头为浏览器原始的 localhost:9000，后端生成的地址就都落在 9000 上，天然同源。
+// 保持 Host 头为浏览器原始的 localhost:9000，让后端生成的绝对地址继续走 Vite 代理。
 const backendProxy = {
   target: BACKEND,
   changeOrigin: false,
@@ -25,12 +20,7 @@ export default defineConfig({
     },
   },
   server: {
-    // WebContainer 必需的跨域隔离响应头，缺失则 SharedArrayBuffer 不可用
     port: 9000,
-    headers: {
-      "Cross-Origin-Opener-Policy": "same-origin",
-      "Cross-Origin-Embedder-Policy": "require-corp",
-    },
     proxy: {
       // 不 rewrite path：/api/sessions → http://localhost:8000/api/sessions
       "/api": backendProxy,

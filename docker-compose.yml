@@ -32,6 +32,7 @@ services:
     # 注意 sqlite 的四个斜杠：//// 后面跟的是绝对路径 /app/data/xiaozhu.db。
     environment:
       - DATABASE_URL=sqlite+aiosqlite:////app/data/xiaozhu.db
+      - SANDBOX_WORKER_URL=http://sandbox-worker:8010
 
     # 把宿主机 ./data 挂到容器 /app/data，让 SQLite 数据库文件持久化。
     # 升级 / 重建容器后数据还在。
@@ -40,12 +41,12 @@ services:
 
     # 容器异常退出时自动重启；除非手动 stop，否则开机也会自启。
     restart: unless-stopped
+    depends_on:
+      sandbox-worker:
+        condition: service_healthy
 
-  # 实验性的后端预览 Worker。默认 profile 不启动，现有 WebContainer 部署完全不受影响。
-  # 启用：在 .env 配好 PREVIEW_RUNTIME / Worker token 后执行：
-  #   docker compose --profile sandbox up -d
+  # 固定的后端预览 Worker，与主服务一起启动。
   sandbox-worker:
-    profiles: ["sandbox"]
     image: crpi-a7p27yxlrmekg1a3.cn-beijing.personal.cr.aliyuncs.com/elin/xiaozhu-sandbox:latest
     build:
       context: .
@@ -73,4 +74,9 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r=await fetch('http://127.0.0.1:8010/health');process.exit(r.ok?0:1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     restart: unless-stopped

@@ -9,19 +9,17 @@ from pathlib import Path
 import stat
 
 import anyio
-from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException
 from starlette.responses import Response
-from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.api import (
     ask_result,
     billing,
-    boot_failure,
     build_result,
     chat,
     files,
@@ -42,40 +40,6 @@ from app.db import AsyncSessionLocal, engine
 from app.setup import is_initialized, is_initialized_cached
 
 
-# ── 跨域隔离中间件（WebContainer 硬性前提）──────────────────
-# WebContainer 依赖 SharedArrayBuffer，浏览器只在「跨域隔离」状态下才放行它。
-# 开启跨域隔离要求顶层文档带这两个响应头：
-#   Cross-Origin-Opener-Policy: same-origin
-#   Cross-Origin-Embedder-Policy: require-corp
-# dev 期是 Vite(vite.config.ts) 帮我们加的；生产期没有 Vite 了，必须后端自己加。
-#
-# 为什么手写「纯 ASGI 中间件」而不用更简单的 @app.middleware("http")？
-# 后者基于 BaseHTTPMiddleware，历史上会把流式响应整个缓冲起来再一次性发出，
-# 这会直接破坏我们 /api/chat 的 SSE「边生成边推送」效果。纯 ASGI 中间件只在
-# 响应的「头」阶段插一手、完全不碰响应体，对流式透明，是最稳的写法。
-class CrossOriginIsolationMiddleware:
-    def __init__(self, app: ASGIApp) -> None:
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        # 只处理 HTTP 流量；WebSocket / lifespan 等原样放行
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        async def send_with_headers(msg: Message) -> None:
-            # ASGI 把一个响应拆成多条 message：http.response.start 这条带状态码和
-            # 响应头，随后才是一条条 http.response.body。我们只在 start 这条往
-            # headers 里塞两个头，body 一个字节都不碰 —— 所以流式完全不受影响。
-            if msg["type"] == "http.response.start":
-                headers = MutableHeaders(scope=msg)
-                headers["Cross-Origin-Opener-Policy"] = "same-origin"
-                headers["Cross-Origin-Embedder-Policy"] = "require-corp"
-            await send(msg)
-
-        await self.app(scope, receive, send_with_headers)
-
-
 # ── 初始化闸门中间件 ────────────────────────────────────────
 # 系统还没初始化（库里没有任何管理员）时，前台/接口都不该能用 —— 否则全新库里
 # 前台是一堆空数据和报错。这里在最外层拦一道：未初始化就把请求引导去 /setup。
@@ -87,7 +51,6 @@ class CrossOriginIsolationMiddleware:
 #   /setup            —— 初始化向导本身（否则死循环）
 #   /api/setup-status —— 前端首屏查初始化状态的接口，必须放行（否则前端拿不到状态、无法自跳）
 #   /health           —— 健康检查，探活用
-#   /deps-snapshot    —— 大文件，无所谓
 # 其余一切（前台 SPA、管理后台 /admin、/api/*、静态资源）→ 302 跳 /setup。
 # 管理后台无需在此放行：未初始化时库里根本没有管理员、登不进去，引导去 /setup 建首个管理员
 # 才是正确路径；建成后 is_initialized 即为 True，/admin 与 /api/admin/* 全部照常放行。
@@ -95,7 +58,7 @@ class CrossOriginIsolationMiddleware:
 # 性能：已初始化后 is_initialized_cached() 命中内存缓存、直接放行，不查库、零额外开销。
 # 只有「还没初始化」这段短暂时期才会对每个请求查一次库（且很快就 mark 成 True）。
 class SetupGateMiddleware:
-    _ALLOW_PREFIXES = ("/setup", "/api/setup-status", "/health", "/deps-snapshot")
+    _ALLOW_PREFIXES = ("/setup", "/api/setup-status", "/health")
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -191,8 +154,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Xiaozhu Backend", version="0.2.0", lifespan=lifespan)
 
-# 给所有响应加跨域隔离头（dev / 生产都加，无副作用，让两边环境更一致）
-app.add_middleware(CrossOriginIsolationMiddleware)
 # 初始化闸门：未初始化时把前台/接口都引导去 /setup。最后 add = 最外层先执行，
 # 让它在其它中间件之前拦下未初始化的请求。
 app.add_middleware(SetupGateMiddleware)
@@ -216,7 +177,6 @@ app.include_router(versions.router)
 app.include_router(messages.router)
 app.include_router(preview_screenshots.router)
 app.include_router(build_result.router)
-app.include_router(boot_failure.router)
 app.include_router(ask_result.router)
 app.include_router(resume.router)
 app.include_router(sandbox.router)
@@ -241,31 +201,6 @@ if ADMIN_STATIC_DIR.is_dir():
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
-
-
-# ── deps-snapshot.bin：用 gzip 压缩版本响应 ────────────────────
-# 66MB 的原始快照直接通过 StaticFiles 吐出来太慢。
-# Dockerfile 构建时已经生成 .bin.gz（约 18MB），这里拦截这个路径，
-# 优先返回压缩版本 + Content-Encoding: gzip，浏览器透明解压。
-# 前端 fetch 拿到的 arrayBuffer 是解压后的原始字节，wc.mount() 照常工作。
-# Cache-Control 设 1 天：manifest depsKey 校验会在下载前先拦截版本不匹配的情况。
-@app.get("/deps-snapshot.bin")
-async def serve_snapshot(request: Request) -> FileResponse:
-    gz_path = STATIC_DIR / "deps-snapshot.bin.gz"
-    if gz_path.exists():
-        return FileResponse(
-            gz_path,
-            media_type="application/octet-stream",
-            headers={
-                "Content-Encoding": "gzip",
-                "Cache-Control": "public, max-age=86400",
-            },
-        )
-    # 没有压缩版本时回退到原始文件（开发环境 / 首次部署前）
-    return FileResponse(
-        STATIC_DIR / "deps-snapshot.bin",
-        media_type="application/octet-stream",
-    )
 
 
 # ── 生产模式：托管前端构建产物 ──────────────────────────────

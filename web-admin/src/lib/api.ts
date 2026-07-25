@@ -133,64 +133,6 @@ export async function deleteSession(id: string) {
   await http.delete(`/api/admin/sessions/${id}`)
 }
 
-// ── 预览 boot 失败监控（只读） ────────────────────────────────
-// WebContainer 运行环境从境外 boot，国内偶发失败。C 端前端上报到 boot_failures 表，
-// 这里拉出来做监控。
-export type AdminBootFailure = {
-  id: number
-  session_id: string | null
-  user_id: string | null
-  // 由后端 join users 填充：所属用户昵称 / 邮箱（裸 id 无意义，改展示这两个）。
-  user_nickname: string | null
-  user_email: string | null
-  stage: string
-  kind: string
-  message: string
-  cross_origin_isolated: boolean | null
-  elapsed_ms: number | null
-  cold: boolean | null
-  user_agent: string | null
-  created_at: string
-}
-
-// boot 耗时统计：成功样本的耗时（总体 + 冷/热分组）、失败计数、成功耗时分布直方图。
-export type BootStatGroup = {
-  count: number
-  avg_ms: number | null
-  min_ms: number | null
-  max_ms: number | null
-}
-export type BootStats = {
-  success: BootStatGroup
-  success_cold: BootStatGroup
-  success_hot: BootStatGroup
-  failed: Record<string, number> // { timeout: n, error: m }
-  buckets: { label: string; count: number }[] // 成功耗时分档直方图
-}
-
-export async function listBootFailures(params: { offset?: number; limit?: number; kind?: string }) {
-  const res = await http.get<AdminBootFailure[]>('/api/admin/boot-failures', { params })
-  return res.data
-}
-
-export async function countBootFailures(params?: { kind?: string }) {
-  const res = await http.get<number>('/api/admin/boot-failures/count', { params })
-  return res.data
-}
-
-export async function recentBootFailures(hours = 24) {
-  const res = await http.get<number>('/api/admin/boot-failures/recent-count', {
-    params: { hours },
-  })
-  return res.data
-}
-
-/** boot 耗时统计（成功耗时 + 冷/热分组 + 失败计数 + 分布直方图）。 */
-export async function getBootStats() {
-  const res = await http.get<BootStats>('/api/admin/boot-failures/boot-stats')
-  return res.data
-}
-
 // ── 邮箱验证码（只读 + 删） ───────────────────────────────────
 export type AdminEmailCode = {
   email: string

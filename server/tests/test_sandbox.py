@@ -1,20 +1,9 @@
-from unittest import IsolatedAsyncioTestCase, TestCase
+from unittest import IsolatedAsyncioTestCase
 from unittest.mock import patch
 
 from fastapi import HTTPException
 
 from app.api import sandbox
-from app.config import Settings
-
-
-class SandboxConfigTests(TestCase):
-    def test_preview_runtime_defaults_to_webcontainer(self):
-        configured = Settings(_env_file=None)
-        self.assertEqual(configured.preview_runtime, "webcontainer")
-
-    def test_unknown_runtime_falls_back_to_webcontainer(self):
-        with patch.object(sandbox.settings, "preview_runtime", "typo"):
-            self.assertEqual(sandbox._preview_runtime(), "webcontainer")
 
 
 class _FakeResponse:
@@ -49,7 +38,6 @@ class _FakeClient:
 class SandboxBuildTests(IsolatedAsyncioTestCase):
     async def test_worker_token_is_required(self):
         with (
-            patch.object(sandbox.settings, "preview_runtime", "server"),
             patch.object(sandbox.settings, "sandbox_worker_token", ""),
             self.assertRaises(HTTPException) as raised,
         ):
@@ -62,7 +50,6 @@ class SandboxBuildTests(IsolatedAsyncioTestCase):
     async def test_successful_worker_response_is_validated_and_forwarded(self):
         client = _FakeClient()
         with (
-            patch.object(sandbox.settings, "preview_runtime", "server"),
             patch.object(sandbox.settings, "sandbox_worker_token", "worker-secret"),
             patch.object(sandbox.settings, "sandbox_worker_url", "http://worker:8010/"),
             patch.object(sandbox.httpx, "AsyncClient", return_value=client),

@@ -1,9 +1,8 @@
 """SharedAsset 数据模型：一个会话「分享出去的构建产物」（dist 静态文件）。
 
 和 files 表的区别：
-  - files       = 项目源码（可编辑、给 WebContainer 跑 dev）
-  - shared_assets = 分享者在自己浏览器里 `vite build` 出来的成品 dist
-                    （只读、给访客当静态站点直接渲染，秒开）
+  - files         = 项目源码（可编辑、提交给后端沙箱构建）
+  - shared_assets = 已构建的成品 dist（只读、给访客当静态站点直接渲染）
 
 每次「分享」会先清空该会话旧的 shared_assets，再写入这次构建的全部 dist 文件。
 公开访问时按 session.share_token 找到会话，再按 path 取这里的文件发出去。

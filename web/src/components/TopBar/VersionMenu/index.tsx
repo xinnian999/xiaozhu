@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { ChevronDown, History, RotateCcw, Loader2, Check } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
 import { useClickOutside } from '@/hooks/useClickOutside'
@@ -11,7 +11,7 @@ import styles from './index.module.scss'
 // - 打开面板时拉取该会话的版本列表（后端按 seq 倒序，最新在前）
 // - 列表第一项（seq 最大）即当前 tip，标「当前」
 // - 点旧版本「回滚」：后端用快照覆盖当前文件并 append 一个新版本，
-//   前端用返回的文件 replaceFiles → PreviewPane 增量同步进 WebContainer
+//   前端用返回的文件 replaceFiles → 预览面板提交后端沙箱重建
 // ============================================
 export default function VersionMenu() {
   const [open, setOpen] = useState(false)
@@ -38,10 +38,11 @@ export default function VersionMenu() {
     }
   }, [activeId])
 
-  // 每次打开面板刷新一次，保证看到最新（生成 / 回滚都会新增版本）
-  useEffect(() => {
-    if (open) refresh()
-  }, [open, refresh])
+  const toggleOpen = () => {
+    const next = !open
+    setOpen(next)
+    if (next) void refresh()
+  }
 
   // 没有激活会话就不渲染 —— 没有项目就没有版本概念
   if (!activeId) return null
@@ -63,7 +64,7 @@ export default function VersionMenu() {
       <button
         type="button"
         className={`${styles.trigger} ${open ? styles.triggerOpen : ''}`}
-        onClick={() => setOpen((v) => !v)}
+        onClick={toggleOpen}
         aria-expanded={open}
         aria-haspopup="menu"
       >

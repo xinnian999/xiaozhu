@@ -103,10 +103,7 @@ class Settings(BaseSettings):
     # pydantic-settings 会自动解析成列表。
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
-    # ── 预览运行时（实验功能）──────────────────────────────────
-    # webcontainer：保留现有浏览器内运行时；server：把固定模板项目提交给独立
-    # sandbox-worker 构建。默认仍走 WebContainer，只有显式配置后才切换，便于灰度和回退。
-    preview_runtime: str = "webcontainer"
+    # ── 后端预览沙箱 ───────────────────────────────────────────
     # Worker 只在 Docker 内网暴露构建接口；主 API 代用户转发，浏览器永远拿不到内部 token。
     sandbox_worker_url: str = "http://sandbox-worker:8010"
     sandbox_worker_token: str = ""

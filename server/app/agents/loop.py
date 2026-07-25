@@ -1243,7 +1243,7 @@ async def _consume(
                                 yield sse({"type": "message_delta", "text": text})
                                 await _save_message(db, db_lock, session_id, "assistant", text)
                             # 极少数 provider 会无视 parallel_tool_calls=False。若同一批给出
-                            # 多个 check_build，前端只有一个 WebContainer，不能并发构建；
+                            # 多个 check_build 共用单并发 Worker，不能并发构建；
                             # 只执行第一项，后续项仍 arm 后立即回一条可读错误，避免它们各等
                             # 90 秒或让 scalar preview 请求互相覆盖。
                             primary_check_id = next(

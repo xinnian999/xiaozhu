@@ -35,7 +35,7 @@ export default function MonacoView({ path }: Props) {
     // Monaco 自带的 TS 语言服务默认不开 JSX、也读不到项目的 tsconfig / node_modules，
     // 于是 .tsx 会满屏报「Cannot use JSX」「找不到 react 模块」。这里全局配置一次：
     // 1) 开启 JSX 解析，消除 17004；2) 关掉语义校验，避免「找不到模块 / 隐式 any」误报
-    //    —— 真正的类型/编译检查交给 WebContainer 里的 Vite，这里只当编辑器用。
+    //    —— 真正的类型/编译检查交给后端沙箱里的 Vite，这里只当编辑器用。
     const ts = monaco.languages.typescript
     ts.typescriptDefaults.setCompilerOptions({
       jsx: ts.JsxEmit.ReactJSX,

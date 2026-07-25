@@ -347,7 +347,7 @@ export async function getMyPendingOrder(): Promise<ApiMyOrder | null> {
 // ── Files ───────────────────────────────────────────────────────
 
 /** 拉取一个 session 下的所有文件（含 content）。返回 {path: content} 扁平字典，
- *  方便直接喂给 WebContainer。 */
+ *  方便直接提交给后端沙箱。 */
 export async function listSessionFiles(sessionId: string): Promise<Record<string, string>> {
   const { data } = await http.get<ApiFile[]>(`/api/sessions/${sessionId}/files`)
   const map: Record<string, string> = {}
@@ -465,9 +465,7 @@ export async function postBuildResult(
   }
 }
 
-// ── 后端预览沙箱（实验功能）──────────────────────────────────
-
-export type PreviewRuntime = 'webcontainer' | 'server'
+// ── 后端预览沙箱 ─────────────────────────────────────────────
 
 export type SandboxBuildResult = {
   ok: boolean
@@ -475,23 +473,6 @@ export type SandboxBuildResult = {
   preview_url: string | null
   logs: string
   errors: string
-}
-
-/** 运行时开关是部署级配置；读取失败时静默退回成熟的 WebContainer 路径。 */
-export async function getPreviewRuntime(): Promise<PreviewRuntime> {
-  try {
-    const response = await fetch('/api/preview-runtime')
-    if (!response.ok) return 'webcontainer'
-    const data: unknown = await response.json()
-    if (
-      typeof data === 'object'
-      && data !== null
-      && (data as Record<string, unknown>).runtime === 'server'
-    ) return 'server'
-  } catch {
-    // 配置探测不能阻断预览，失败就继续使用原实现。
-  }
-  return 'webcontainer'
 }
 
 /** 提交浏览器当前完整文件快照；沿用原生 fetch，避免全局 axios 的 10 秒超时。 */
@@ -530,7 +511,7 @@ export async function buildServerPreview(
     }
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new Error('后端沙箱构建超时')
+      throw new Error('后端沙箱构建超时', { cause: error })
     }
     throw error
   } finally {
@@ -607,31 +588,6 @@ function isPreviewScreenshot(value: unknown): value is PreviewScreenshot {
       item.device === 'mobile'
     )
   )
-}
-
-// ── boot 结果上报（best-effort 旁路监控）───────────────────────
-// 预览运行环境（WebContainer）从境外 boot，国内偶发失败/超时、或很慢。每次 boot 结束都上报：
-// 成功报 kind='ok' + 耗时，失败报 timeout/error + 原因。后端据此统计 boot 耗时分布 + 失败率。
-// 同 postBuildResult：走原生 fetch、静默失败，绝不打扰用户（上报本身失败无所谓）。
-export async function reportBootResult(payload: {
-  session_id?: string | null
-  stage?: string
-  kind?: 'timeout' | 'error' | 'ok'
-  message?: string
-  cross_origin_isolated?: boolean
-  elapsed_ms?: number
-  // 是否冷 boot（会话内首次成功前的 boot）：用于把冷/热 boot 分开统计耗时。
-  cold?: boolean
-}): Promise<void> {
-  try {
-    await fetch('/api/boot-failure', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify(payload),
-    })
-  } catch {
-    // 旁路监控，报不上去就算了
-  }
 }
 
 // ── SSE 流式对话 ────────────────────────────────────────────────

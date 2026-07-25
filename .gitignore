@@ -10,6 +10,8 @@ server/static/
 server/static-admin/
 # 本地后端沙箱的临时任务与构建产物
 data/sandbox-worker-dev/
+# check_build 运行时生成的预览截图，仅供本地验收与短期展示
+server/preview-screenshots/
 # 日志
 logs
 *.log

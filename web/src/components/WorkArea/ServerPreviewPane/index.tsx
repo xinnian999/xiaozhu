@@ -653,6 +653,22 @@ export default function ServerPreviewPane() {
     return () => window.removeEventListener('message', handle)
   }, [beginRuntimeCollection, pushPreviewLog, setPreviewNav])
 
+  const requestIframeReady = useCallback(() => {
+    const iframe = iframeRef.current
+    const win = iframe?.contentWindow
+    if (!iframe || !win) return
+    try {
+      const frameOrigin = new URL(iframe.src, window.location.href).origin
+      // 同源回退实际是 opaque origin，只能用 *；独立预览域则精确限制目标 Origin。
+      win.postMessage(
+        { type: 'xiaozhu-ready-request' },
+        frameOrigin === window.location.origin ? '*' : frameOrigin,
+      )
+    } catch {
+      // 无效 URL 会由既有 ready 超时路径给出明确错误。
+    }
+  }, [])
+
   useEffect(() => {
     if (!navCmd.seq) return
     iframeRef.current?.contentWindow?.postMessage(
@@ -693,6 +709,7 @@ export default function ServerPreviewPane() {
                 src={previewUrl!}
                 className={styles.iframe}
                 title="后端沙箱预览"
+                onLoad={requestIframeReady}
                 sandbox={[
                   'allow-scripts',
                   'allow-forms',

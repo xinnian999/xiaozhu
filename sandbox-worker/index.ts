@@ -623,6 +623,11 @@ import html2canvas from 'html2canvas';
   window.addEventListener('message', (event) => {
     const data = event.data;
     if (!data || event.source !== window.parent) return;
+    if (data.type === 'xiaozhu-ready-request') {
+      // 父页面可能在 React 状态切换期间错过首次广播；iframe load 后的握手必须可重放。
+      void announceReady();
+      return;
+    }
     if (data.type === 'xiaozhu-nav-cmd') {
       if (data.action === 'back') history.back();
       else if (data.action === 'forward') history.forward();

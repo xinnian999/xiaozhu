@@ -1,12 +1,20 @@
-import { mkdir, readdir, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import {
+  lstat,
+  mkdir,
+  readdir,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises'
 import path from 'node:path'
 
 const port = Number.parseInt(process.env.SANDBOX_PORT || '8010', 10)
 const dataDir = process.env.SANDBOX_DATA_DIR || '/data'
 const workerToken = process.env.SANDBOX_WORKER_TOKEN || ''
-const publicBaseUrl = (process.env.SANDBOX_PUBLIC_BASE_URL || `http://localhost:${port}`)
-  .replace(/\/+$/, '')
-const frameAncestors = process.env.SANDBOX_FRAME_ANCESTORS || '*'
 const buildTimeoutMs = Math.max(
   5_000,
   Math.min(Number.parseInt(process.env.SANDBOX_BUILD_TIMEOUT_MS || '60000', 10), 120_000),
@@ -19,6 +27,7 @@ const previewsDir = path.join(dataDir, 'previews')
 const MAX_FILES = 200
 const MAX_FILE_BYTES = 512 * 1024
 const MAX_TOTAL_BYTES = 5 * 1024 * 1024
+const MAX_WIRE_BYTES = 32 * 1024 * 1024
 const MAX_LOG_BYTES = 100 * 1024
 const MAX_PREVIEWS_PER_SESSION = 3
 
@@ -31,7 +40,38 @@ const protectedFiles = [
   'tsconfig.json',
   'vite.config.ts',
 ] as const
-const protectedFileSet = new Set<string>(protectedFiles)
+// Vite/PostCSS/Tailwind 都支持多种配置文件名。即使可信模板使用 .ts/.js，
+// 也不能把其它后缀写进任务根目录，否则工具的默认搜索顺序可能优先执行用户 JS。
+const protectedInputFileSet = new Set<string>([
+  ...protectedFiles,
+  'vite.config.js',
+  'vite.config.mjs',
+  'vite.config.cjs',
+  'vite.config.mts',
+  'vite.config.cts',
+  'postcss.config.cjs',
+  'postcss.config.mjs',
+  'postcss.config.ts',
+  'postcss.config.mts',
+  'postcss.config.cts',
+  'tailwind.config.cjs',
+  'tailwind.config.mjs',
+  'tailwind.config.ts',
+  'tailwind.config.mts',
+  'tailwind.config.cts',
+  '.postcssrc',
+  '.postcssrc.json',
+  '.postcssrc.yaml',
+  '.postcssrc.yml',
+  '.postcssrc.js',
+  '.postcssrc.cjs',
+  '.postcssrc.mjs',
+  '.postcssrc.ts',
+  '.postcssrc.mts',
+  '.postcssrc.cts',
+])
+const unsafeCssDirective = /@(?:config|plugin)\b/i
+const cssFilePattern = /\.(?:css|pcss|postcss)$/i
 
 type BuildPayload = {
   session_id: string
@@ -42,12 +82,13 @@ type BuildPayload = {
 type BuildResult = {
   ok: boolean
   build_id?: string
-  preview_url?: string
   logs: string
   errors: string
 }
 
 let building = false
+
+class PayloadTooLargeError extends Error {}
 
 function json(body: unknown, status = 200): Response {
   return Response.json(body, {
@@ -64,6 +105,35 @@ function clipLog(value: string): string {
   return `${new TextDecoder().decode(bytes.slice(0, MAX_LOG_BYTES))}\n…日志已截断`
 }
 
+async function readJsonWithLimit(request: Request): Promise<unknown> {
+  if (!request.body) throw new Error('请求体不能为空')
+  const reader = request.body.getReader()
+  const chunks: Uint8Array[] = []
+  let totalBytes = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      totalBytes += value.byteLength
+      if (totalBytes > MAX_WIRE_BYTES) {
+        await reader.cancel().catch(() => {})
+        throw new PayloadTooLargeError('请求体超过 32MiB')
+      }
+      chunks.push(value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  const body = new Uint8Array(totalBytes)
+  let offset = 0
+  for (const chunk of chunks) {
+    body.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body))
+}
+
 export function safeRelativePath(input: string): string | null {
   if (!input || input.includes('\0') || input.includes('\\') || path.posix.isAbsolute(input)) {
     return null
@@ -73,11 +143,123 @@ export function safeRelativePath(input: string): string | null {
     normalized === '.'
     || normalized === '..'
     || normalized.startsWith('../')
+    || normalized === 'node_modules'
     || normalized.startsWith('node_modules/')
+    || normalized === 'dist'
     || normalized.startsWith('dist/')
+    || normalized === '.git'
     || normalized.startsWith('.git/')
   ) return null
   return normalized
+}
+
+type LocalCssReference = {
+  path: string
+  bare: boolean
+}
+
+function localCssPath(
+  fromFile: string,
+  reference: string,
+  files: Record<string, string>,
+): LocalCssReference | null {
+  let decoded: string
+  try {
+    decoded = decodeURIComponent(reference)
+  } catch {
+    throw new Error(`CSS 资源路径编码无效: ${fromFile}`)
+  }
+  if (
+    !decoded
+    || decoded.startsWith('#')
+    || /^(?:data|blob|https?):/i.test(decoded)
+    || decoded.startsWith('//')
+  ) return null
+  if (
+    decoded.includes('\0')
+    || decoded.includes('\\')
+    || /^file:/i.test(decoded)
+    // 防止 Vite / URL 层再次解码后才变成 ../、斜杠或 NUL。
+    || /%(?:00|2e|2f|5c)/i.test(decoded)
+  ) {
+    throw new Error(`CSS 禁止读取本地路径: ${fromFile}`)
+  }
+  const withoutSuffix = decoded.split(/[?#]/, 1)[0]
+  if (!withoutSuffix) return null
+  if (withoutSuffix.startsWith('/')) {
+    const publicPath = `public${withoutSuffix}`
+    if (!(publicPath in files)) {
+      throw new Error(`CSS 绝对资源必须来自 public/: ${fromFile}`)
+    }
+    return { path: publicPath, bare: false }
+  }
+  const resolved = path.posix.normalize(
+    path.posix.join(path.posix.dirname(fromFile), withoutSuffix),
+  )
+  if (
+    path.posix.isAbsolute(resolved)
+    || resolved === '..'
+    || resolved.startsWith('../')
+  ) {
+    throw new Error(`CSS 禁止越过项目目录: ${fromFile}`)
+  }
+  return {
+    path: resolved,
+    bare: !withoutSuffix.startsWith('.'),
+  }
+}
+
+function stripCssComments(content: string): string {
+  return content.replace(/\/\*[\s\S]*?\*\//g, ' ')
+}
+
+function validateCssGraph(files: Record<string, string>): void {
+  const pending = Object.keys(files).filter((filePath) => cssFilePattern.test(filePath))
+  const visited = new Set<string>()
+  const importPattern =
+    /@import\s+(?:url\(\s*(?:(['"])(.*?)\1|([^'")\s]+))\s*\)|(['"])(.*?)\4|([^;\s]+))/gi
+  const urlPattern = /url\(\s*(?:(['"])(.*?)\1|([^'")\s]+))\s*\)/gi
+
+  while (pending.length > 0) {
+    const filePath = pending.pop()!
+    if (visited.has(filePath)) continue
+    visited.add(filePath)
+    const content = files[filePath]
+    if (content === undefined) continue
+    const css = stripCssComments(content)
+    if (unsafeCssDirective.test(css)) {
+      throw new Error(`样式文件禁止使用 @config/@plugin: ${filePath}`)
+    }
+
+    for (const match of css.matchAll(importPattern)) {
+      const rawReference = match[2] ?? match[3] ?? match[5] ?? match[6]
+      const resolved = localCssPath(filePath, rawReference, files)
+      if (!resolved) continue
+      const candidates = [
+        resolved.path,
+        `${resolved.path}.css`,
+        `${resolved.path}.pcss`,
+        `${resolved.path}.postcss`,
+        `${resolved.path}/index.css`,
+      ]
+      const imported = candidates.find((candidate) => candidate in files)
+      if (imported) {
+        // 扩展名不可信：被 CSS @import 到的 .txt/.svg 等同样按样式表递归审查。
+        pending.push(imported)
+      } else if (!resolved.bare) {
+        throw new Error(`CSS 引用的本地文件不存在: ${filePath} -> ${rawReference}`)
+      }
+    }
+    // @import url(...) 已在上面按“样式依赖”处理，不能再次误当成图片/字体资源。
+    const cssWithoutImports = css.replace(importPattern, ' ')
+    for (const match of cssWithoutImports.matchAll(urlPattern)) {
+      const rawReference = match[2] ?? match[3]
+      const resolved = localCssPath(filePath, rawReference, files)
+      if (resolved && !(resolved.path in files)) {
+        throw new Error(`CSS 资源不在项目文件中: ${filePath} -> ${rawReference}`)
+      }
+    }
+  }
 }
 
 function validatePayload(value: unknown): BuildPayload {
@@ -105,8 +287,9 @@ function validatePayload(value: unknown): BuildPayload {
     totalBytes += size
     if (totalBytes > MAX_TOTAL_BYTES) throw new Error('项目源码总大小超过 5MB')
     // 骨架文件稍后从只读模板覆盖；这里直接忽略客户端版本。
-    if (!protectedFileSet.has(filePath)) files[filePath] = content
+    if (!protectedInputFileSet.has(filePath)) files[filePath] = content
   }
+  validateCssGraph(files)
   return {
     session_id: body.session_id,
     files,
@@ -115,44 +298,369 @@ function validatePayload(value: unknown): BuildPayload {
 }
 
 function runtimeBridge(): string {
-  return `<script>
+  return `<script type="module">
+import html2canvas from 'html2canvas';
 (() => {
-  const documentId = 'server-' + Date.now() + '-' + Math.random().toString(36).slice(2);
-  const send = (type, payload = {}) => {
-    try { window.parent.postMessage({ type, documentId, ...payload }, '*'); } catch {}
+  if (window.__xiaozhuServerBridge) return;
+  window.__xiaozhuServerBridge = true;
+  const documentId = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : 'server-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+  const post = (type, payload = {}, targetOrigin = '*', transfer = []) => {
+    try {
+      window.parent.postMessage({ type, ...payload, documentId }, targetOrigin, transfer);
+    } catch {}
   };
   const describe = (value) => {
     if (value instanceof Error) return value.stack || value.message;
     if (typeof value === 'string') return value;
-    try { return JSON.stringify(value); } catch { return String(value); }
+    try {
+      const encoded = JSON.stringify(value);
+      return typeof encoded === 'string' ? encoded : String(value);
+    } catch {
+      return String(value);
+    }
   };
   window.addEventListener('error', (event) => {
-    send('xiaozhu-server-runtime-error', { message: describe(event.error || event.message) });
-  });
+    const target = event.target;
+    if (target && target !== window && target instanceof Element) {
+      const source = target.currentSrc || target.src || target.href
+        || target.getAttribute('src') || target.getAttribute('href') || '';
+      post('xiaozhu-server-runtime-error', {
+        kind: 'resource',
+        message: ('静态资源加载失败: ' + target.tagName.toLowerCase()
+          + (source ? ' ' + source : '')).slice(0, 4000),
+      });
+      return;
+    }
+    post('xiaozhu-server-runtime-error', {
+      kind: 'script',
+      message: describe(event.error || event.message).slice(0, 4000),
+    });
+  }, true);
   window.addEventListener('unhandledrejection', (event) => {
-    send('xiaozhu-server-runtime-error', { message: describe(event.reason) });
+    post('xiaozhu-server-runtime-error', {
+      kind: 'promise',
+      message: describe(event.reason).slice(0, 4000),
+    });
   });
   const originalConsoleError = console.error.bind(console);
   console.error = (...args) => {
-    send('xiaozhu-server-runtime-error', { message: args.map(describe).join(' ') });
+    post('xiaozhu-server-runtime-error', {
+      kind: 'console',
+      message: args.map(describe).join(' ').slice(0, 4000),
+    });
     originalConsoleError(...args);
   };
-  const reportPath = () => send('xiaozhu-server-navigation', {
+  const reportPath = () => post('xiaozhu-server-navigation', {
     path: location.pathname + location.search + location.hash,
   });
   window.addEventListener('hashchange', reportPath);
   window.addEventListener('popstate', reportPath);
-  window.addEventListener('load', () => {
-    reportPath();
-    send('xiaozhu-server-ready', { width: innerWidth, height: innerHeight });
+
+  const waitAtMost = (value, timeout) => new Promise((resolve) => {
+    const timer = setTimeout(resolve, timeout);
+    Promise.resolve(value).then(() => {
+      clearTimeout(timer);
+      resolve();
+    }, () => {
+      clearTimeout(timer);
+      resolve();
+    });
   });
+  const waitForStylesheets = () => Promise.all(
+    Array.from(document.querySelectorAll('link[rel="stylesheet"]')).map((link) => {
+      if (link.sheet) return Promise.resolve();
+      return new Promise((resolve) => {
+        const done = () => resolve();
+        link.addEventListener('load', done, { once: true });
+        link.addEventListener('error', done, { once: true });
+        setTimeout(done, 1500);
+      });
+    }),
+  );
+  const waitForImages = async () => {
+    await Promise.all(Array.from(document.images || []).map(async (image) => {
+      try {
+        if (!image.complete) {
+          await new Promise((resolve) => {
+            const done = () => resolve();
+            image.addEventListener('load', done, { once: true });
+            image.addEventListener('error', done, { once: true });
+            setTimeout(done, 1200);
+          });
+        }
+        if (typeof image.decode === 'function') await waitAtMost(image.decode(), 1200);
+      } catch {}
+    }));
+  };
+  const waitForFonts = async () => {
+    try {
+      if (document.fonts && document.fonts.ready) {
+        await waitAtMost(document.fonts.ready, 1500);
+      }
+    } catch {}
+  };
+  const waitForDomQuiet = () => new Promise((resolve) => {
+    let settled = false;
+    let quietTimer = 0;
+    let mutationObserver = null;
+    let resizeObserver = null;
+    const maxTimer = setTimeout(finish, 1800);
+    function finish() {
+      if (settled) return;
+      settled = true;
+      clearTimeout(quietTimer);
+      clearTimeout(maxTimer);
+      if (mutationObserver) mutationObserver.disconnect();
+      if (resizeObserver) resizeObserver.disconnect();
+      resolve();
+    }
+    const bump = () => {
+      clearTimeout(quietTimer);
+      quietTimer = setTimeout(finish, 320);
+    };
+    if (typeof MutationObserver === 'function') {
+      mutationObserver = new MutationObserver(bump);
+      mutationObserver.observe(document.documentElement, {
+        attributes: true,
+        childList: true,
+        characterData: true,
+        subtree: true,
+      });
+    }
+    if (typeof ResizeObserver === 'function') {
+      resizeObserver = new ResizeObserver(bump);
+      resizeObserver.observe(document.documentElement);
+      if (document.body) resizeObserver.observe(document.body);
+    }
+    bump();
+  });
+  const waitForAssets = async () => {
+    await waitForStylesheets();
+    await waitForFonts();
+    await waitForImages();
+    await waitForDomQuiet();
+    // quiet 期间应用可能刚插入新资源；再扫描一次，避免 ready/capture 抢跑。
+    await waitForStylesheets();
+    await waitForFonts();
+    await waitForImages();
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  };
+
+  const inspectLayout = () => {
+    const width = Math.max(1, innerWidth || document.documentElement.clientWidth || 0);
+    const height = Math.max(1, innerHeight || document.documentElement.clientHeight || 0);
+    const issues = [];
+    const add = (message) => {
+      if (!issues.includes(message)) issues.push(message);
+    };
+    const root = document.getElementById('root');
+    const shell = root && root.firstElementChild;
+    const shellRect = shell && shell.getBoundingClientRect();
+    const pageWidth = Math.max(
+      document.documentElement.scrollWidth,
+      document.body ? document.body.scrollWidth : 0,
+    );
+    if (pageWidth > width + 8) {
+      add('[布局验收] 页面横向溢出 ' + Math.round(pageWidth - width)
+        + 'px；请让内容在当前视口内换行或收缩。');
+    }
+    if (root && !root.firstElementChild && !(root.textContent || '').trim()) {
+      add('[布局验收] #root 没有渲染可见内容。');
+    }
+    const mobileMode = shell && shell.getAttribute('data-preview-mode') === 'mobile';
+    if (
+      !mobileMode
+      && width >= 960
+      && shellRect
+      && shellRect.height >= height * 0.75
+      && shellRect.width < width * 0.65
+    ) {
+      add('[布局验收] 桌面预览中的根应用呈现为手机窄画布；请使用响应式布局铺满视口。');
+    }
+    const nodes = document.querySelectorAll('body *');
+    for (let index = 0; index < nodes.length && index < 5000; index += 1) {
+      const node = nodes[index];
+      if (getComputedStyle(node).position !== 'fixed') continue;
+      const rect = node.getBoundingClientRect();
+      if (rect.left < -4 || rect.right > width + 4) {
+        add('[布局验收] fixed 元素横向越出可视区域。');
+        break;
+      }
+    }
+    return issues.slice(0, 6);
+  };
+
+  let layoutTimer = 0;
+  const reportLayout = () => {
+    const issues = inspectLayout();
+    post('xiaozhu-server-layout', { issues });
+    return issues;
+  };
+  const scheduleLayout = () => {
+    clearTimeout(layoutTimer);
+    layoutTimer = setTimeout(reportLayout, 220);
+  };
+  window.addEventListener('resize', scheduleLayout);
+
+  const safeBackground = (value) => {
+    if (
+      typeof value === 'string'
+      && value.length <= 64
+      && typeof CSS !== 'undefined'
+      && CSS.supports('color', value)
+    ) return value;
+    return '#ffffff';
+  };
+  const toWebp = (canvas) => new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob && blob.type === 'image/webp') resolve(blob);
+      else reject(new Error('浏览器未能编码 WebP 截图'));
+    }, 'image/webp', 0.75);
+  });
+  const capture = async (background) => {
+    await waitForAssets();
+    const viewportWidth = Math.max(
+      1,
+      innerWidth || document.documentElement.clientWidth || 0,
+    );
+    const viewportHeight = Math.max(
+      1,
+      innerHeight || document.documentElement.clientHeight || 0,
+    );
+    const canvas = await html2canvas(document.documentElement, {
+      x: 0,
+      y: 0,
+      width: viewportWidth,
+      height: viewportHeight,
+      windowWidth: viewportWidth,
+      windowHeight: viewportHeight,
+      scrollX: 0,
+      scrollY: 0,
+      useCORS: true,
+      allowTaint: false,
+      foreignObjectRendering: true,
+      scale: 1,
+      logging: false,
+      backgroundColor: safeBackground(background),
+      onclone: (clonedDocument) => {
+        const freeze = clonedDocument.createElement('style');
+        freeze.textContent = '*,*::before,*::after{'
+          + 'animation:none!important;transition:none!important;'
+          + 'caret-color:transparent!important;}';
+        clonedDocument.head.appendChild(freeze);
+      },
+    });
+    const scale = Math.min(1, 1280 / Math.max(canvas.width, canvas.height));
+    const width = Math.max(1, Math.round(canvas.width * scale));
+    const height = Math.max(1, Math.round(canvas.height * scale));
+    let output = canvas;
+    if (scale < 1) {
+      output = document.createElement('canvas');
+      output.width = width;
+      output.height = height;
+      const context = output.getContext('2d');
+      if (!context) throw new Error('浏览器未能创建截图画布');
+      context.drawImage(canvas, 0, 0, width, height);
+    }
+    return {
+      blob: await toWebp(output),
+      width,
+      height,
+      path: location.pathname + location.search + location.hash,
+    };
+  };
+  const captureClones = () => Array.from(
+    document.querySelectorAll('iframe.html2canvas-container'),
+  );
+  const captureWithTimeout = (background) => {
+    const existingClones = captureClones();
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanupNewClones = () => {
+        for (const clone of captureClones()) {
+          if (!existingClones.includes(clone)) clone.remove();
+        }
+      };
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        callback(value);
+      };
+      const timer = setTimeout(() => {
+        cleanupNewClones();
+        finish(reject, new Error('预览截图渲染超时'));
+      }, 8000);
+      capture(background).then(
+        (shot) => finish(resolve, shot),
+        (error) => {
+          cleanupNewClones();
+          finish(reject, error);
+        },
+      );
+    });
+  };
+
+  let captureInFlight = false;
   window.addEventListener('message', (event) => {
     const data = event.data;
-    if (!data || data.type !== 'xiaozhu-nav-cmd') return;
-    if (data.action === 'back') history.back();
-    else if (data.action === 'forward') history.forward();
-    else if (data.action === 'reload') location.reload();
+    if (!data || event.source !== window.parent) return;
+    if (data.type === 'xiaozhu-nav-cmd') {
+      if (data.action === 'back') history.back();
+      else if (data.action === 'forward') history.forward();
+      else if (data.action === 'reload') location.reload();
+      return;
+    }
+    if (data.type !== 'xiaozhu-capture-request') return;
+    const id = typeof data.id === 'string' && data.id.length <= 160 ? data.id : '';
+    if (!id || data.documentId !== documentId) return;
+    if (captureInFlight) {
+      post('xiaozhu-capture-result', {
+        id,
+        ok: false,
+        error: '已有截图请求正在执行',
+      }, event.origin);
+      return;
+    }
+    captureInFlight = true;
+    captureWithTimeout(data.background).then(async (shot) => {
+      const bytes = await shot.blob.arrayBuffer();
+      post('xiaozhu-capture-result', {
+        id,
+        ok: true,
+        bytes,
+        mime: 'image/webp',
+        width: shot.width,
+        height: shot.height,
+        path: shot.path,
+      }, event.origin, [bytes]);
+    }).catch((error) => {
+      post('xiaozhu-capture-result', {
+        id,
+        ok: false,
+        error: describe(error).slice(0, 500),
+      }, event.origin);
+    }).finally(() => {
+      captureInFlight = false;
+    });
   });
+
+  const announceReady = async () => {
+    try {
+      await waitForAssets();
+      reportPath();
+      const issues = reportLayout();
+      post('xiaozhu-server-ready', {
+        width: Math.max(1, innerWidth || document.documentElement.clientWidth || 0),
+        height: Math.max(1, innerHeight || document.documentElement.clientHeight || 0),
+        layoutIssues: issues,
+      });
+    } catch {}
+  };
+  if (document.readyState === 'complete') setTimeout(announceReady, 0);
+  else window.addEventListener('load', announceReady, { once: true });
 })();
 </script>`
 }
@@ -175,15 +683,25 @@ async function writeJobFiles(jobDir: string, files: Record<string, string>): Pro
 
 async function runViteBuild(jobDir: string): Promise<{ code: number; output: string; timedOut: boolean }> {
   const vite = path.join(templateDir, 'node_modules', '.bin', 'vite')
+  const childEnv: Record<string, string> = {
+    CI: '1',
+    NODE_ENV: 'production',
+    PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
+    TMPDIR: process.env.TMPDIR || '/tmp',
+  }
   const proc = Bun.spawn(
-    [vite, 'build', '--base=./', '--emptyOutDir'],
+    [
+      vite,
+      'build',
+      '--config',
+      path.join(jobDir, 'vite.config.ts'),
+      '--base=./',
+      '--emptyOutDir',
+    ],
     {
       cwd: jobDir,
-      env: {
-        ...process.env,
-        NODE_ENV: 'production',
-        CI: '1',
-      },
+      // 不把 Worker token 等服务端密钥传进用户源码参与的 Vite 构建进程。
+      env: childEnv,
       stdout: 'pipe',
       stderr: 'pipe',
     },
@@ -250,8 +768,6 @@ async function build(payload: BuildPayload): Promise<BuildResult> {
     return {
       ok: true,
       build_id: buildId,
-      preview_url:
-        `${publicBaseUrl}/preview/${encodeURIComponent(payload.session_id)}/${buildId}/`,
       logs: result.output,
       errors: '',
     }
@@ -263,14 +779,6 @@ async function build(payload: BuildPayload): Promise<BuildResult> {
 function previewHeaders(): HeadersInit {
   return {
     'Cache-Control': 'no-store',
-    'Content-Security-Policy':
-      `default-src 'self' data: blob: https:; `
-      + `script-src 'self' 'unsafe-inline' 'unsafe-eval' https:; `
-      + `style-src 'self' 'unsafe-inline' https:; `
-      + `img-src 'self' data: blob: https:; font-src 'self' data: https:; `
-      + `connect-src 'self' https: wss:; frame-ancestors ${frameAncestors}`,
-    'Cross-Origin-Resource-Policy': 'cross-origin',
-    'Referrer-Policy': 'no-referrer',
     'X-Content-Type-Options': 'nosniff',
   }
 }
@@ -283,17 +791,46 @@ async function servePreview(url: URL): Promise<Response> {
   if (!/^[A-Za-z0-9-]{1,80}$/.test(sessionId) || !/^[a-f0-9-]{36}$/.test(buildId)) {
     return new Response('Not found', { status: 404 })
   }
-  const rawFile = parts.slice(3).join('/') || 'index.html'
+  let rawFile: string
+  try {
+    rawFile = parts.slice(3).map((part) => decodeURIComponent(part)).join('/') || 'index.html'
+  } catch {
+    return new Response('Not found', { status: 404 })
+  }
   const filePath = safeRelativePath(rawFile)
   if (!filePath) return new Response('Not found', { status: 404 })
   const root = path.join(previewsDir, sessionId, buildId)
   const target = path.resolve(root, filePath)
-  if (!target.startsWith(`${path.resolve(root)}${path.sep}`)) {
+  let actualRoot: string
+  let actualTarget: string
+  try {
+    const targetStat = await lstat(target)
+    if (!targetStat.isFile() || targetStat.isSymbolicLink()) {
+      return new Response('Not found', { status: 404 })
+    }
+    const resolvedPaths = await Promise.all([realpath(root), realpath(target)])
+    actualRoot = resolvedPaths[0]
+    actualTarget = resolvedPaths[1]
+  } catch {
     return new Response('Not found', { status: 404 })
   }
+  const relative = path.relative(actualRoot, actualTarget)
+  if (
+    !relative
+    || relative === '..'
+    || relative.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relative)
+  ) return new Response('Not found', { status: 404 })
   const file = Bun.file(target)
   if (!(await file.exists())) return new Response('Not found', { status: 404 })
-  return new Response(file, { headers: previewHeaders() })
+  // 主 API 会缓冲并重新生成浏览器安全头；Worker 仍返回稳定 Content-Length，
+  // 避免 Bun.file() 的 sendfile/chunked 路径在部分代理上表现不一致。
+  return new Response(await file.arrayBuffer(), {
+    headers: {
+      ...previewHeaders(),
+      'Content-Type': file.type || 'application/octet-stream',
+    },
+  })
 }
 
 await mkdir(jobsDir, { recursive: true })
@@ -308,6 +845,9 @@ const server = Bun.serve({
       return json({ status: 'ok', building })
     }
     if (request.method === 'GET' && url.pathname.startsWith('/preview/')) {
+      if (!workerToken || request.headers.get('Authorization') !== `Bearer ${workerToken}`) {
+        return json({ error: '无效 Worker 凭证' }, 401)
+      }
       return servePreview(url)
     }
     if (request.method !== 'POST' || url.pathname !== '/internal/build') {
@@ -316,21 +856,27 @@ const server = Bun.serve({
     if (!workerToken || request.headers.get('Authorization') !== `Bearer ${workerToken}`) {
       return json({ error: '无效 Worker 凭证' }, 401)
     }
+    const contentEncoding = request.headers.get('content-encoding')
+    if (contentEncoding && contentEncoding.toLowerCase() !== 'identity') {
+      return json({ error: '不支持压缩请求体' }, 415)
+    }
     const contentLength = Number.parseInt(request.headers.get('content-length') || '0', 10)
-    if (contentLength > MAX_TOTAL_BYTES + 1024 * 1024) {
+    if (contentLength > MAX_WIRE_BYTES) {
       return json({ error: '请求体过大' }, 413)
     }
     if (building) return json({ error: '当前已有构建任务' }, 429)
 
-    let payload: BuildPayload
-    try {
-      payload = validatePayload(await request.json())
-    } catch (error) {
-      return json({ error: error instanceof Error ? error.message : String(error) }, 400)
-    }
-
     building = true
     try {
+      let payload: BuildPayload
+      try {
+        payload = validatePayload(await readJsonWithLimit(request))
+      } catch (error) {
+        if (error instanceof PayloadTooLargeError) {
+          return json({ error: error.message }, 413)
+        }
+        return json({ error: error instanceof Error ? error.message : String(error) }, 400)
+      }
       return json(await build(payload))
     } catch (error) {
       console.error('sandbox build failed', error)

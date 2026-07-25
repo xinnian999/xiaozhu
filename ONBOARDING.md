@@ -21,8 +21,10 @@ sandbox-worker/     单并发构建与预览服务
 2. Agent 通过文件工具修改当前工作副本。
 3. `check_build` 先在 `build_store` 建立会合点，再发送 `preview_refresh`。
 4. 前端提交完整文件快照到主 API，主 API 转发给 Worker。
-5. Worker 用固定配置执行 `vite build`，返回独立预览 URL。
-6. iframe 回传运行时错误，前端调用 `build-result`，Agent 被唤醒后决定结束或修复。
+5. Worker 用固定配置执行 `vite build`，返回 `build_id`。
+6. 主 API 签发 `/api/sandbox-preview/...` capability URL，并从内网 Worker 逐字节代理产物。
+7. iframe 在独立预览 Origin（未配置时为 opaque origin）中运行并回传运行时错误、
+   基础布局问题和受限截图；前端调用 `build-result`，Agent 被唤醒后决定结束或修复。
 
 不要把 `check_build` 改成固定 sleep 或日志轮询；会合点必须先 `arm()` 再发事件，
 否则快速返回会丢结果。
@@ -33,8 +35,15 @@ sandbox-worker/     单并发构建与预览服务
 - 主 FastAPI 不直接执行生成项目，也不接触 Docker Socket。
 - Worker 构建时不得安装客户端声明的依赖。
 - `package.json`、构建配置和 `index.html` 始终由可信模板覆盖。
-- 预览必须独立 Origin，并限制 `frame-ancestors`。
+- Worker 不得发布公网端口；浏览器只能通过主站 capability 字节代理读取预览。
+- 只有当 `SANDBOX_PREVIEW_ORIGIN` 与主站 Origin 确实不同时，预览 iframe 才能授予
+  `allow-same-origin`；同源回退模式必须保持 opaque origin。
 - Worker 保持单并发、文件/体积/时间/内存/PID 限额。
+
+不要把字节代理改成 302 到 Worker：重定向会重新暴露 Worker 地址。无论使用独立或
+opaque origin，父页面都不直接读 iframe DOM；截图走 iframe bridge 或服务端浏览器。
+当前 Worker 只面向可信个人演示，不是恶意多租户 VM；若对公网开放任意用户生成，
+必须再增加每任务独立容器/微 VM 与网络、UID、cgroup 隔离。
 
 详见 [docs/backend-sandbox.md](docs/backend-sandbox.md)。
 
@@ -62,10 +71,11 @@ uv run --directory server alembic upgrade head
 uv run --directory server ruff check app tests
 uv run --directory server python -m unittest discover -s tests
 docker compose up -d --build
-docker compose config
+SANDBOX_WORKER_TOKEN=config-check-placeholder docker compose config --no-env-resolution
 ```
 
-本地端口：前台 9000、管理后台 9100、API 8000、Worker 8010。
+本地端口：前台 9000、管理后台 9100、API 8000。Worker 使用 8010；Compose 只把它
+绑定到宿主机 `127.0.0.1`，不会暴露到公网网卡。
 
 ## 修改检查
 

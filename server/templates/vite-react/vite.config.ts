@@ -1,10 +1,111 @@
+// 预览模板不安装 @types/node；这些内置模块只在可信 Vite 配置进程中运行。
+// @ts-expect-error -- Node 运行时内置模块
+import { realpathSync } from 'node:fs'
+// @ts-expect-error -- Node 运行时内置模块
+import path from 'node:path'
+// @ts-expect-error -- Node 运行时内置模块
+import process from 'node:process'
+// @ts-expect-error -- Node 运行时内置模块
+import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vite'
+import type { Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
+import autoprefixer from 'autoprefixer'
+import tailwindcss from 'tailwindcss'
+
+function isInside(filePath: string, root: string): boolean {
+  const relative = path.relative(root, filePath)
+  return (
+    relative === ''
+    || (
+      relative !== '..'
+      && !relative.startsWith(`..${path.sep}`)
+      && !path.isAbsolute(relative)
+    )
+  )
+}
+
+function filePathFromId(id: string): string | null {
+  const cleanId = id.split(/[?#]/, 1)[0]
+  if (cleanId.startsWith('file://')) {
+    try {
+      return fileURLToPath(cleanId)
+    } catch {
+      throw new Error(`禁止无效 file URL: ${cleanId}`)
+    }
+  }
+  return path.isAbsolute(cleanId) ? path.resolve(cleanId) : null
+}
+
+/** 禁止 ?raw、CSS @import 等构建期解析越过任务目录读取 Worker 文件。 */
+function projectBoundary(): Plugin {
+  const projectRoot = realpathSync(process.cwd())
+  const dependenciesRoot = realpathSync(path.join(projectRoot, 'node_modules'))
+  const assertInsideBoundary = (
+    id: string,
+    source: string,
+    fail: (message: string) => never,
+  ): void => {
+    if (id.startsWith('\0')) return
+    const lexicalPath = filePathFromId(id)
+    if (!lexicalPath) return
+
+    let actualPath = lexicalPath
+    try {
+      actualPath = realpathSync(lexicalPath)
+    } catch {
+      // load 阶段通常只会看到存在的文件。缺失路径仍按规范化 lexical path
+      // 校验，避免错误处理反而把绝对路径越界放行。
+    }
+    if (
+      !isInside(actualPath, projectRoot)
+      && !isInside(actualPath, dependenciesRoot)
+    ) {
+      fail(`禁止读取项目目录之外的文件: ${source}`)
+    }
+  }
+
+  return {
+    name: 'xiaozhu-project-boundary',
+    enforce: 'pre',
+    async resolveId(source, importer, options) {
+      if (!importer || source.startsWith('\0')) return null
+      const resolved = await this.resolve(source, importer, {
+        ...options,
+        skipSelf: true,
+      })
+      if (!resolved || resolved.external || resolved.id.startsWith('\0')) return resolved
+      assertInsideBoundary(resolved.id, source, (message) => this.error(message))
+      return resolved
+    },
+    load(id) {
+      // Vite 的 ?raw/?url 和部分 CSS 资源插件会在 load 阶段自行读文件；
+      // 再守一次最终 id，避免其它 resolve hook 绕过上面的检查。
+      assertInsideBoundary(id, id, (message) => this.error(message))
+      return null
+    },
+  }
+}
 
 // 保留固定模板的 Vite 配置，Worker 构建时只执行 build，不启动 dev server。
 // 这里不固定 port，让 vite 自由选择，server-ready 事件会回传 url。
 export default defineConfig({
-  plugins: [react()],
+  plugins: [projectBoundary(), react()],
+  // 显式使用可信 PostCSS/Tailwind 配置，禁止 postcss-load-config / Tailwind 在任务
+  // 根目录自动发现其它后缀的用户 JS 配置。
+  css: {
+    postcss: {
+      plugins: [
+        tailwindcss({
+          darkMode: 'class',
+          content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
+          theme: { extend: {} },
+          plugins: [],
+        }),
+        autoprefixer(),
+      ],
+    },
+  },
   resolve: {
     // ★强制 React / react-router-dom 全局只用一份★
     // 避免模板依赖与生成代码引入「两份 React」或

@@ -80,7 +80,7 @@ export default function TabBar() {
     }
   }
 
-  // Worker 构建成功后，其独立 Origin 地址即可直接分享。
+  // Worker 构建成功后，主 API 签发的 capability 地址即可直接分享。
   const handleShare = () => {
     if (!activeId) return
     if (!previewUrl) {
@@ -272,7 +272,7 @@ export default function TabBar() {
         )}
       </div>
 
-      {/* Worker 预览本身就是独立 Origin，分享弹窗直接提供当前构建地址。 */}
+      {/* 分享主 API 签发的 capability 预览地址，不暴露内部 Worker。 */}
       {shareOpen && previewUrl && (
         <ShareDialog previewUrl={previewUrl} onClose={() => setShareOpen(false)} />
       )}

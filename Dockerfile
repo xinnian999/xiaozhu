@@ -88,9 +88,11 @@ EXPOSE 8000
 #     这就取代了原来的 create_all，从根上解决「改了模型、线上老库没跟着改」的问题。
 #   - 用 sh -c 串起两条命令；exec 让 uvicorn 接管 PID 1，信号（停容器）能正确传到它。
 # --host 0.0.0.0 让容器外能访问（默认只听 127.0.0.1，在容器里等于谁都连不上）。
-# --proxy-headers + --forwarded-allow-ips=*：信任反代(Caddy)传来的 X-Forwarded-Proto/Host。
+# --proxy-headers + --forwarded-allow-ips=*：信任反代(Caddy)传来的 X-Forwarded-Proto/For。
 #   Caddy 终结 TLS、以 http 转发给容器，默认 uvicorn 只信任 127.0.0.1 的转发头，而 Caddy
 #   来自 docker 网关网段(非 127.0.0.1)，于是 uvicorn 会按 http 生成绝对 URL / 重定向 Location，
 #   在 https 页面下被浏览器当混合内容拦掉。开启后 uvicorn 按 https 生成 URL，反代下一切正常。
+#   Uvicorn 不用 X-Forwarded-Host 改写 Host；反代还必须把浏览器原始 Host 直接传给上游，
+#   预览网关据此区分主站与独立预览 Origin。
 #   容器只经 Caddy 暴露，用 * 信任所有转发来源即可（内网单反代场景）。
 CMD ["sh", "-c", "/app/.venv/bin/alembic upgrade head && exec /app/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=*"]

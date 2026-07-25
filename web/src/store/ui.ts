@@ -129,8 +129,8 @@ type UIState = {
   requestPreviewApply: (checkId: string, sessionId: string) => void
 
   // —— 预览路由导航（地址栏 + 前进后退）——
-  // iframe 跨域，父页面读不到它的 URL，靠注入的导航桥 postMessage 上报，
-  // 这里集中存：当前路径、能否前进/后退（由 PreviewPane 维护的历史栈算出）。
+  // sandbox 使用独立预览 origin（未配置时回退 opaque origin），父页面不能读 iframe
+  // URL，靠注入的导航桥 postMessage 上报。这里集中存当前路径与前进/后退状态。
   /** 当前预览路由路径（pathname+search+hash），默认 '/' */
   previewPath: string
   previewCanBack: boolean

@@ -4,7 +4,7 @@
 # 既提供 API 又托管前端静态页。所以只需要暴露一个端口。
 #
 # 用法（服务器上）：
-#   1. 准备好 .env（参考 .env.deploy.example，填上 OPENAI_API_KEY 等）
+#   1. cp server/.env.example .env，再按 README 的 Compose 配置修改 Worker/预览地址与密钥
 #   2. docker login 到阿里云仓库（拉私有镜像需要）
 #   3. docker compose pull && docker compose up -d
 #   4. docker compose logs -f   # 看启动日志
@@ -22,8 +22,8 @@ services:
     ports:
       - "8000:8000"
 
-    # 敏感配置（OPENAI_API_KEY 等）从同目录的 .env 文件注入，不写进 compose。
-    # .env 内容见 .env.deploy.example。
+    # 敏感配置（JWT、模型、沙箱密钥等）从同目录的 .env 文件注入，不写进 compose。
+    # 可从 server/.env.example 复制，随后按 README 改为 Compose 网络地址。
     env_file:
       - .env
 
@@ -52,14 +52,16 @@ services:
       context: .
       dockerfile: sandbox-worker/Dockerfile
     container_name: xiaozhu-sandbox-worker
-    env_file:
-      - .env
     environment:
       - SANDBOX_PORT=8010
       - SANDBOX_DATA_DIR=/data
+      # 只注入 Worker 自己需要的专用密钥；绝不能把含模型/API 密钥的整份 .env
+      # 传进执行构建任务的容器。
+      - SANDBOX_WORKER_TOKEN=${SANDBOX_WORKER_TOKEN:?请在 .env 配置 SANDBOX_WORKER_TOKEN}
+    # 仅绑定宿主机 loopback，方便「宿主机跑 API + Compose 跑 Worker」的开发方式；
+    # 公网网卡不可访问。Compose 内主 API 仍使用 sandbox-worker:8010。
     ports:
-      # 构建接口有 Bearer token；预览静态文件由 Caddy 的独立子域反代到这个端口。
-      - "8010:8010"
+      - "127.0.0.1:8010:8010"
     volumes:
       - ./data/sandbox-worker:/data
     # 2C2G PoC 的硬边界：一次只构建一个任务，宁可单任务失败，也不能拖垮主站。

@@ -8,13 +8,14 @@ type Props = {
   onClose: () => void
 }
 
-/** Worker 预览地址已经是可访问的独立 Origin，直接复制当前构建链接。 */
+/** 将后端返回的相对地址补成可直接分享的完整链接。 */
 export default function ShareDialog({ previewUrl, onClose }: Props) {
   const [copied, setCopied] = useState(false)
+  const absolutePreviewUrl = new URL(previewUrl, window.location.origin).href
 
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(previewUrl)
+      await navigator.clipboard.writeText(absolutePreviewUrl)
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     } catch {
@@ -35,13 +36,13 @@ export default function ShareDialog({ previewUrl, onClose }: Props) {
         <p className={styles.desc}>把链接发给任何人，打开即可查看当前后端沙箱构建。</p>
 
         <div className={styles.linkRow}>
-          <input className={styles.linkInput} value={previewUrl} readOnly onFocus={(e) => e.target.select()} />
+          <input className={styles.linkInput} value={absolutePreviewUrl} readOnly onFocus={(e) => e.target.select()} />
           <button type="button" className={styles.iconBtn} onClick={handleCopy} title="复制链接">
             {copied ? <Check size={15} /> : <Copy size={15} />}
           </button>
           <a
             className={styles.iconBtn}
-            href={previewUrl}
+            href={absolutePreviewUrl}
             target="_blank"
             rel="noopener noreferrer"
             title="新窗口打开"

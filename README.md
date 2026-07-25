@@ -9,15 +9,17 @@
 浏览器（React + Monaco）
   ├─ SSE 对话 / 文件编辑
   ├─ POST 当前文件快照到主 API
-  └─ iframe 加载独立预览 Origin
-            │
-FastAPI 主服务（鉴权、Agent、SQLite）
-            │ 内网 Bearer Token
-sandbox-worker（固定依赖、单并发 Vite build、静态预览）
+  └─ iframe 加载 preview origin 下的 /api/sandbox-preview/{capability}/...
+                         │ 主 API 逐字节代理
+FastAPI 主服务（鉴权、Agent、SQLite、预览 capability）
+                         │ Docker 内网 + Bearer Token
+sandbox-worker（固定依赖、单并发 Vite build、内部静态预览）
 ```
 
 浏览器不运行 Node，不下载运行时或依赖快照。主服务也不持有 Docker Socket；
-它只把已鉴权的文件快照转发给 Worker。
+它把已鉴权的文件快照转发给 Worker，并通过带不可猜 capability 的主站路径逐字节
+代理构建产物。Worker 端口只在 Compose 内网和宿主机 loopback 可见，浏览器不会
+直接连接 Worker，公网网卡也不应发布该端口。
 
 ## 沙箱边界
 
@@ -26,46 +28,62 @@ sandbox-worker（固定依赖、单并发 Vite build、静态预览）
   和 `index.html` 会被可信模板覆盖。
 - 单次最多 200 个文件、源码共 5MB、单文件 512KB，默认 60 秒超时。
 - Worker 单并发，Compose 默认限制 1.5 CPU、1200MB 内存、128 PID。
-- 预览从独立 Origin 提供，并通过 CSP `frame-ancestors` 限制嵌入来源。
+- 推荐把 capability 路由暴露到独立预览 Origin。iframe 可使用该 Origin 自己的
+  `localStorage`，但不能读取小筑主站 DOM、Cookie 或登录存储。
+- 若未配置独立 Origin，则回退到主站相对 URL，同时移除 `allow-same-origin`，让页面
+  运行在 opaque origin 中。
+- capability URL 等同临时访问凭证；每个会话只保留最近 3 份构建，旧产物会被回收。
+
+这套实现面向当前的个人演示和可信低并发使用：它是固定模板的受限构建 Worker，
+不是允许陌生用户执行任意依赖、命令或服务端代码的多租户 VM/容器平台。若以后开放
+给不可信公网用户，仍需为每次构建增加独立容器/微 VM、只读根文件系统、网络策略和
+任务级 UID/cgroup 隔离，不能只依赖路径校验与 Vite 插件。
 
 详细说明见 [后端沙箱文档](docs/backend-sandbox.md)。
 
 ## 本地开发
 
-前置：Bun、uv、Python 3.12+。先安装依赖并准备配置：
+前置：Bun、uv、Python 3.12+。宿主机开发先安装依赖并准备后端配置：
 
 ```bash
 bun install
 uv sync --directory server
 cp server/.env.example server/.env
-cp server/.env.example .env
 ```
 
-本机源码开发填写 `server/.env`；Docker Compose 填写根目录 `.env`。两者至少包含：
+`server/.env` 至少包含：
 
 ```dotenv
 JWT_SECRET=随机长密钥
 SANDBOX_WORKER_TOKEN=另一个随机长密钥
+SANDBOX_CAPABILITY_SECRET=第三个随机长密钥
 SANDBOX_WORKER_URL=http://127.0.0.1:8010
-SANDBOX_PUBLIC_BASE_URL=http://localhost:8010
+SANDBOX_PREVIEW_ORIGIN=http://preview.localhost:9000
 SANDBOX_FRAME_ANCESTORS=http://localhost:9000
 ```
 
-推荐用 Docker 启动完整环境：
+先用 Compose 只启动 Worker（端口只绑定宿主机 `127.0.0.1`），再启动源码服务：
 
 ```bash
-docker compose up -d --build
-```
-
-若主应用在宿主机开发、Worker 用 Docker，运行：
-
-```bash
-docker compose up -d sandbox-worker
+SANDBOX_WORKER_TOKEN=与-server/.env-相同的密钥 docker compose up -d sandbox-worker
 bun run dev
 ```
 
 开发地址：前台 `http://localhost:9000`，管理后台
 `http://localhost:9100/admin/`，API `http://localhost:8000`。
+
+完整 Compose 部署使用根目录 `.env`，其中网络地址与端口要改为：
+
+```dotenv
+SANDBOX_WORKER_URL=http://sandbox-worker:8010
+SANDBOX_CAPABILITY_SECRET=只注入主应用的随机长密钥
+SANDBOX_PREVIEW_ORIGIN=http://preview.localhost:8000
+SANDBOX_FRAME_ANCESTORS=http://localhost:8000
+```
+
+可先执行 `cp server/.env.example .env` 再修改上述值，然后执行
+`docker compose up -d`。不要把宿主机开发的 `127.0.0.1:8010` 原样用于主应用容器；
+容器内的 `127.0.0.1` 指向主应用自身，不是 Worker。
 
 ## 验证
 
@@ -74,7 +92,7 @@ bun run build
 bun run build:admin
 uv run --directory server ruff check app tests
 uv run --directory server python -m unittest discover -s tests
-docker compose config
+SANDBOX_WORKER_TOKEN=config-check-placeholder docker compose config --no-env-resolution
 ```
 
 ## 部署
@@ -85,20 +103,26 @@ docker compose config
 - `elin/xiaozhu-sandbox`：固定模板依赖与构建 Worker。
 
 不要在 2GB 生产机上现场构建 Worker 镜像；由 ACR 构建后让服务器直接拉取。
-预览应配置独立域名，例如：
-
-```text
-preview.xiaozhu.elin521.cn -> sandbox-worker:8010
-```
+主站域名与预览域名都反向代理到主应用的 `8000` 端口；预览域名只承载
+`/api/sandbox-preview/...`。二者都不直接连接 Worker，也不要把 Worker 端口发布公网。
 
 生产环境设置：
 
 ```dotenv
 SANDBOX_WORKER_URL=http://sandbox-worker:8010
 SANDBOX_WORKER_TOKEN=随机长密钥
-SANDBOX_PUBLIC_BASE_URL=https://preview.xiaozhu.elin521.cn
+SANDBOX_CAPABILITY_SECRET=另一个仅主应用持有的随机长密钥
+SANDBOX_PREVIEW_ORIGIN=https://preview.xiaozhu.elin521.cn
 SANDBOX_FRAME_ANCESTORS=https://xiaozhu.elin521.cn
 ```
+
+反向代理必须把浏览器访问的域名原样放进上游 `Host`（Nginx 可用
+`proxy_set_header Host $host`），让主 API 能识别独立预览 Origin 并下发正确的 CSP；
+当前实现不会把客户端可伪造的 `X-Forwarded-Host` 当成隔离依据。
+`SANDBOX_CAPABILITY_SECRET` 不得注入 Worker。
+
+独立预览 Origin 是隔离边界。浏览器截图仍应由 iframe 内的受控 bridge 生成后通过
+`postMessage` 回传，或由服务端浏览器完成；父页面不直接读取预览 DOM。
 
 ## 目录
 
@@ -107,6 +131,6 @@ web/                    主前端
 web-admin/              管理后台
 server/app/             FastAPI、Agent、数据模型
 server/templates/       Worker 使用的可信项目模板
-sandbox-worker/         构建与独立预览服务
+sandbox-worker/         构建与内部预览服务
 server/alembic/         数据库迁移
 ```

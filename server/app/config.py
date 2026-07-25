@@ -107,6 +107,13 @@ class Settings(BaseSettings):
     # Worker 只在 Docker 内网暴露构建接口；主 API 代用户转发，浏览器永远拿不到内部 token。
     sandbox_worker_url: str = "http://sandbox-worker:8010"
     sandbox_worker_token: str = ""
+    # 只供主 API 签发预览 capability；留空时回退到 JWT_SECRET，绝不复用 Worker token。
+    sandbox_capability_secret: str = ""
+    # 推荐把同一个主 API 的 /api/sandbox-preview 路由暴露到独立预览 Origin。
+    # 这样 iframe 可安全使用 allow-same-origin（保留生成应用自己的 localStorage），
+    # 又不会取得主站的 DOM/登录存储。留空时回退到主站相对 URL + opaque origin。
+    sandbox_preview_origin: str = ""
+    sandbox_frame_ancestors: str = "'self'"
     sandbox_build_timeout_s: float = Field(
         default=75.0,
         gt=0,

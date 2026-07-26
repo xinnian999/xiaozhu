@@ -148,14 +148,10 @@
         align-items: center;
         justify-content: center;
         flex-shrink: 0;
-        min-width: 25px;
+        width: 22px;
         height: 22px;
-        padding: 0 4px;
         border-radius: $radius-xs;
         color: var(--color-text-mute);
-        font-family: var(--font-mono);
-        font-size: 9px;
-        font-weight: $fw-semibold;
         transition:
           background $dur-base $ease-out,
           color $dur-base $ease-out;

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Eye, Code2, ChevronLeft, RotateCw, ExternalLink, Terminal, Save, Undo2, Download, Loader2 } from 'lucide-react'
+import { Eye, Code2, ChevronLeft, RotateCw, ExternalLink, Terminal, Save, Undo2, Download, Loader2, Smartphone } from 'lucide-react'
 import { useUIStore, type WorkTab } from '@/store/ui'
 import { useSessionStore } from '@/store/session'
 import { downloadSourceAsZip } from '@/lib/download'
@@ -189,7 +189,7 @@ export default function TabBar() {
                 aria-pressed={previewDevice === 'mobile'}
                 title={previewDevice === 'mobile' ? '当前为 H5，点击切换到 PC' : '切换到 H5'}
               >
-                H5
+                <Smartphone size={12} aria-hidden />
               </button>
 
               <button

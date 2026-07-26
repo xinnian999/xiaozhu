@@ -807,7 +807,7 @@ export default function ServerPreviewPane() {
                 ref={iframeRef}
                 src={iframeSrc!}
                 className={styles.iframe}
-                title="后端沙箱预览"
+                title="界面预览"
                 onLoad={handleIframeLoad}
                 sandbox={[
                   'allow-scripts',
@@ -823,7 +823,7 @@ export default function ServerPreviewPane() {
                 {previewStatus === 'error' ? (
                   <div className={styles.errBlock}>
                     <AlertTriangle size={20} />
-                    <h3>后端沙箱启动失败</h3>
+                    <h3>界面生成失败</h3>
                     <p>{previewError ?? '未知错误'}</p>
                     <p className={styles.errHint}>检查 Worker 状态、密钥和预览域名配置。</p>
                   </div>
@@ -831,7 +831,7 @@ export default function ServerPreviewPane() {
                   <div className={styles.booting}>
                     <div className={styles.pctNumber}>…</div>
                     <p className={styles.statusLabel}>
-                      {previewStatus === 'building' ? '正在后端隔离环境中构建…' : '正在准备后端沙箱…'}
+                      {previewStatus === 'building' ? '正在生成界面…' : '准备中…'}
                     </p>
                     {previewLog && <pre className={styles.bootLog}>{previewLog}</pre>}
                   </div>

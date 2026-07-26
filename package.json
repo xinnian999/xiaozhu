@@ -19,7 +19,8 @@
     "build:prod": "pnpm run build && pnpm run build:admin && rm -rf server/static server/static-admin && cp -r web/dist server/static && cp -r web-admin/dist server/static-admin",
     "start:prod": "uv run --directory server uvicorn app.main:app --port 8099",
     "preview": "pnpm run build:prod && pnpm run start:prod",
-    "lint": "pnpm --dir web lint"
+    "lint": "pnpm --dir web lint",
+    "release:tag": "sh scripts/release-tag.sh"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

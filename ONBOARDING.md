@@ -83,6 +83,12 @@ SANDBOX_WORKER_TOKEN=config-check-placeholder docker compose config --no-env-res
 本地端口：前台 9000、管理后台 9100、API 8000。Worker 使用 8010；Compose 只把它
 绑定到宿主机 `127.0.0.1`，不会暴露到公网网卡。
 
+## 发布
+
+生产镜像只由 `release-v<版本>` Git tag 触发构建，普通 `master` push 不发版，也
+不再维护可变的 `latest`。使用 `pnpm release:tag -- <版本>` 创建发布标签，完整流程见
+[docs/release.md](docs/release.md)。
+
 ## 修改检查
 
 - 前后端 SSE 事件类型保持同步。

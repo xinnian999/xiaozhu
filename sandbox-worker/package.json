@@ -6,7 +6,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "node --watch index.ts",
     "start": "node dist/index.js",
-    "test": "node --test"
+    "test": "node --test *.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",

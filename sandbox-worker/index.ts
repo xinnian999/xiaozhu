@@ -14,6 +14,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import path from 'node:path'
 import type { Readable } from 'node:stream'
 
+import { PREVIEW_CAPABILITY_PATH_PATTERN_SOURCE } from './preview-path.js'
+
 const port = Number.parseInt(process.env.SANDBOX_PORT || '8010', 10)
 const hostname = process.env.SANDBOX_HOST || '0.0.0.0'
 const dataDir = process.env.SANDBOX_DATA_DIR || '/data'
@@ -345,8 +347,18 @@ import html2canvas from 'html2canvas';
     });
     originalConsoleError(...args);
   };
+  const previewCapabilityPrefix = new RegExp(
+    ${JSON.stringify(PREVIEW_CAPABILITY_PATH_PATTERN_SOURCE)}
+  );
+  const logicalPreviewPath = () => {
+    const strippedPath = location.pathname.replace(previewCapabilityPrefix, '');
+    const normalizedPath = strippedPath
+      ? (strippedPath.startsWith('/') ? strippedPath : '/' + strippedPath)
+      : '/';
+    return normalizedPath + location.search + location.hash;
+  };
   const reportPath = () => post('xiaozhu-server-navigation', {
-    path: location.pathname + location.search + location.hash,
+    path: logicalPreviewPath(),
   });
   window.addEventListener('hashchange', reportPath);
   window.addEventListener('popstate', reportPath);

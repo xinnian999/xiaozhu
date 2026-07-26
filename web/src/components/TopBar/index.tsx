@@ -1,7 +1,6 @@
 import { Sun, Moon } from 'lucide-react'
 import { useThemeStore } from '@/store/theme'
 import ProjectMenu from './ProjectMenu'
-import VersionMenu from './VersionMenu'
 import CreditsBadge from './CreditsBadge'
 import UserMenu from '@/components/UserMenu'
 import styles from './index.module.scss'
@@ -23,10 +22,9 @@ export default function TopBar() {
           </a>
         </div>
 
-        {/* 桌面端：项目 / 版本居中放在顶栏。移动端此块由 CSS 隐藏，改到下方 subbar 里 */}
+        {/* 桌面端：项目与版本合并成一个树选择器。移动端则下沉到 subbar。 */}
         <div className={styles.center}>
           <ProjectMenu />
-          <VersionMenu />
         </div>
 
         <div className={styles.right}>
@@ -42,11 +40,9 @@ export default function TopBar() {
         </div>
       </header>
 
-      {/* 移动端专属第二行：顶栏太窄放不下品牌 + 项目 + 版本 + 右侧操作，
-          把项目 / 版本单独下沉到这一行。桌面端由 CSS 隐藏（顶栏已居中展示它们）。 */}
+      {/* 移动端专属第二行：把项目 / 版本树选择器单独下沉。 */}
       <div className={styles.subbar}>
         <ProjectMenu />
-        <VersionMenu />
       </div>
     </>
   )

@@ -10,7 +10,9 @@
 # 8000=后端 fastapi，8010=后端沙箱 Worker，9000=前台 vite，
 # 9100=管理后台 vite（web-admin）。
 for port in 8000 8010 9000 9100; do
-  pids=$(lsof -ti :"$port" 2>/dev/null)
+  # 只选择 LISTEN 进程。不能用 `lsof -ti :端口`，因为它也会返回正在访问
+  # 该端口的 Chrome 渲染进程，重启 dev 时会把用户正在看的页面一起杀掉。
+  pids=$(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null)
   if [ -n "$pids" ]; then
     echo "[predev-clean] 释放端口 ${port}，结束残留进程: $pids"
     # shellcheck disable=SC2086

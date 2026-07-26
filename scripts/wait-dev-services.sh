@@ -3,7 +3,7 @@
 # Worker 尚未监听，这些首屏请求会失败并把页面留在错误状态，所以先等待两个后端健康。
 set -eu
 
-api_url="${DEV_API_HEALTH_URL:-http://127.0.0.1:8000/api/setup-status}"
+api_url="${DEV_API_HEALTH_URL:-http://127.0.0.1:9200/api/setup-status}"
 worker_url="${DEV_WORKER_HEALTH_URL:-http://127.0.0.1:8010/health}"
 max_attempts="${DEV_HEALTH_MAX_ATTEMPTS:-240}"
 attempt=0

@@ -82,7 +82,7 @@ iframe sandbox 仍然保留。该配置只作用于 loopback dev，生产环境�
 真实主站 Origin。
 
 开发地址：前台 `http://localhost:9000`，管理后台
-`http://localhost:9100/admin/`，API `http://localhost:8000`。
+`http://localhost:9100/admin/`，API `http://localhost:9200`。
 
 完整 Compose 部署使用根目录 `.env`：
 

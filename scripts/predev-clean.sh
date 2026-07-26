@@ -8,7 +8,7 @@ set -eu
 
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 current_pgid=$(ps -o pgid= -p $$ | tr -d ' ')
-ports="8000 8010 9000 9100"
+ports="9200 8010 9000 9100"
 old_pgids=""
 
 if command -v lsof >/dev/null 2>&1; then
@@ -33,7 +33,9 @@ for port in $ports; do
       "$project_dir"|"$project_dir"/*)
         ;;
       *)
-        echo "[predev-clean] 端口 $port 被非本项目进程占用（PID $pid，cwd=${cwd:-未知}）" >&2
+        # 变量后紧跟中文标点时必须显式加花括号。macOS 自带 Bash 3.2 在部分
+        # UTF-8 locale 下会把标点的首字节误并入变量名，配合 set -u 就会报未绑定变量。
+        echo "[predev-clean] 端口 ${port} 被非本项目进程占用（PID ${pid}，cwd=${cwd:-未知}）" >&2
         echo "[predev-clean] 为避免误杀，已中止启动。" >&2
         exit 1
         ;;
@@ -41,7 +43,7 @@ for port in $ports; do
 
     pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
     if [ -z "$pgid" ] || [ "$pgid" = "$current_pgid" ]; then
-      echo "[predev-clean] 无法安全清理端口 $port 的进程组（PID $pid）" >&2
+      echo "[predev-clean] 无法安全清理端口 ${port} 的进程组（PID ${pid}）" >&2
       exit 1
     fi
     case " $old_pgids " in

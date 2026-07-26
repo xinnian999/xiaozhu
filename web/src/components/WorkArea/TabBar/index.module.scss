@@ -101,43 +101,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: $space-2;
     min-width: 0;
-
-    .deviceSwitch {
-      display: inline-flex;
-      align-items: center;
-      flex-shrink: 0;
-      height: 28px;
-      padding: 2px;
-      background: var(--color-bg-soft);
-      border: 1px solid var(--color-border);
-      border-radius: $radius-md;
-
-      .deviceBtn {
-        @include button-reset;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 26px;
-        height: 22px;
-        border-radius: $radius-xs;
-        color: var(--color-text-mute);
-        transition:
-          background $dur-base $ease-out,
-          color $dur-base $ease-out;
-
-        &:hover {
-          color: var(--color-text);
-        }
-
-        &.deviceBtnActive {
-          background: var(--color-bg-elev);
-          color: var(--color-accent);
-          box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03);
-        }
-      }
-    }
 
     .urlBar {
       display: flex;
@@ -175,6 +139,35 @@
         // 下载打包中的 loading 图标旋转（复用 .tabbar 里的 tabbar-spin 关键帧）
         .spin {
           animation: tabbar-spin 0.8s linear infinite;
+        }
+      }
+
+      .deviceToggle {
+        @include button-reset;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        min-width: 25px;
+        height: 22px;
+        padding: 0 4px;
+        border-radius: $radius-xs;
+        color: var(--color-text-mute);
+        font-family: var(--font-mono);
+        font-size: 9px;
+        font-weight: $fw-semibold;
+        transition:
+          background $dur-base $ease-out,
+          color $dur-base $ease-out;
+
+        &:hover {
+          color: var(--color-text);
+          background: var(--color-bg-hover);
+        }
+
+        &.deviceToggleActive {
+          color: var(--color-accent);
+          background: var(--color-accent-fade);
         }
       }
 

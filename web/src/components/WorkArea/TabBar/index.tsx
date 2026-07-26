@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { Eye, Code2, ChevronLeft, RotateCw, ExternalLink, Terminal, Save, Undo2, Download, Loader2, Monitor, Smartphone } from 'lucide-react'
-import { useUIStore, type PreviewDevice, type WorkTab } from '@/store/ui'
+import { Eye, Code2, ChevronLeft, RotateCw, ExternalLink, Terminal, Save, Undo2, Download, Loader2 } from 'lucide-react'
+import { useUIStore, type WorkTab } from '@/store/ui'
 import { useSessionStore } from '@/store/session'
 import { downloadSourceAsZip } from '@/lib/download'
 import { toast } from '@/lib/toast'
@@ -15,15 +15,6 @@ import styles from './index.module.scss'
 const TABS: { key: WorkTab; label: string; Icon: typeof Eye }[] = [
   { key: 'preview', label: '预览', Icon: Eye },
   { key: 'code', label: '代码', Icon: Code2 },
-]
-
-const PREVIEW_DEVICES: {
-  key: PreviewDevice
-  label: string
-  Icon: typeof Monitor
-}[] = [
-  { key: 'desktop', label: '桌面画布', Icon: Monitor },
-  { key: 'mobile', label: 'H5 画布', Icon: Smartphone },
 ]
 
 export default function TabBar() {
@@ -151,23 +142,6 @@ export default function TabBar() {
       <div className={styles.center}>
         {!isCode && (
           <>
-            {/* 设备开关改变的是 iframe 的真实 viewport，媒体查询和截图都会跟着切换。 */}
-            <div className={styles.deviceSwitch} aria-label="预览画布设备">
-              {PREVIEW_DEVICES.map(({ key, label, Icon }) => (
-                <button
-                  key={key}
-                  type="button"
-                  className={`${styles.deviceBtn} ${previewDevice === key ? styles.deviceBtnActive : ''}`}
-                  onClick={() => setPreviewDevice(key, activeId)}
-                  aria-label={`切换到${label}`}
-                  aria-pressed={previewDevice === key}
-                  title={label}
-                >
-                  <Icon size={13} />
-                </button>
-              ))}
-            </div>
-
             <div className={styles.urlBar}>
               <button
                 className={styles.urlIconBtn}
@@ -202,6 +176,21 @@ export default function TabBar() {
                 {/* 直接显示当前路由路径（默认 '/'），不再拼假域名 / 版本号 */}
                 <span className={styles.urlPath}>{previewPath || '/'}</span>
               </div>
+
+              {/* 默认就是 PC；按钮高亮时才表示 H5 画布，再点一次恢复 PC。 */}
+              <button
+                type="button"
+                className={`${styles.deviceToggle} ${previewDevice === 'mobile' ? styles.deviceToggleActive : ''}`}
+                onClick={() => setPreviewDevice(
+                  previewDevice === 'mobile' ? 'desktop' : 'mobile',
+                  activeId,
+                )}
+                aria-label={previewDevice === 'mobile' ? '切换到桌面画布' : '切换到H5画布'}
+                aria-pressed={previewDevice === 'mobile'}
+                title={previewDevice === 'mobile' ? '当前为 H5，点击切换到 PC' : '切换到 H5'}
+              >
+                H5
+              </button>
 
               <button
                 className={styles.urlIconBtn}

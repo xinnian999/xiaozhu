@@ -16,9 +16,9 @@
    `{SANDBOX_PREVIEW_ORIGIN}/api/sandbox-preview/{capability}/...`。
 7. iframe 请求该 URL 时，FastAPI 校验 capability，再从共享预览目录直接返回
    HTML、JS、CSS 和图片；不是重定向，也不再请求 Worker。
-8. iframe 通过很小的 `postMessage` bridge 回传导航状态、运行时错误和基础布局问题；
+8. iframe 通过很小的 `postMessage` bridge 回传导航状态和运行时错误；
    `check_build` 时还会在 iframe 内生成限尺寸截图并回传二进制。
-9. 前端上传截图并把编译/运行/布局结果回报 `build-result`，唤醒 Agent 的
+9. 前端上传截图并把编译/运行结果回报 `build-result`，唤醒 Agent 的
    `check_build`。
 
 capability 是临时 Bearer 凭证。iframe 导航和静态资源请求不会携带前端保存在
@@ -75,7 +75,7 @@ same-origin；若 Host 被错误改成主站或内部域名，它会自动降级
 若 `SANDBOX_PREVIEW_ORIGIN` 留空，构建 API 返回主站相对 URL。前端会自动去掉
 `allow-same-origin`，浏览器把预览文档放进 opaque origin；这种回退更容易部署，但
 生成应用不能使用 `localStorage`。由于 html2canvas 的克隆文档也会继承 opaque
-sandbox，这个回退模式只做运行时和布局检查，不保证自动截图；正式演示应配置独立
+sandbox，这个回退模式只做运行时检查，不保证自动截图；正式演示应配置独立
 预览 Origin。
 
 因此：
@@ -104,6 +104,6 @@ sandbox，这个回退模式只做运行时和布局检查，不保证自动截�
 - 当前 Worker 适用于项目作者自己的面试演示和可信低并发场景，不是面对恶意租户的
   OS 级安全边界。源码路径、可信配置和 CSS 图检查属于纵深防御，不能替代每任务独立
   容器/微 VM、网络策略、任务 UID 和 cgroup。
-- 运行时错误、布局检查和截图由预览 iframe bridge 回传；服务端 Playwright 截图
+- 运行时错误和截图由预览 iframe bridge 回传；服务端 Playwright 截图
   尚未接入。
 - 每个会话只保留最近 3 份 Worker 预览，分享链接不是永久存档。

@@ -468,62 +468,6 @@ import html2canvas from 'html2canvas';
     requestAnimationFrame(check);
   });
 
-  const inspectLayout = () => {
-    const width = Math.max(1, innerWidth || document.documentElement.clientWidth || 0);
-    const height = Math.max(1, innerHeight || document.documentElement.clientHeight || 0);
-    const issues = [];
-    const add = (message) => {
-      if (!issues.includes(message)) issues.push(message);
-    };
-    const root = document.getElementById('root');
-    const shell = root && root.firstElementChild;
-    const shellRect = shell && shell.getBoundingClientRect();
-    const pageWidth = Math.max(
-      document.documentElement.scrollWidth,
-      document.body ? document.body.scrollWidth : 0,
-    );
-    if (pageWidth > width + 8) {
-      add('[布局验收] 页面横向溢出 ' + Math.round(pageWidth - width)
-        + 'px；请让内容在当前视口内换行或收缩。');
-    }
-    if (root && !root.firstElementChild && !(root.textContent || '').trim()) {
-      add('[布局验收] #root 没有渲染可见内容。');
-    }
-    const mobileMode = shell && shell.getAttribute('data-preview-mode') === 'mobile';
-    if (
-      !mobileMode
-      && width >= 960
-      && shellRect
-      && shellRect.height >= height * 0.75
-      && shellRect.width < width * 0.65
-    ) {
-      add('[布局验收] 桌面预览中的根应用呈现为手机窄画布；请使用响应式布局铺满视口。');
-    }
-    const nodes = document.querySelectorAll('body *');
-    for (let index = 0; index < nodes.length && index < 5000; index += 1) {
-      const node = nodes[index];
-      if (getComputedStyle(node).position !== 'fixed') continue;
-      const rect = node.getBoundingClientRect();
-      if (rect.left < -4 || rect.right > width + 4) {
-        add('[布局验收] fixed 元素横向越出可视区域。');
-        break;
-      }
-    }
-    return issues.slice(0, 6);
-  };
-
-  let layoutTimer = 0;
-  const reportLayout = () => {
-    const issues = inspectLayout();
-    post('xiaozhu-server-layout', { issues });
-    return issues;
-  };
-  const scheduleLayout = () => {
-    clearTimeout(layoutTimer);
-    layoutTimer = setTimeout(reportLayout, 220);
-  };
-  window.addEventListener('resize', scheduleLayout);
-
   const safeBackground = (value) => {
     if (
       typeof value === 'string'
@@ -680,11 +624,9 @@ import html2canvas from 'html2canvas';
       await waitForAppMounted();
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       reportPath();
-      const issues = reportLayout();
       post('xiaozhu-server-ready', {
         width: Math.max(1, innerWidth || document.documentElement.clientWidth || 0),
         height: Math.max(1, innerHeight || document.documentElement.clientHeight || 0),
-        layoutIssues: issues,
       });
     } catch {}
   };

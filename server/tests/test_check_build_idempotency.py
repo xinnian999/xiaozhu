@@ -24,7 +24,7 @@ from app.api.resume import (
 
 
 _PASS_CONTENT = (
-    "编译、运行时与浏览器基础布局规则通过；"
+    "编译与运行时检查通过；"
     "这不代表视觉截图已经合格，附带截图仍需由支持视觉的模型严格审查。"
 )
 _ARTIFACT = {
@@ -431,7 +431,7 @@ class CheckBuildIdempotencyTests(IsolatedAsyncioTestCase):
     async def test_transient_incomplete_result_allows_retry(self):
         for first_content in (
             "构建超时：预览迟迟没有回报结果",
-            "编译、运行时与浏览器基础布局规则通过，但本次没有取得可靠截图",
+            "编译与运行时检查通过，但本次没有取得可靠截图",
         ):
             with self.subTest(first_content=first_content):
                 state = BuildCheckReuseState()

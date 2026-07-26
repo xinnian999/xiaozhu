@@ -329,13 +329,13 @@ def build_tools(
                     cacheable=None if synthetic else True,
                 )
                 return (
-                    f"{device_note}编译、运行时与浏览器基础布局规则通过；"
+                    f"{device_note}编译与运行时检查通过；"
                     "这不代表视觉截图已经合格，附带截图仍需由支持视觉的模型严格审查。",
                     artifact,
                 )
             build_reuse_state.note_fresh_result(check_id, cacheable=False)
             return (
-                f"{device_note}编译、运行时与浏览器基础布局规则通过，但本次没有取得可靠截图，"
+                f"{device_note}编译与运行时检查通过，但本次没有取得可靠截图，"
                 "视觉效果尚未验证。",
                 None,
             )
@@ -344,16 +344,6 @@ def build_tools(
             cacheable=None if synthetic else True,
         )
         errors = str(result.get("errors") or "").strip() or "（无详细错误信息）"
-        if result.get("visual") and result.get("runtime"):
-            return (
-                f"{device_note}构建通过，但预览同时存在运行与布局问题，请全部修复后再次检查：\n{errors}",
-                artifact,
-            )
-        if result.get("visual"):
-            return (
-                f"{device_note}构建通过，但预览布局验收失败，请按报告修复后再次检查：\n{errors}",
-                artifact,
-            )
         if result.get("runtime"):
             # 编译过了、但 iframe 渲染时崩（如 undefined is not a function）
             return (

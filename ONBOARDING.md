@@ -24,8 +24,8 @@ sandbox-worker/     单并发构建 Worker 进程
 4. 前端提交完整文件快照到主 API，主 API 转发给 Worker。
 5. Worker 用固定配置执行 `vite build`，返回 `build_id`。
 6. 主 API 签发 `/api/sandbox-preview/...` capability URL，并从共享目录直接读取产物。
-7. iframe 在独立预览 Origin（未配置时为 opaque origin）中运行并回传运行时错误、
-   基础布局问题和受限截图；前端调用 `build-result`，Agent 被唤醒后决定结束或修复。
+7. iframe 在独立预览 Origin（未配置时为 opaque origin）中运行并回传运行时错误和
+   受限截图；前端调用 `build-result`，Agent 被唤醒后根据真实报错与截图决定结束或修复。
 
 不要把 `check_build` 改成固定 sleep 或日志轮询；会合点必须先 `arm()` 再发事件，
 否则快速返回会丢结果。

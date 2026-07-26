@@ -20,7 +20,6 @@ type PendingCheck = {
   sessionId: string
   device: PreviewDevice
   runtimeErrors: string[]
-  layoutIssues: string[]
   previousDocumentId: string | null
   diagnosticDocumentId: string | null
   documentId: string | null
@@ -50,7 +49,7 @@ type PendingCapture = {
   timer: ReturnType<typeof setTimeout>
 }
 
-/** 后端沙箱预览面板。Worker 构建；可信 iframe bridge 回传运行时、布局与受限截图。 */
+/** 后端沙箱预览面板。Worker 构建；可信 iframe bridge 回传运行时错误与受限截图。 */
 export default function ServerPreviewPane() {
   const currentVersion = useSessionStore((s) => s.currentVersion())
   const activeId = useSessionStore((s) => s.activeId)
@@ -261,7 +260,6 @@ export default function ServerPreviewPane() {
 
     const allErrors = [
       ...pending.runtimeErrors,
-      ...pending.layoutIssues,
       ...(terminalError ? [terminalError] : []),
     ]
     const result = {
@@ -269,7 +267,6 @@ export default function ServerPreviewPane() {
       errors: allErrors.join('\n'),
       // ready 超时发生在编译成功、iframe 启动验收阶段，不能误导 Agent 当成编译错误改代码。
       runtime: pending.runtimeErrors.length > 0 || Boolean(terminalError),
-      visual: pending.layoutIssues.length > 0,
     }
 
     void (async () => {
@@ -363,7 +360,6 @@ export default function ServerPreviewPane() {
             ok: false,
             errors: message,
             runtime: false,
-            visual: false,
             device,
           })
         }
@@ -377,7 +373,6 @@ export default function ServerPreviewPane() {
           sessionId,
           device,
           runtimeErrors: [],
-          layoutIssues: [],
           previousDocumentId: captureDocumentRef.current?.id ?? null,
           diagnosticDocumentId: null,
           documentId: null,
@@ -401,7 +396,6 @@ export default function ServerPreviewPane() {
           ok: false,
           errors: message,
           runtime: false,
-          visual: false,
           device,
         })
       }
@@ -571,7 +565,6 @@ export default function ServerPreviewPane() {
         if (pending.diagnosticDocumentId !== documentId) {
           pending.diagnosticDocumentId = documentId
           pending.runtimeErrors = []
-          pending.layoutIssues = []
         }
         return true
       }
@@ -619,31 +612,9 @@ export default function ServerPreviewPane() {
         if (pending.diagnosticDocumentId !== documentId) {
           pending.diagnosticDocumentId = documentId
           pending.runtimeErrors = []
-          pending.layoutIssues = []
         }
         pending.documentId = documentId
         beginRuntimeCollection()
-      } else if (data.type === 'xiaozhu-server-layout') {
-        const pending = pendingCheckRef.current
-        if (
-          !pending
-          || pending.done
-          || !Array.isArray(data.issues)
-          || !prepareDiagnostics(pending)
-        ) {
-          return
-        }
-        for (const issue of data.issues) {
-          const text = String(issue ?? '').trim().slice(0, 1000)
-          if (
-            text
-            && pending.layoutIssues.length < 8
-            && !pending.layoutIssues.includes(text)
-          ) {
-            pending.layoutIssues.push(text)
-            pushPreviewLog({ level: 'warn', text })
-          }
-        }
       } else if (data.type === 'xiaozhu-server-navigation') {
         const path = typeof data.path === 'string' ? data.path.slice(0, 1000) : '/'
         setPreviewNav({ path, canBack: false, canForward: false })

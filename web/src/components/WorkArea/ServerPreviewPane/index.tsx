@@ -78,7 +78,8 @@ export default function ServerPreviewPane() {
   const setPreviewNav = useUIStore((s) => s.setPreviewNav)
   const resetPreviewNav = useUIStore((s) => s.resetPreviewNav)
   const reloadPreview = useUIStore((s) => s.reloadPreview)
-  // 记录真正发出 ready 的 iframe 地址；新 URL 挂载时会自然回到加载态。
+  // 分别记录 iframe 的导航完成与 React 首屏 ready；同一加载层据此切换阶段文案。
+  const [loadedIframeSrc, setLoadedIframeSrc] = useState<string | null>(null)
   const [readyIframeSrc, setReadyIframeSrc] = useState<string | null>(null)
 
   const rootRef = useRef<HTMLDivElement | null>(null)
@@ -624,7 +625,9 @@ export default function ServerPreviewPane() {
         clearIframeReadyTimer()
         iframeReadyAttemptsRef.current = 0
         iframeRecoveryBuildAttemptedRef.current = false
-        setReadyIframeSrc(iframeRef.current?.src ?? null)
+        const currentFrameSrc = iframeRef.current?.src ?? null
+        setLoadedIframeSrc(currentFrameSrc)
+        setReadyIframeSrc(currentFrameSrc)
         if (['localhost', '127.0.0.1', '::1'].includes(window.location.hostname)) {
           sessionStorage.removeItem(`xiaozhu:preview-recovery:${activeId ?? ''}`)
           const recoveryUrl = new URL(window.location.href)
@@ -757,7 +760,8 @@ export default function ServerPreviewPane() {
   ])
 
   const handleIframeLoad = useCallback(() => {
-    // 页面导航完成后仍可能要等待 React 挂载和首屏绘制，先保留加载层。
+    // load 只表示文档完成导航；加载层继续显示，直到 bridge 确认 React 首屏已绘制。
+    setLoadedIframeSrc(iframeRef.current?.src ?? null)
     setReadyIframeSrc(null)
     requestIframeReady()
     armIframeReadyRecovery()
@@ -781,7 +785,6 @@ export default function ServerPreviewPane() {
     captureDocumentRef.current = null
   }, [cancelPendingCaptures, clearCheckTimers, clearIframeReadyTimer])
 
-  const showIframe = previewStatus === 'ready' && Boolean(previewUrl)
   // Chrome 会按 URL 缓存 iframe 的 ERR_CONNECTION_REFUSED/CSP 错误文档；只改 React key
   // 仍可能继续显示旧错误页。每次重挂都附带新的无语义查询参数，强制一次真实网络导航。
   const iframeSrc = previewUrl
@@ -791,16 +794,29 @@ export default function ServerPreviewPane() {
         return url.toString()
       })()
     : null
+  const hasIframe = Boolean(iframeSrc)
   const previewHasIsolatedOrigin = Boolean(
     iframeSrc
     && new URL(iframeSrc).origin !== window.location.origin,
   )
+  const isIframeLoaded = Boolean(iframeSrc && loadedIframeSrc === iframeSrc)
   const isIframeReady = Boolean(iframeSrc && readyIframeSrc === iframeSrc)
+  const isPreviewReady = previewStatus === 'ready' && isIframeReady
+  const isPreviewError = previewStatus === 'error'
+  const loadingLabel = previewStatus === 'building'
+    ? '正在构建预览…'
+    : !hasIframe
+        ? '正在准备预览…'
+        : !isIframeLoaded
+            ? '正在加载页面…'
+            : '正在渲染界面…'
+  // 重建期间保留已完成的旧页面作为上下文；新 URL 开始导航后再用不透明层遮住空白。
+  const loadingOverReadyPreview = previewStatus === 'building' && isIframeReady
   useEffect(() => {
-    if (!showIframe) return
+    if (!hasIframe) return
     // 开发热更新可能保留旧 iframe，不再触发 load；主动握手可避免加载层滞留。
     requestIframeReady()
-  }, [iframeSrc, requestIframeReady, showIframe])
+  }, [hasIframe, iframeSrc, requestIframeReady])
   return (
     <div
       ref={rootRef}
@@ -811,8 +827,8 @@ export default function ServerPreviewPane() {
       <div className={styles.bgGlow} aria-hidden />
       <div className={styles.frame}>
         <div className={styles.browser}>
-          <div className={styles.viewport}>
-            {showIframe && (
+          <div className={styles.viewport} aria-busy={!isPreviewReady && !isPreviewError}>
+            {hasIframe && (
               <iframe
                 key={iframeSrc}
                 ref={iframeRef}
@@ -829,46 +845,39 @@ export default function ServerPreviewPane() {
                 referrerPolicy="no-referrer"
               />
             )}
-            {showIframe && (
-              <div
-                className={`${styles.previewLoading} ${
-                  isIframeReady ? styles.previewLoadingHidden : ''
-                }`}
-                role="status"
-                aria-live="polite"
-                aria-hidden={isIframeReady}
-              >
-                <div className={styles.loaderContent}>
+            <div
+              className={[
+                styles.previewState,
+                isPreviewReady ? styles.previewStateHidden : '',
+                loadingOverReadyPreview ? styles.previewStateOverContent : '',
+                isPreviewError ? styles.previewStateError : '',
+              ].filter(Boolean).join(' ')}
+              role={isPreviewError ? 'alert' : 'status'}
+              aria-live="polite"
+              aria-hidden={isPreviewReady}
+            >
+              {isPreviewError ? (
+                <div className={styles.stateError}>
+                  <AlertTriangle size={20} />
+                  <h3>界面生成失败</h3>
+                  <p>{previewError ?? '未知错误'}</p>
+                  <p className={styles.errorHint}>检查 Worker 状态、密钥和预览域名配置。</p>
+                </div>
+              ) : (
+                <div className={styles.stateContent}>
                   <LoaderCircle
                     className={styles.loaderIcon}
                     size={34}
                     strokeWidth={1.8}
                     aria-hidden
                   />
-                  <p>正在加载预览…</p>
+                  <p className={styles.stateLabel}>{loadingLabel}</p>
+                  {previewStatus === 'building' && previewLog && (
+                    <pre className={styles.stateDetail}>{previewLog}</pre>
+                  )}
                 </div>
-              </div>
-            )}
-            {!showIframe && (
-              <div className={styles.overlay}>
-                {previewStatus === 'error' ? (
-                  <div className={styles.errBlock}>
-                    <AlertTriangle size={20} />
-                    <h3>界面生成失败</h3>
-                    <p>{previewError ?? '未知错误'}</p>
-                    <p className={styles.errHint}>检查 Worker 状态、密钥和预览域名配置。</p>
-                  </div>
-                ) : (
-                  <div className={styles.booting}>
-                    <div className={styles.pctNumber}>…</div>
-                    <p className={styles.statusLabel}>
-                      {previewStatus === 'building' ? '正在生成界面…' : '准备中…'}
-                    </p>
-                    {previewLog && <pre className={styles.bootLog}>{previewLog}</pre>}
-                  </div>
-                )}
-              </div>
-            )}
+              )}
+            </div>
           </div>
         </div>
       </div>

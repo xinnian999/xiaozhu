@@ -347,9 +347,8 @@ function CheckBuildScreenshot({ screenshot }: { screenshot: PreviewScreenshot })
           <span>{failed ? '截图加载失败' : '正在加载截图…'}</span>
         </div>
       )}
-      {(screenshot.path || screenshot.local) && (
+      {screenshot.local !== undefined && (
         <span className={styles.toolScreenshotMeta}>
-          <span>{screenshot.path || '当前预览页面'}</span>
           <small>{screenshot.local ? '正在保存' : '已保存'}</small>
         </span>
       )}

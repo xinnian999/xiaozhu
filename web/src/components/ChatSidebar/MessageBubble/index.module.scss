@@ -523,18 +523,11 @@
     .toolScreenshotMeta {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      gap: $space-2;
+      justify-content: flex-end;
       color: var(--color-text-faint);
       font-size: $fs-10;
 
-      > span {
-        @include truncate;
-        min-width: 0;
-      }
-
       small {
-        flex-shrink: 0;
         color: var(--color-success);
         font-size: $fs-10;
       }

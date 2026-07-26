@@ -72,6 +72,11 @@ Worker。留空时主 API 会兼容性回退到 `JWT_SECRET`，生产环境建�
 same-origin；若 Host 被错误改成主站或内部域名，它会自动降级为 opaque sandbox，
 避免把主站权限交给生成页面。
 
+本地 `pnpm dev` 会把 `SANDBOX_FRAME_ANCESTORS` 默认设为 `*`，服务据此省略
+`frame-ancestors` 指令，兼容 Chrome 扩展、桌面 WebView 和 HMR 可能附加的 opaque
+调试祖先；响应级 CSP sandbox 与 iframe sandbox 仍然保留。该宽松值只用于 loopback
+开发；生产部署必须显式配置真实主站 Origin，不能沿用 `*`。
+
 若 `SANDBOX_PREVIEW_ORIGIN` 留空，构建 API 返回主站相对 URL。前端会自动去掉
 `allow-same-origin`，浏览器把预览文档放进 opaque origin；这种回退更容易部署，但
 生成应用不能使用 `localStorage`。由于 html2canvas 的克隆文档也会继承 opaque

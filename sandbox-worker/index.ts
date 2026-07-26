@@ -355,7 +355,10 @@ import html2canvas from 'html2canvas';
     const normalizedPath = strippedPath
       ? (strippedPath.startsWith('/') ? strippedPath : '/' + strippedPath)
       : '/';
-    return normalizedPath + location.search + location.hash;
+    const params = new URLSearchParams(location.search);
+    params.delete('__xiaozhu_reload');
+    const logicalSearch = params.toString();
+    return normalizedPath + (logicalSearch ? '?' + logicalSearch : '') + location.hash;
   };
   const reportPath = () => post('xiaozhu-server-navigation', {
     path: logicalPreviewPath(),
@@ -533,7 +536,7 @@ import html2canvas from 'html2canvas';
       blob: await toWebp(output),
       width,
       height,
-      path: location.pathname + location.search + location.hash,
+      path: logicalPreviewPath(),
     };
   };
   const captureClones = () => Array.from(

@@ -425,6 +425,28 @@ class PreviewCapabilityTests(CapabilitySecretTestCase):
 
 
 class PreviewFileTests(CapabilitySecretTestCase):
+    async def test_dev_wildcard_omits_frame_ancestors_for_opaque_debug_ancestors(
+        self,
+    ):
+        with (
+            patch.object(
+                sandbox.settings,
+                "sandbox_preview_origin",
+                "http://preview.localhost:9000",
+            ),
+            patch.object(
+                sandbox.settings,
+                "sandbox_frame_ancestors",
+                "*",
+            ),
+        ):
+            csp = sandbox._preview_headers("preview.localhost:9000")[
+                "Content-Security-Policy"
+            ]
+
+        self.assertNotIn("frame-ancestors", csp)
+        self.assertIn("sandbox allow-scripts", csp)
+
     async def test_main_origin_response_is_forced_into_opaque_sandbox(self):
         with (
             patch.object(

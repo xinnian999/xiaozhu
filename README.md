@@ -66,7 +66,7 @@ SANDBOX_CAPABILITY_SECRET=第三个随机长密钥
 SANDBOX_WORKER_URL=http://127.0.0.1:8010
 SANDBOX_PREVIEW_DIR=../data/sandbox-worker-dev/previews
 SANDBOX_PREVIEW_ORIGIN=http://preview.localhost:9000
-SANDBOX_FRAME_ANCESTORS=http://localhost:9000
+SANDBOX_FRAME_ANCESTORS=*
 ```
 
 本地开发直接执行：
@@ -76,6 +76,10 @@ pnpm run dev
 ```
 
 该命令会同时启动前台、管理后台、FastAPI 和沙箱 Worker；首次运行会自动安装固定预览模板依赖，不要求启动 Docker。
+本地 `SANDBOX_FRAME_ANCESTORS=*` 会让服务省略 `frame-ancestors` 指令，以兼容
+Chrome 扩展、桌面 WebView 和 HMR 的 opaque 调试祖先；响应级 CSP sandbox 与
+iframe sandbox 仍然保留。该配置只作用于 loopback dev，生产环境必须显式收紧为
+真实主站 Origin。
 
 开发地址：前台 `http://localhost:9000`，管理后台
 `http://localhost:9100/admin/`，API `http://localhost:8000`。

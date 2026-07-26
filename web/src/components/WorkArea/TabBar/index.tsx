@@ -28,9 +28,10 @@ export default function TabBar() {
   const consoleOpen = useUIStore((s) => s.consoleOpen)
   const toggleConsole = useUIStore((s) => s.toggleConsole)
   const logCount = useUIStore((s) => s.previewLogs.length)
-  // 发预览导航指令（后退/前进/刷新）—— PreviewPane 收到后 postMessage 进 iframe。
-  // 刷新走 'reload'（iframe 内 location.reload，保留当前路由），不再整页重挂 iframe。
+  // 后退/前进走 bridge；刷新必须重挂 iframe。浏览器错误页没有 bridge，继续 postMessage
+  // 永远无法恢复，这也是 dev 服务重启后预览长期停在“拒绝连接”的根因。
   const sendPreviewNav = useUIStore((s) => s.sendPreviewNav)
+  const reloadPreview = useUIStore((s) => s.reloadPreview)
   // 当前预览路由 + 前进后退可用态（由导航桥上报、PreviewPane 维护）
   const previewPath = useUIStore((s) => s.previewPath)
   const canBack = useUIStore((s) => s.previewCanBack)
@@ -163,7 +164,7 @@ export default function TabBar() {
               </button>
               <button
                 className={styles.urlIconBtn}
-                onClick={() => sendPreviewNav('reload')}
+                onClick={reloadPreview}
                 disabled={!previewUrl}
                 aria-label="刷新预览"
                 title="刷新预览"

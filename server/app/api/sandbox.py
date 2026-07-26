@@ -57,6 +57,15 @@ def _preview_headers(request_host: str) -> dict[str, str]:
     allow_preview_storage = bool(
         preview_host and request_host.casefold() == preview_host
     )
+    frame_ancestors = settings.sandbox_frame_ancestors.strip()
+    # 本地调试可能经过 Chrome 扩展、桌面 WebView 或 HMR 的 opaque 中间文档；
+    # CSP 的 ``*`` 不覆盖 opaque origin。配置 ``*`` 明确表示开发环境不限制祖先，
+    # 因而直接省略该指令。生产配置真实主站 Origin 时仍会生成严格白名单。
+    frame_ancestors_directive = (
+        ""
+        if frame_ancestors == "*"
+        else f"frame-ancestors {frame_ancestors}; "
+    )
     sandbox_directive = "sandbox allow-scripts allow-forms allow-modals"
     if allow_preview_storage:
         sandbox_directive += " allow-same-origin"
@@ -69,7 +78,7 @@ def _preview_headers(request_host: str) -> dict[str, str]:
             "img-src * data: blob:; font-src * data:; "
             "connect-src * data: blob:; "
             "object-src 'none'; base-uri 'none'; "
-            f"frame-ancestors {settings.sandbox_frame_ancestors}; "
+            f"{frame_ancestors_directive}"
             f"{sandbox_directive}"
         ),
     }

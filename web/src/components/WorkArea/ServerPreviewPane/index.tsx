@@ -7,6 +7,11 @@ import styles from '../PreviewPane/index.module.scss'
 
 const RUNTIME_COLLECT_MS = 1500
 const READY_FALLBACK_MS = 8000
+const IFRAME_READY_RETRY_BASE_MS = 1500
+const IFRAME_READY_RETRY_MAX_MS = 10000
+const IFRAME_READY_REBUILD_AFTER = 2
+const IFRAME_READY_DEV_PAGE_RELOAD_AFTER = 3
+const DEV_PAGE_RELOAD_COOLDOWN_MS = 30_000
 const CAPTURE_TIMEOUT_MS = 10000
 const MAX_SCREENSHOT_BYTES = 2 * 1024 * 1024
 const MAX_SCREENSHOT_SIDE = 1280
@@ -72,6 +77,7 @@ export default function ServerPreviewPane() {
   const clearPreviewLogs = useUIStore((s) => s.clearPreviewLogs)
   const setPreviewNav = useUIStore((s) => s.setPreviewNav)
   const resetPreviewNav = useUIStore((s) => s.resetPreviewNav)
+  const reloadPreview = useUIStore((s) => s.reloadPreview)
 
   const rootRef = useRef<HTMLDivElement | null>(null)
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
@@ -85,6 +91,9 @@ export default function ServerPreviewPane() {
   const pendingCheckRef = useRef<PendingCheck | null>(null)
   const collectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const readyFallbackRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const iframeReadyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const iframeReadyAttemptsRef = useRef(0)
+  const iframeRecoveryBuildAttemptedRef = useRef(false)
   const pendingCaptureRef = useRef(new Map<string, PendingCapture>())
   const captureDocumentRef = useRef<CaptureDocument | null>(null)
   const lastCaptureViewportRef = useRef<{ width: number; height: number } | null>(null)
@@ -123,6 +132,11 @@ export default function ServerPreviewPane() {
     if (readyFallbackRef.current) clearTimeout(readyFallbackRef.current)
     collectTimerRef.current = null
     readyFallbackRef.current = null
+  }, [])
+
+  const clearIframeReadyTimer = useCallback(() => {
+    if (iframeReadyTimerRef.current) clearTimeout(iframeReadyTimerRef.current)
+    iframeReadyTimerRef.current = null
   }, [])
 
   const cancelPendingCaptures = useCallback((reason: string) => {
@@ -337,6 +351,7 @@ export default function ServerPreviewPane() {
     epoch: number,
   ) => {
     if (activeEpochRef.current !== epoch) return
+    clearIframeReadyTimer()
     const device = useUIStore.getState().previewDevice
     if (checkId) {
       cancelPendingCaptures('预览检查已被新的构建取代')
@@ -383,6 +398,8 @@ export default function ServerPreviewPane() {
         }, READY_FALLBACK_MS)
       }
       setPreviewUrl(result.preview_url)
+      // 相同源码可能返回相同 build_id；仍要重挂 iframe，不能让旧错误文档继续占位。
+      reloadPreview()
       setPreviewStatus('ready')
     } catch (error) {
       if (activeEpochRef.current !== epoch) return
@@ -402,12 +419,14 @@ export default function ServerPreviewPane() {
     }
   }, [
     cancelPendingCaptures,
+    clearIframeReadyTimer,
     finishPendingCheck,
     pushPreviewLog,
     setPreviewError,
     setPreviewLog,
     setPreviewStatus,
     setPreviewUrl,
+    reloadPreview,
     previewUrl,
   ])
 
@@ -436,6 +455,9 @@ export default function ServerPreviewPane() {
     if (pendingCheckRef.current) pendingCheckRef.current.done = true
     pendingCheckRef.current = null
     clearCheckTimers()
+    clearIframeReadyTimer()
+    iframeReadyAttemptsRef.current = 0
+    iframeRecoveryBuildAttemptedRef.current = false
     cancelPendingCaptures('预览会话已切换')
     captureDocumentRef.current = null
     lastCaptureViewportRef.current = null
@@ -597,6 +619,21 @@ export default function ServerPreviewPane() {
         ) {
           return
         }
+        clearIframeReadyTimer()
+        iframeReadyAttemptsRef.current = 0
+        iframeRecoveryBuildAttemptedRef.current = false
+        if (['localhost', '127.0.0.1', '::1'].includes(window.location.hostname)) {
+          sessionStorage.removeItem(`xiaozhu:preview-recovery:${activeId ?? ''}`)
+          const recoveryUrl = new URL(window.location.href)
+          if (recoveryUrl.searchParams.has('__xiaozhu_preview_recovery')) {
+            recoveryUrl.searchParams.delete('__xiaozhu_preview_recovery')
+            window.history.replaceState(
+              window.history.state,
+              '',
+              `${recoveryUrl.pathname}${recoveryUrl.search}${recoveryUrl.hash}`,
+            )
+          }
+        }
         const pending = pendingCheckRef.current
         if (pending && !pending.done && documentId === pending.previousDocumentId) return
         captureDocumentRef.current = {
@@ -622,7 +659,7 @@ export default function ServerPreviewPane() {
     }
     window.addEventListener('message', handle)
     return () => window.removeEventListener('message', handle)
-  }, [beginRuntimeCollection, pushPreviewLog, setPreviewNav])
+  }, [activeId, beginRuntimeCollection, clearIframeReadyTimer, pushPreviewLog, setPreviewNav])
 
   const requestIframeReady = useCallback(() => {
     const iframe = iframeRef.current
@@ -640,6 +677,87 @@ export default function ServerPreviewPane() {
     }
   }, [])
 
+  const armIframeReadyRecovery = useCallback(() => {
+    clearIframeReadyTimer()
+    const epoch = activeEpochRef.current
+    const delay = Math.min(
+      IFRAME_READY_RETRY_MAX_MS,
+      IFRAME_READY_RETRY_BASE_MS * (2 ** Math.min(iframeReadyAttemptsRef.current, 3)),
+    )
+    iframeReadyTimerRef.current = setTimeout(() => {
+      iframeReadyTimerRef.current = null
+      if (
+        activeEpochRef.current !== epoch
+        || !previewUrl
+        || !activeId
+        || Object.keys(currentVersion.files).length === 0
+      ) {
+        return
+      }
+
+      iframeReadyAttemptsRef.current += 1
+      if (
+        iframeReadyAttemptsRef.current >= IFRAME_READY_DEV_PAGE_RELOAD_AFTER
+        && ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname)
+      ) {
+        // Chrome 在 dev 服务整体重启后可能把 preview.localhost 的连接拒绝记在当前
+        // 顶层浏览上下文中：iframe 换 key、换 capability、加 cache-bust 均仍返回
+        // 错误页，只有一次顶层冷导航能清掉。仅 loopback 启用，并用 sessionStorage
+        // 限流，避免服务持续离线时形成刷新循环。
+        const recoveryKey = `xiaozhu:preview-recovery:${activeId}`
+        const previousReloadAt = Number(sessionStorage.getItem(recoveryKey) || '0')
+        const now = Date.now()
+        if (now - previousReloadAt >= DEV_PAGE_RELOAD_COOLDOWN_MS) {
+          // dev 整组服务尚未恢复时绝不能刷新顶层页面，否则它会变成 Chrome 自带的
+          // ERR_CONNECTION_REFUSED，应用代码随之消失，再也没有机会自动重试。
+          void fetch('/api/setup-status', {
+            cache: 'no-store',
+            credentials: 'same-origin',
+          }).then((response) => {
+            if (!response.ok) throw new Error(`dev API ${response.status}`)
+            sessionStorage.setItem(recoveryKey, String(Date.now()))
+            // 普通 reload 会复用 Chrome 已污染的子 frame browsing context；改成不同
+            // 顶层 URL 的 replace 导航，等 ready 后再无刷新地清掉内部参数。
+            const recoveryUrl = new URL(window.location.href)
+            recoveryUrl.searchParams.set('__xiaozhu_preview_recovery', String(Date.now()))
+            window.location.replace(recoveryUrl.toString())
+          }).catch(() => {
+            // 主站仍离线：只刷新 iframe，并由下一次 onLoad 继续指数退避。
+            reloadPreview()
+          })
+          return
+        }
+      }
+      if (
+        iframeReadyAttemptsRef.current >= IFRAME_READY_REBUILD_AFTER
+        && !iframeRecoveryBuildAttemptedRef.current
+      ) {
+        // capability 过期、产物被清理或 Worker bridge 升级时，仅重挂旧 URL 不够；
+        // 每次失败周期最多主动重建一次，避免服务长期离线时形成构建风暴。
+        iframeRecoveryBuildAttemptedRef.current = true
+        enqueueBuild(activeId, currentVersion.id, currentVersion.files, null)
+        return
+      }
+
+      // CSP 拒绝页、ERR_CONNECTION_REFUSED 等浏览器错误文档不会响应 postMessage。
+      // React key 重挂才能发起一次真正的新导航；指数退避后会持续等待 dev 服务恢复。
+      reloadPreview()
+    }, delay)
+  }, [
+    activeId,
+    clearIframeReadyTimer,
+    currentVersion.files,
+    currentVersion.id,
+    enqueueBuild,
+    previewUrl,
+    reloadPreview,
+  ])
+
+  const handleIframeLoad = useCallback(() => {
+    requestIframeReady()
+    armIframeReadyRecovery()
+  }, [armIframeReadyRecovery, requestIframeReady])
+
   useEffect(() => {
     if (!navCmd.seq) return
     iframeRef.current?.contentWindow?.postMessage(
@@ -653,14 +771,24 @@ export default function ServerPreviewPane() {
     if (pendingCheckRef.current) pendingCheckRef.current.done = true
     pendingCheckRef.current = null
     clearCheckTimers()
+    clearIframeReadyTimer()
     cancelPendingCaptures('预览面板已卸载')
     captureDocumentRef.current = null
-  }, [cancelPendingCaptures, clearCheckTimers])
+  }, [cancelPendingCaptures, clearCheckTimers, clearIframeReadyTimer])
 
   const showIframe = previewStatus === 'ready' && Boolean(previewUrl)
+  // Chrome 会按 URL 缓存 iframe 的 ERR_CONNECTION_REFUSED/CSP 错误文档；只改 React key
+  // 仍可能继续显示旧错误页。每次重挂都附带新的无语义查询参数，强制一次真实网络导航。
+  const iframeSrc = previewUrl
+    ? (() => {
+        const url = new URL(previewUrl, window.location.origin)
+        url.searchParams.set('__xiaozhu_reload', String(reloadTick))
+        return url.toString()
+      })()
+    : null
   const previewHasIsolatedOrigin = Boolean(
-    previewUrl
-    && new URL(previewUrl, window.location.origin).origin !== window.location.origin,
+    iframeSrc
+    && new URL(iframeSrc).origin !== window.location.origin,
   )
   return (
     <div
@@ -675,12 +803,12 @@ export default function ServerPreviewPane() {
           <div className={styles.viewport}>
             {showIframe && (
               <iframe
-                key={`${previewUrl}-${reloadTick}`}
+                key={iframeSrc}
                 ref={iframeRef}
-                src={previewUrl!}
+                src={iframeSrc!}
                 className={styles.iframe}
                 title="后端沙箱预览"
-                onLoad={requestIframeReady}
+                onLoad={handleIframeLoad}
                 sandbox={[
                   'allow-scripts',
                   'allow-forms',

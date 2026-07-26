@@ -3,7 +3,9 @@ import react from "@vitejs/plugin-react";
 import path from "node:path";
 
 // 后端 dev server 地址。前台经 vite(9000) 代理到它，做到「开发期只用一个端口」。
-const BACKEND = "http://localhost:8000";
+// FastAPI dev 明确监听 IPv4 loopback。不要写 localhost：Node 在不同机器/版本上可能
+// 优先解析到 ::1，后端重启窗口里会表现为偶发 ECONNREFUSED。
+const BACKEND = "http://127.0.0.1:8000";
 
 // 保持 Host 头为浏览器原始的 localhost:9000，让后端生成的绝对地址继续走 Vite 代理。
 const backendProxy = {
@@ -21,6 +23,9 @@ export default defineConfig({
   },
   server: {
     port: 9000,
+    // 端口错位会让 preview.localhost、FastAPI capability 和实际前端互相指向不同实例。
+    // 被占用时直接失败，绝不能静默降级到 9001。
+    strictPort: true,
     proxy: {
       // 不 rewrite path：/api/sessions → http://localhost:8000/api/sessions
       "/api": backendProxy,

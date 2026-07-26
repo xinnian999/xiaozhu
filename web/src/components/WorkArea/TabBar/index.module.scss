@@ -182,20 +182,6 @@
         color: var(--color-text-dim);
         min-width: 0;
 
-        .urlBrand {
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          width: 14px;
-          height: 14px;
-          background: var(--color-text);
-          color: var(--color-bg);
-          border-radius: 2px;
-          font-size: 9px;
-          font-weight: $fw-bold;
-          flex-shrink: 0;
-        }
-
         .urlPath {
           @include truncate;
           flex: 1;
@@ -322,10 +308,6 @@
       .urlBar {
         .urlIconBtn:nth-child(1),
         .urlIconBtn:nth-child(2) {
-          display: none;
-        }
-
-        .urlInput .urlBrand {
           display: none;
         }
       }

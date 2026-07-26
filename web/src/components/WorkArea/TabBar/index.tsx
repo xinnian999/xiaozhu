@@ -172,7 +172,6 @@ export default function TabBar() {
               </button>
 
               <div className={styles.urlInput}>
-                <span className={styles.urlBrand} aria-hidden>vb</span>
                 {/* 直接显示当前路由路径（默认 '/'），不再拼假域名 / 版本号 */}
                 <span className={styles.urlPath}>{previewPath || '/'}</span>
               </div>

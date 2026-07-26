@@ -7,7 +7,7 @@ export function formatDuration(durationMs: number): string {
   const totalSeconds = Math.max(0, Math.ceil(durationMs / 1000))
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = totalSeconds % 60
-  return minutes > 0 ? `${minutes}分${seconds}秒` : `${seconds}秒`
+  return minutes > 0 ? `${minutes}m${seconds}s` : `${seconds}s`
 }
 
 /** 类似 git 短哈希的伪 ID（仅展示用） */

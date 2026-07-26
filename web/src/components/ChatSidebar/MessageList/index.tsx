@@ -208,7 +208,7 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
             className={styles.duration}
             title="从本轮需求发出到最后一项结果完成"
           >
-            本轮耗时 {formatDuration(roundDurationMs)}
+            耗时 {formatDuration(roundDurationMs)}
           </span>
           {canRetry && (
             <button

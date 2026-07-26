@@ -328,7 +328,9 @@ function CheckBuildScreenshot({ screenshot }: { screenshot: PreviewScreenshot })
         >
           <img
             src={src}
-            className={styles.toolScreenshotImage}
+            className={`${styles.toolScreenshotImage} ${
+              device === 'mobile' ? styles.toolScreenshotImageMobile : ''
+            }`}
             alt="截图自检记录"
           />
           <span className={styles.toolScreenshotCaption}>

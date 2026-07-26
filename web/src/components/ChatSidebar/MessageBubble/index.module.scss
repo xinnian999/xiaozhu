@@ -474,9 +474,16 @@
         display: block;
         width: 100%;
         height: 148px;
-        object-fit: cover;
-        object-position: top;
+        // 自检缩略图必须展示完整画布。cover 会把竖向 H5 截图放大裁切，
+        // 深色页面最终只剩一块黑色背景，误导用户以为截图失败。
+        object-fit: contain;
+        object-position: center;
         background: var(--color-bg-mute);
+
+        // H5 截图纵横比很高，多给一些垂直空间，按钮和正文仍能在缩略图中辨认。
+        &.toolScreenshotImageMobile {
+          height: 220px;
+        }
       }
 
       .toolScreenshotCaption {
@@ -989,6 +996,10 @@
       .toolScreenshotButton {
         .toolScreenshotImage {
           height: 136px;
+
+          &.toolScreenshotImageMobile {
+            height: 200px;
+          }
         }
       }
     }

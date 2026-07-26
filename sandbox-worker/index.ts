@@ -14,7 +14,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import path from 'node:path'
 import type { Readable } from 'node:stream'
 
-import { PREVIEW_CAPABILITY_PATH_PATTERN_SOURCE } from './preview-path.js'
+import { PREVIEW_CAPABILITY_PATH_PATTERN_SOURCE } from './preview-path.ts'
 
 const port = Number.parseInt(process.env.SANDBOX_PORT || '8010', 10)
 const hostname = process.env.SANDBOX_HOST || '0.0.0.0'

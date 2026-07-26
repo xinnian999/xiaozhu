@@ -706,7 +706,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           }
         }
         if (lastUserIdx === -1) return sess
-        return { ...sess, messages: sess.messages.slice(0, lastUserIdx + 1) }
+        const messages = sess.messages.slice(0, lastUserIdx + 1)
+        // 重新生成是一轮新的执行，耗时应从点击按钮重新开始计算，而不是沿用用户
+        // 最初发送这条需求的时间。消息内容和后端主键不变，只更新当前页面的计时锚点。
+        messages[lastUserIdx] = {
+          ...messages[lastUserIdx],
+          createdAt: Date.now(),
+        }
+        return { ...sess, messages }
       }),
     }))
   },

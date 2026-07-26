@@ -2,14 +2,12 @@
 // 通用格式化工具
 // ============================================
 
-/** 格式化时间为 11:13 AM 风格 */
-export function formatClock(ts: number): string {
-  const d = new Date(ts)
-  let h = d.getHours()
-  const m = d.getMinutes()
-  const ampm = h >= 12 ? 'PM' : 'AM'
-  h = h % 12 || 12
-  return `${h}:${m.toString().padStart(2, '0')} ${ampm}`
+/** 把毫秒时长格式化成适合生成记录展示的中文分秒。 */
+export function formatDuration(durationMs: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(durationMs / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return minutes > 0 ? `${minutes}分${seconds}秒` : `${seconds}秒`
 }
 
 /** 类似 git 短哈希的伪 ID（仅展示用） */

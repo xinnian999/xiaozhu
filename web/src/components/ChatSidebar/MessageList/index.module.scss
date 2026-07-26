@@ -19,14 +19,14 @@
   min-height: 28px;
   margin-bottom: $space-4;
 
-  .time {
+  .duration {
     font-family: var(--font-mono);
     font-size: $fs-10;
     color: var(--color-text-faint);
   }
 }
 
-// 「重新生成」和时间同行，推到会话底栏右侧。
+// 「重新生成」和本轮总耗时同行，推到会话底栏右侧。
 .retryBtn {
   @include button-reset;
   display: inline-flex;

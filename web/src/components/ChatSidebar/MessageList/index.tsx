@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { MessageSquare, RotateCcw, PlayCircle } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
-import { formatClock } from '@/lib/format'
+import { formatDuration } from '@/lib/format'
 import type { Message } from '@/types/project'
 import MessageBubble from '../MessageBubble'
 import styles from './index.module.scss'
@@ -108,16 +108,22 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
     )
   }
 
-  // 底部操作栏使用最后一条文本消息的时间。跳过工具卡 / 版本卡，因为它们只是
-  // 同一轮回复的过程节点，不应该把时间锚点改成工具执行时刻。
-  let lastTextIndex = -1
+  // 本轮耗时从最新用户消息开始，截止到最后一张回复、工具或版本卡。版本命名、
+  // 构建与截图都属于完整生成链路，因此不能只拿最后一条文本消息作为终点。
+  let lastUserIndex = -1
   for (let i = messages.length - 1; i >= 0; i--) {
-    const k = messages[i].kind
-    if (!k || k === 'text') {
-      lastTextIndex = i
+    if (messages[i].role === 'user') {
+      lastUserIndex = i
       break
     }
   }
+  const roundCompleted = lastUserIndex >= 0 && messages.length > lastUserIndex + 1
+  const roundDurationMs = roundCompleted
+    ? Math.max(
+        0,
+        messages[messages.length - 1].createdAt - messages[lastUserIndex].createdAt,
+      )
+    : 0
 
   // 是否有可重试的内容：至少有一条用户消息（手动编辑只追加版本卡、不产生用户消息）。
   const hasUserMessage = messages.some((m) => m.role === 'user')
@@ -195,15 +201,15 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
         </div>
       )}
 
-      {/* 时间和重新生成是同一个会话级底栏，始终位于完整时间线最下面。 */}
-      {!isStreaming && lastTextIndex >= 0 && (
+      {/* 本轮总耗时和重新生成是同一个会话级底栏，始终位于完整时间线最下面。 */}
+      {!isStreaming && roundCompleted && (
         <div className={styles.timelineMeta}>
-          <time
-            className={styles.time}
-            dateTime={new Date(messages[lastTextIndex].createdAt).toISOString()}
+          <span
+            className={styles.duration}
+            title="从本轮需求发出到最后一项结果完成"
           >
-            {formatClock(messages[lastTextIndex].createdAt)}
-          </time>
+            本轮耗时 {formatDuration(roundDurationMs)}
+          </span>
           {canRetry && (
             <button
               type="button"

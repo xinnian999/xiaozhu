@@ -1,0 +1,217 @@
+@use '@/styles/variables' as *;
+@use '@/styles/common' as *;
+
+.menu {
+  position: relative;
+
+  .trigger {
+    @include button-reset;
+    display: flex;
+    align-items: center;
+    gap: $space-2;
+    padding: $space-1 $space-3;
+    border-radius: $radius-md;
+    color: var(--color-text-dim);
+    font-size: $fs-13;
+    font-weight: $fw-medium;
+    transition: color $dur-base $ease-out, background $dur-base $ease-out;
+
+    &:hover,
+    &.triggerOpen {
+      color: var(--color-text);
+      background: var(--color-bg-hover);
+    }
+
+    .triggerIcon {
+      flex-shrink: 0;
+      color: var(--color-text-mute);
+    }
+
+    .label {
+      @include truncate;
+    }
+
+    .caret {
+      flex-shrink: 0;
+      color: var(--color-text-mute);
+      transition: transform $dur-base $ease-out;
+    }
+
+    &.triggerOpen .caret {
+      transform: rotate(180deg);
+    }
+  }
+
+  .panel {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 50;
+    width: min(360px, 92vw);
+    padding: $space-2;
+    background: var(--color-bg-elev);
+    border: 1px solid var(--color-border);
+    border-radius: $radius-lg;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+    animation: fade-up 0.15s $ease-out;
+
+    .panelTitle {
+      margin: 0;
+      padding: $space-2 $space-3 0;
+      font-family: var(--font-mono);
+      font-size: $fs-10;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--color-text-faint);
+    }
+
+    .panelDesc {
+      margin: 0;
+      padding: $space-1 $space-3 $space-2;
+      font-size: $fs-10;
+      color: var(--color-text-mute);
+      line-height: $lh-snug;
+    }
+
+    // 加载中 / 空态提示
+    .hint {
+      margin: 0;
+      padding: $space-3;
+      text-align: center;
+      font-size: $fs-12;
+      color: var(--color-text-mute);
+    }
+
+    .list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      max-height: min(420px, 60vh);
+      overflow-y: auto;
+      @include hide-scrollbar;
+
+      .item {
+        display: flex;
+        align-items: center;
+        gap: $space-2;
+        padding: $space-2 $space-3;
+        border-radius: $radius-md;
+        transition: background $dur-base $ease-out;
+
+        &:hover {
+          background: var(--color-bg-hover);
+        }
+
+        &.itemCurrent {
+          background: var(--color-bg-soft);
+        }
+
+        // 版本号标签 vN
+        .versionTag {
+          flex-shrink: 0;
+          font-family: var(--font-mono);
+          font-size: $fs-10;
+          font-weight: $fw-semibold;
+          letter-spacing: 0.05em;
+          padding: 2px $space-2;
+          background: var(--color-bg-elev);
+          color: var(--color-text-dim);
+          border-radius: $radius-xs;
+        }
+
+        .itemMain {
+          flex: 1;
+          min-width: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+        }
+
+        .itemName {
+          font-size: $fs-13;
+          color: var(--color-text);
+          @include truncate;
+        }
+
+        .itemMeta {
+          font-size: $fs-10;
+          color: var(--color-text-mute);
+        }
+
+        // 当前 tip 标记
+        .currentBadge {
+          flex-shrink: 0;
+          display: flex;
+          align-items: center;
+          gap: 3px;
+          font-size: $fs-10;
+          font-weight: $fw-medium;
+          color: var(--color-accent);
+        }
+
+        // 回滚按钮
+        .restoreBtn {
+          @include button-reset;
+          flex-shrink: 0;
+          display: flex;
+          align-items: center;
+          gap: 3px;
+          padding: $space-1 $space-2;
+          border-radius: $radius-sm;
+          border: 1px solid var(--color-border);
+          color: var(--color-text-dim);
+          font-size: $fs-10;
+          font-weight: $fw-medium;
+          transition: background $dur-base $ease-out, color $dur-base $ease-out,
+            border-color $dur-base $ease-out;
+
+          &:hover:not(:disabled) {
+            background: var(--color-bg-hover);
+            color: var(--color-text);
+            border-color: var(--color-accent);
+          }
+
+          &:disabled {
+            opacity: 0.5;
+            cursor: default;
+          }
+
+          .spin {
+            animation: vm-spin 0.8s linear infinite;
+          }
+        }
+      }
+    }
+  }
+
+  @include light {
+    .panel {
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.12);
+    }
+  }
+}
+
+@keyframes vm-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+// ── 响应式（移动端）─────────────────────────────────────────────
+// 版本菜单已下沉到顶栏第二行（subbar），空间充足：保留完整「版本历史」文字。
+// 触发器在第二行偏左，面板改为右对齐向左展开，避免 320px 宽面板顶出屏幕右缘被裁切。
+@include mobile {
+  .menu {
+    .trigger .label {
+      font-size: $fs-12;
+    }
+
+    .panel {
+      left: auto;
+      right: 0;
+      transform: none;
+      width: min(320px, calc(100vw - 24px));
+    }
+  }
+}

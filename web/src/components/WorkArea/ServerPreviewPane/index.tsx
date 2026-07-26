@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
-import { AlertTriangle } from 'lucide-react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { AlertTriangle, LoaderCircle } from 'lucide-react'
 import { buildServerPreview, postBuildResult, uploadPreviewScreenshot } from '@/lib/api'
 import { useSessionStore } from '@/store/session'
 import { useUIStore, type PreviewDevice } from '@/store/ui'
@@ -78,6 +78,8 @@ export default function ServerPreviewPane() {
   const setPreviewNav = useUIStore((s) => s.setPreviewNav)
   const resetPreviewNav = useUIStore((s) => s.resetPreviewNav)
   const reloadPreview = useUIStore((s) => s.reloadPreview)
+  // 记录真正发出 ready 的 iframe 地址；新 URL 挂载时会自然回到加载态。
+  const [readyIframeSrc, setReadyIframeSrc] = useState<string | null>(null)
 
   const rootRef = useRef<HTMLDivElement | null>(null)
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
@@ -622,6 +624,7 @@ export default function ServerPreviewPane() {
         clearIframeReadyTimer()
         iframeReadyAttemptsRef.current = 0
         iframeRecoveryBuildAttemptedRef.current = false
+        setReadyIframeSrc(iframeRef.current?.src ?? null)
         if (['localhost', '127.0.0.1', '::1'].includes(window.location.hostname)) {
           sessionStorage.removeItem(`xiaozhu:preview-recovery:${activeId ?? ''}`)
           const recoveryUrl = new URL(window.location.href)
@@ -754,6 +757,8 @@ export default function ServerPreviewPane() {
   ])
 
   const handleIframeLoad = useCallback(() => {
+    // 页面导航完成后仍可能要等待 React 挂载和首屏绘制，先保留加载层。
+    setReadyIframeSrc(null)
     requestIframeReady()
     armIframeReadyRecovery()
   }, [armIframeReadyRecovery, requestIframeReady])
@@ -790,6 +795,12 @@ export default function ServerPreviewPane() {
     iframeSrc
     && new URL(iframeSrc).origin !== window.location.origin,
   )
+  const isIframeReady = Boolean(iframeSrc && readyIframeSrc === iframeSrc)
+  useEffect(() => {
+    if (!showIframe) return
+    // 开发热更新可能保留旧 iframe，不再触发 load；主动握手可避免加载层滞留。
+    requestIframeReady()
+  }, [iframeSrc, requestIframeReady, showIframe])
   return (
     <div
       ref={rootRef}
@@ -817,6 +828,26 @@ export default function ServerPreviewPane() {
                 ].join(' ')}
                 referrerPolicy="no-referrer"
               />
+            )}
+            {showIframe && (
+              <div
+                className={`${styles.previewLoading} ${
+                  isIframeReady ? styles.previewLoadingHidden : ''
+                }`}
+                role="status"
+                aria-live="polite"
+                aria-hidden={isIframeReady}
+              >
+                <div className={styles.loaderContent}>
+                  <LoaderCircle
+                    className={styles.loaderIcon}
+                    size={34}
+                    strokeWidth={1.8}
+                    aria-hidden
+                  />
+                  <p>正在加载预览…</p>
+                </div>
+              </div>
             )}
             {!showIframe && (
               <div className={styles.overlay}>

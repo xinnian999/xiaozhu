@@ -302,6 +302,15 @@ class CheckBuildIdempotencyTests(IsolatedAsyncioTestCase):
                 "app.agents.loop.snapshot_current_files",
                 new=AsyncMock(return_value=None),
             ),
+            patch(
+                "app.agents.loop.name_next_generated_version",
+                new=AsyncMock(
+                    return_value=SimpleNamespace(
+                        version_name="测试版本",
+                        project_name=None,
+                    )
+                ),
+            ),
             patch("app.agents.loop.build_store.arm") as arm,
             patch("app.agents.loop.build_store.disarm"),
             patch("app.agents.loop.build_store.report"),

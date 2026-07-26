@@ -67,6 +67,7 @@ export default function ChatSidebar() {
   const session = useSessionStore((s) => s.activeSession())
   const activeId = useSessionStore((s) => s.activeId)
   const createNew = useSessionStore((s) => s.createNew)
+  const applySessionTitle = useSessionStore((s) => s.applySessionTitle)
   const appendMessage = useSessionStore((s) => s.appendMessage)
   const appendReasoningDelta = useSessionStore((s) => s.appendReasoningDelta)
   const finalizeReasoning = useSessionStore((s) => s.finalizeReasoning)
@@ -300,7 +301,12 @@ export default function ChatSidebar() {
           commitStreaming()
           accumulated = ''
         }
-        appendMessage(makeVersionCard(event.version_id, event.seq))
+        if (event.project_name) {
+          applySessionTitle(ownerSessionId, event.project_name)
+        }
+        appendMessage(
+          makeVersionCard(event.version_id, event.seq, event.name ?? undefined),
+        )
       } else if (event.type === 'error') {
         // 先把本轮已累积的叙述固化成气泡（别丢了 AI 报错前说的话），
         // 再在对话流里就地插一张错误卡 —— 比一闪而过的 toast 更醒目、可回看。

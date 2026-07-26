@@ -99,7 +99,13 @@ export type SSEEvent =
   | { type: 'tool_call'; name: string; args: object; id: string }
   // tool_result：某次工具调用执行完的结果（按 id 关联到对应工具卡，已截断）
   | { type: 'tool_result'; id: string; result: string; screenshot?: PreviewScreenshot | null }
-  | { type: 'version'; version_id: number; seq: number }
+  | {
+      type: 'version'
+      version_id: number
+      seq: number
+      name?: string | null
+      project_name?: string | null
+    }
   | { type: 'error'; message: string }
   | { type: 'done' }
   // ask_user 触发 interrupt() 暂停本轮：这次 SSE 流到此正常结束（不是真的跑完），

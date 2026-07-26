@@ -79,6 +79,8 @@ type SessionState = {
   createNew: (title?: string) => Promise<ChatSession>
   /** 重命名会话：PATCH 后端，成功后更新本地列表里的 title */
   renameSession: (id: string, title: string) => Promise<void>
+  /** 后端已完成 AI 命名后，只同步本地标题，不重复发送 PATCH。 */
+  applySessionTitle: (id: string, title: string) => void
   /** 删除会话：DELETE 后端，成功后从列表移除；删的若是当前会话则回到空态首屏 */
   deleteSession: (id: string) => Promise<void>
   switchTo: (id: string) => Promise<void>
@@ -278,6 +280,7 @@ function fromApiMessage(m: ApiMessage): Message {
       kind: 'version',
       versionId: typeof args.version_id === 'number' ? args.version_id : undefined,
       versionSeq: typeof args.seq === 'number' ? args.seq : undefined,
+      versionName: typeof args.name === 'string' ? args.name : undefined,
     }
   }
   return base
@@ -315,8 +318,13 @@ export function makeReasoningCard(
 
 /** 构造一张「版本卡」消息（kind='version'）。AI 流 / 手动保存 / 回滚 三处共用，
  *  让对话时间线在每次产生新版本时插入一张带回滚按钮的卡片。 */
-export function makeVersionCard(versionId: number, seq: number): Message {
-  return makeMessage('assistant', '', { kind: 'version', versionId, versionSeq: seq })
+export function makeVersionCard(versionId: number, seq: number, name?: string): Message {
+  return makeMessage('assistant', '', {
+    kind: 'version',
+    versionId,
+    versionSeq: seq,
+    versionName: name,
+  })
 }
 
 /** 构造一张「错误卡」消息（kind='error'）。AI 报错（如模型未配 api_key、超长截断、超轮）时，
@@ -462,6 +470,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       sessions: s.sessions.map((sess) =>
         sess.id === id ? { ...sess, title: api.title ?? sess.title } : sess,
       ),
+    }))
+  },
+
+  applySessionTitle: (id, title) => {
+    set((s) => ({
+      sessions: s.sessions.map((session) => (
+        session.id === id ? { ...session, title } : session
+      )),
     }))
   },
 
@@ -990,7 +1006,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     get().discardDrafts() // 清空草稿，按钮自动消失
     // 取最新版本（seq 最大 = 刚建的那个）追加一张版本卡到对话流
     const vers = await listVersions(id)
-    if (vers[0]) get().appendMessage(makeVersionCard(vers[0].id, vers[0].seq))
+    if (vers[0]) {
+      get().appendMessage(
+        makeVersionCard(vers[0].id, vers[0].seq, vers[0].summary ?? undefined),
+      )
+    }
   },
 
   rollbackToVersion: async (versionId) => {
@@ -1001,7 +1021,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     get().replaceFiles(files)
     // 回滚也产生新版本，同样追加一张版本卡
     const vers = await listVersions(id)
-    if (vers[0]) get().appendMessage(makeVersionCard(vers[0].id, vers[0].seq))
+    if (vers[0]) {
+      get().appendMessage(
+        makeVersionCard(vers[0].id, vers[0].seq, vers[0].summary ?? undefined),
+      )
+    }
   },
 
   activeSession: () => {

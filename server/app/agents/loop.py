@@ -37,6 +37,7 @@ from app.agents.tools import (
     build_tools,
     project_files_fingerprint,
 )
+from app.agents.version_naming import name_next_generated_version
 from app.checkpointer import get_checkpointer
 from app.llm import build_llm, models_by_id
 from app.model_providers import (
@@ -1526,11 +1527,29 @@ async def _consume(
             await _save_message(db, db_lock, session_id, "assistant", final_assistant_text)
 
         if wrote_files:
+            names = await name_next_generated_version(
+                db,
+                session_id=session_id,
+                model=model,
+                user_request=summary_text,
+                assistant_result=final_assistant_text,
+            )
             version = await snapshot_current_files(
-                db, session_id, summary=summary_text[:100]
+                db,
+                session_id,
+                summary=names.version_name,
+                project_title=names.project_name,
             )
             if version is not None:
-                yield sse({"type": "version", "version_id": version.id, "seq": version.seq})
+                event = {
+                    "type": "version",
+                    "version_id": version.id,
+                    "seq": version.seq,
+                    "name": version.summary,
+                }
+                if version.seq == 1 and names.project_name:
+                    event["project_name"] = names.project_name
+                yield sse(event)
 
         if not truncated:
             await _charge_user(db, user_id, model)

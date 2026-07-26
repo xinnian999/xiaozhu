@@ -69,6 +69,8 @@ export type Message = {
   versionId?: number
   /** kind === 'version' 时使用：版本序号（卡片显示 vN） */
   versionSeq?: number
+  /** kind === 'version' 时使用：AI 为这一版生成的简短名称。 */
+  versionName?: string
   /** 该消息产出的版本（仅 assistant 消息有） */
   producedVersionId?: string
   /** 用户随消息发送的图片（data URL 列表），用于在气泡里展示缩略图。仅 user 消息有 */

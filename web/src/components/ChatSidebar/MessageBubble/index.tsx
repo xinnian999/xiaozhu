@@ -898,7 +898,10 @@ function VersionCard({ message }: { message: Message }) {
         <GitCommit size={13} />
       </span>
       <span className={styles.versionCardLabel}>
-        已生成版本 <b className={styles.versionCardSeq}>v{seq ?? '?'}</b>
+        <b className={styles.versionCardSeq}>v{seq ?? '?'}</b>
+        {message.versionName && (
+          <span className={styles.versionCardName}> · {message.versionName}</span>
+        )}
       </span>
       {isCurrent ? (
         // 当前版本：展示「当前」标记，不提供回滚（回滚到自己没意义）

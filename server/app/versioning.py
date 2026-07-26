@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.file import File
 from app.models.message import Message
+from app.models.session import Session
 from app.models.version import Version, VersionFile
 
 
@@ -18,6 +19,7 @@ async def snapshot_current_files(
     db: AsyncSession,
     session_id: str,
     summary: str | None = None,
+    project_title: str | None = None,
 ) -> Version | None:
     """把 session 当前所有文件快照成一个新版本，返回新建的 Version；没文件则返回 None。
 
@@ -43,9 +45,18 @@ async def snapshot_current_files(
     # 3. 先建版本行，flush 把 INSERT 发到数据库、拿回自增主键 version.id，
     #    但事务尚未提交 —— 下一步的 version_files 需要这个 id 当外键。
     #    flush ≠ commit：flush 只是「把当前改动同步给数据库连接」，commit 才是「真正落盘、结束事务」。
-    version = Version(session_id=session_id, seq=next_seq, summary=summary)
+    # Agent 命名异常时 summary 可能为空；仍给每一版稳定名称，避免版本列表出现“无描述”。
+    version_name = summary or ("初始版本" if next_seq == 1 else "功能迭代")
+    version = Version(session_id=session_id, seq=next_seq, summary=version_name)
     db.add(version)
     await db.flush()
+
+    # v1 首次落库时才允许 AI 接管项目名。后续版本不会反复改项目标题；用户手动重命名
+    # 后也不会被下一轮生成覆盖。
+    if next_seq == 1 and project_title:
+        session = await db.get(Session, session_id)
+        if session is not None:
+            session.title = project_title
 
     # 4. 把每个文件复制进 version_files，外键指向刚建的版本。
     #    add_all 批量加入，比逐个 add 更省事。
@@ -63,7 +74,11 @@ async def snapshot_current_files(
         role="assistant",
         text="",
         kind="version",
-        tool_args={"version_id": version.id, "seq": version.seq},
+        tool_args={
+            "version_id": version.id,
+            "seq": version.seq,
+            "name": version.summary,
+        },
     ))
 
     # 5. 一次 commit 把「版本 + 所有文件 + 版本卡消息」作为一个事务整体落库。

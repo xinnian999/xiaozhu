@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import {
   getToken,
   setToken,
+  ApiRequestError,
   login as apiLogin,
   register as apiRegister,
   getMe,
@@ -50,9 +51,12 @@ export const useAuthStore = create<AuthState>((set) => ({
       // 有 token：拉 /me 验证它是否仍有效（可能已过期/被改）
       const user = await getMe()
       set({ user, ready: true })
-    } catch {
-      // token 失效：清掉，回到未登录态（/me 在静默名单里，不会触发自动跳转）
-      setToken(null)
+    } catch (error) {
+      // 只有后端明确返回 401 才说明 token 真失效。开发服务重启时 API 可能短暂
+      // 连接不上；这种网络错误保留 token，下次刷新即可恢复，不能把用户误登出。
+      if (error instanceof ApiRequestError && error.status === 401) {
+        setToken(null)
+      }
       set({ user: null, ready: true })
     }
   },

@@ -19,6 +19,17 @@ export function setToken(token: string | null): void {
   else localStorage.removeItem(TOKEN_KEY)
 }
 
+/** 保留 HTTP 状态码，调用方才能区分“凭证失效”和开发服务短暂未就绪。 */
+export class ApiRequestError extends Error {
+  status?: number
+
+  constructor(message: string, status?: number) {
+    super(message)
+    this.name = 'ApiRequestError'
+    this.status = status
+  }
+}
+
 /** 带上 Authorization 头（给原生 fetch 用：streamChat / postBuildResult 不走 axios）。 */
 function authHeaders(): Record<string, string> {
   const token = getToken()
@@ -70,7 +81,7 @@ http.interceptors.response.use(
 
     const detail = err.response?.data?.detail ?? err.message
     toast(`请求失败：${detail}`)
-    return Promise.reject(new Error(detail))
+    return Promise.reject(new ApiRequestError(String(detail), status))
   },
 )
 

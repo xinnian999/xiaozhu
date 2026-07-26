@@ -48,6 +48,13 @@ class VersionNamingParserTests(IsolatedAsyncioTestCase):
         self.assertIsNone(names.project_name)
         self.assertEqual(names.version_name, "增加文章搜索")
 
+    def test_rejects_product_description_as_version_name(self):
+        with self.assertRaisesRegex(ValueError, "动作导向"):
+            parse_generated_names(
+                '{"project_name":"极简计算器","version_name":"深色界面四则运算"}',
+                is_first_version=True,
+            )
+
     async def test_model_failure_uses_stable_first_version_fallback(self):
         db = SimpleNamespace(execute=AsyncMock(return_value=_ScalarResult(None)))
         with patch(
@@ -62,7 +69,7 @@ class VersionNamingParserTests(IsolatedAsyncioTestCase):
                 assistant_result="博客首页已经完成",
             )
 
-        self.assertEqual(names.version_name, "初始版本")
+        self.assertEqual(names.version_name, "完成核心功能")
         self.assertIsNone(names.project_name)
 
     async def test_first_version_uses_selected_model_for_ai_names(self):

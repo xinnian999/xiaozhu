@@ -88,7 +88,8 @@ RUN node ./templates/vite-react/node_modules/vite/bin/vite.js --version
 COPY server/alembic ./alembic
 COPY server/alembic.ini ./alembic.ini
 COPY server/scripts ./scripts
-COPY --from=worker-builder /app/sandbox-worker/dist/index.js ./sandbox-worker/index.js
+# Worker 是 ESM 多文件产物；入口会继续 import 同目录模块，必须整体复制 dist。
+COPY --from=worker-builder /app/sandbox-worker/dist/ ./sandbox-worker/
 COPY scripts/docker-entrypoint.sh ./docker-entrypoint.sh
 RUN chmod +x ./docker-entrypoint.sh
 

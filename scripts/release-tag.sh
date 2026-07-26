@@ -18,9 +18,9 @@ if [ -z "$VERSION" ]; then
 fi
 
 case "$VERSION" in
-  *[!0-9A-Za-z._-]* | -* | *-)
+  *[!0-9A-Za-z._-]* | [!0-9]* | *-)
     echo "版本格式无效：$VERSION"
-    echo "只允许字母、数字、点、下划线和短横线，且不能以短横线开头或结尾。"
+    echo "版本必须以数字开头，只允许字母、数字、点、下划线和短横线，且不能以短横线结尾。"
     exit 1
     ;;
 esac
@@ -61,4 +61,4 @@ git push origin "$TAG"
 
 echo "标签已推送。ACR 将构建镜像："
 echo "crpi-a7p27yxlrmekg1a3.cn-beijing.personal.cr.aliyuncs.com/elin/xiaozhu:$VERSION"
-echo "镜像构建成功后，将生产环境 XIAOZHU_IMAGE_TAG 更新为 $VERSION 再重建容器。"
+echo "镜像构建成功后，ACR webhook 会自动更新生产环境并完成健康检查。"

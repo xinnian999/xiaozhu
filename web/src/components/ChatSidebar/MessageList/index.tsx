@@ -34,7 +34,17 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
   // 避开预览区展开动画 + 布局抖动；之后的新消息才即时 smooth 平滑滚动。
   const didInitScrollRef = useRef<string | null>(null)
 
-  const messages = session?.messages ?? []
+  // 新版后端不会再保存无正文的思考卡；这里继续过滤历史遗留的 fallback / 空消息，
+  // 保证只有模型真实返回了推理文本时，时间线才展示“思考过程”。
+  const messages = (session?.messages ?? []).filter(
+    (message) => (
+      message.kind !== 'reasoning' ||
+      (
+        message.reasoningFallback !== true &&
+        (message.reasoningStreaming || message.text.trim().length > 0)
+      )
+    ),
+  )
   const isStreaming = session?.isStreaming ?? false
   const awaitingAnswer = session?.awaitingAnswer ?? false
   // 最新一轮被中断、可从断点续跑：据此在对话流末尾显示「继续生成」按钮

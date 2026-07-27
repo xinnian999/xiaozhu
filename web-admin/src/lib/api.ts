@@ -263,11 +263,13 @@ export type ModelCapabilityTestResult = {
 }
 
 /**
- * 后端单次模型调用最多等待 30 秒；“关闭思考”会先开后关、连续调用两次。
- * 这里给网络与序列化留少量余量，避免全局 10 秒超时把慢推理误报为能力失败。
+ * 与后端各能力的真实等待窗口对齐，并额外留 5 秒网络/序列化余量。
+ * 思考组合测试会依次验证开启和关闭，两次调用各最多等待 90 秒。
  */
 export function modelCapabilityTestTimeout(capability: ModelTestCapability) {
-  return capability === 'thinking' ? 65_000 : 35_000
+  if (capability === 'thinking') return 185_000
+  if (capability === 'connectivity' || capability === 'tools') return 65_000
+  return 35_000
 }
 
 export async function listModels() {

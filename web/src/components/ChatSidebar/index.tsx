@@ -241,6 +241,12 @@ export default function ChatSidebar() {
         appendReasoningDelta(event.id, event.text)
       } else if (event.type === 'reasoning') {
         if (!showReasoning) continue
+        // 兼容旧后端或中转只返回 token / 空区块的情况：没有真实推理正文就不展示卡片。
+        // 若之前收到过增量帧，discard 同时清掉那张尚未完成的临时卡。
+        if (event.fallback || !event.text.trim()) {
+          discardReasoning(event.id)
+          continue
+        }
         // 思考过程是独立的时间线卡片。若前一轮模型已输出过场文字，先固化正文，
         // 再插入下一次模型调用的思考卡，保持「正文 → 思考 → 工具」的真实顺序。
         if (accumulated) {

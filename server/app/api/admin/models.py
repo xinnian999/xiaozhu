@@ -51,8 +51,42 @@ from ._utils import mask_secret
 
 router = APIRouter(prefix="/models", tags=["admin-models"])
 
-# 连通性探测超时（秒）：避免中转无响应时一直挂起。
+# 识图等普通能力探测超时（秒）：避免中转无响应时一直挂起。
 _TEST_TIMEOUT_SEC = 30
+# 全量并发时部分慢模型连极简回复也会偶发超过 30 秒。
+_CONNECTIVITY_TEST_TIMEOUT_SEC = 60
+# 思考模型要生成隐藏推理后才返回完整响应，单独给出更宽松的窗口。
+_THINKING_TEST_TIMEOUT_SEC = 90
+# 全量探测最多并发两个模型，较慢模型的强制工具调用给出额外抖动余量。
+_TOOL_TEST_TIMEOUT_SEC = 60
+_THINKING_PROBE_MAX_TOKENS = 512
+_DEFAULT_THINKING_PROBE = (
+    "请先进行简短推理，只回答最终整数："
+    "若 x + 2y = 19，2x - y = 8，求 x + y。"
+)
+_ANTHROPIC_THINKING_PROBE = (
+    "求使 n! 的十进制末尾恰好有 1000 个零的最小正整数 n。"
+    "请认真推理，只回答最终整数。"
+)
+
+
+def _thinking_probe_output_limit(provider: str) -> dict[str, int]:
+    """返回各适配器在单次调用时接受的输出上限字段。"""
+    if provider == "google":
+        # ChatGoogleGenerativeAI 仅在模型构造时把 max_tokens 当作别名；
+        # ainvoke() 的运行时配置必须使用 Google 原生字段名。
+        return {"max_output_tokens": _THINKING_PROBE_MAX_TOKENS}
+    return {"max_tokens": _THINKING_PROBE_MAX_TOKENS}
+
+
+def _capability_timeout_sec(capability: ModelTestCapability) -> int:
+    if capability == "connectivity":
+        return _CONNECTIVITY_TEST_TIMEOUT_SEC
+    if capability == "thinking":
+        return _THINKING_TEST_TIMEOUT_SEC
+    if capability == "tools":
+        return _TOOL_TEST_TIMEOUT_SEC
+    return _TEST_TIMEOUT_SEC
 
 
 def _to_read(model: LlmModel) -> LlmModelAdminRead:
@@ -98,21 +132,49 @@ def _solid_png_data_url(red: int, green: int, blue: int) -> str:
     return "data:image/png;base64," + base64.b64encode(png).decode()
 
 
-async def _thinking_probe(model_id: str, *, enabled: bool) -> ReasoningObservation:
+async def _thinking_probe(
+    model_id: str,
+    *,
+    provider: str,
+    enabled: bool,
+) -> ReasoningObservation:
     model = llm.build_llm(model_id, thinking=enabled)
+    # Claude 的 adaptive thinking 会跳过过于简单的问题，保留较强探针；
+    # Qwen 等显式思考模型用短题即可验证，避免无意义地产生数千 token。
+    prompt = (
+        _ANTHROPIC_THINKING_PROBE
+        if provider == "anthropic"
+        else _DEFAULT_THINKING_PROBE
+    )
     response = await _invoke_with_timeout(
         model,
-        [HumanMessage(content="请认真计算 137 × 29，只回答最终数字。")],
+        [HumanMessage(content=prompt)],
+        timeout_sec=_THINKING_TEST_TIMEOUT_SEC,
+        **{
+            **_thinking_probe_output_limit(provider),
+            # Claude adaptive thinking 在 high 下可能直接回答而不产生 thinking
+            # block；能力探测开启态临时用 max，提高信号稳定性。关闭态仍沿用
+            # build_llm 里的 high，满足 Opus 对 disabled 的参数约束。
+            **(
+                {"output_config": {"effort": "max"}}
+                if provider == "anthropic" and enabled
+                else {}
+            ),
+        },
     )
     return reasoning_observation(response)
 
 
 async def _invoke_with_timeout(
-    llm_instance: object, messages: list[HumanMessage], **kwargs: object
+    llm_instance: object,
+    messages: list[HumanMessage],
+    *,
+    timeout_sec: float = _TEST_TIMEOUT_SEC,
+    **kwargs: object,
 ):
     return await asyncio.wait_for(
         llm_instance.ainvoke(messages, **kwargs),  # type: ignore[attr-defined]
-        timeout=_TEST_TIMEOUT_SEC,
+        timeout=timeout_sec,
     )
 
 
@@ -383,7 +445,7 @@ async def test_model(
                     ),
                 ]
             ),
-            timeout=_TEST_TIMEOUT_SEC,
+            timeout=_CONNECTIVITY_TEST_TIMEOUT_SEC,
         )
         latency_ms = int((time.perf_counter() - started) * 1000)
         text = _message_text(resp.content)
@@ -396,7 +458,7 @@ async def test_model(
     except TimeoutError:
         return LlmModelTestResult(
             ok=False,
-            message=f"请求超时（>{_TEST_TIMEOUT_SEC}s）",
+            message=f"请求超时（>{_CONNECTIVITY_TEST_TIMEOUT_SEC}s）",
         )
     except Exception as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
@@ -479,6 +541,7 @@ async def test_model_capability(
                         content='Reply with exactly the word "ok" without any other text.'
                     )
                 ],
+                timeout_sec=_CONNECTIVITY_TEST_TIMEOUT_SEC,
             )
             preview = _message_text(resp.content)
             preview = preview[:60] + ("…" if len(preview) > 60 else "")
@@ -554,7 +617,11 @@ async def test_model_capability(
             )
 
         if capability == "thinking":
-            enabled = await _thinking_probe(model_id, enabled=True)
+            enabled = await _thinking_probe(
+                model_id,
+                provider=model.provider,
+                enabled=True,
+            )
             details = [
                 LlmModelCapabilityTestDetail(
                     key="thinking",
@@ -623,24 +690,28 @@ async def test_model_capability(
                 )
                 return _capability_result(
                     capability,
-                    "unsupported",
-                    "支持思考，但无法验证关闭开关",
+                    "passed",
+                    "已检测到思考能力；当前模型没有可验证的关闭开关",
                     started,
                     details,
                 )
 
             try:
-                disabled = await _thinking_probe(model_id, enabled=False)
+                disabled = await _thinking_probe(
+                    model_id,
+                    provider=model.provider,
+                    enabled=False,
+                )
                 can_disable = not disabled.has_signal
                 details.append(
                     LlmModelCapabilityTestDetail(
                         key="disable_thinking",
                         label="关闭思考",
-                        status="passed" if can_disable else "failed",
+                        status="passed" if can_disable else "unsupported",
                         message=(
                             "关闭后推理信号已消失"
                             if can_disable
-                            else "关闭后仍检测到推理信号，开关可能被忽略"
+                            else "关闭参数未生效，按不可关闭记录"
                         ),
                     )
                 )
@@ -650,8 +721,11 @@ async def test_model_capability(
                     LlmModelCapabilityTestDetail(
                         key="disable_thinking",
                         label="关闭思考",
-                        status="failed",
-                        message=f"关闭验证超时（>{_TEST_TIMEOUT_SEC}s）",
+                        status="unsupported",
+                        message=(
+                            f"关闭验证超时（>{_THINKING_TEST_TIMEOUT_SEC}s），"
+                            "按不可关闭记录"
+                        ),
                     )
                 )
             except Exception as exc:
@@ -660,8 +734,11 @@ async def test_model_capability(
                     LlmModelCapabilityTestDetail(
                         key="disable_thinking",
                         label="关闭思考",
-                        status="failed",
-                        message=_test_error_message(exc, model),
+                        status="unsupported",
+                        message=(
+                            f"关闭验证不可用，按不可关闭记录："
+                            f"{_test_error_message(exc, model)}"
+                        ),
                     )
                 )
 
@@ -673,17 +750,16 @@ async def test_model_capability(
                 status="supported",
                 thinking_toggle=can_disable,
             )
-            status: ModelTestStatus = (
-                "failed"
-                if not can_disable
-                else "passed"
-                if enabled.content
-                else "unsupported"
-            )
+            # thinking block 本身就是可靠能力信号。部分 Claude 新模型默认隐藏
+            # 摘要正文，仅返回空 thinking + signature，不能因此把能力判成不支持。
             return _capability_result(
                 capability,
-                status,
-                "已完成思考能力组合测试",
+                "passed",
+                (
+                    "已完成思考能力组合测试"
+                    if can_disable
+                    else "已检测到思考能力；关闭参数未生效"
+                ),
                 started,
                 details,
             )
@@ -711,6 +787,7 @@ async def test_model_capability(
         resp = await _invoke_with_timeout(
             tool_llm,
             [HumanMessage(content="请调用工具查询北京天气，不要直接回答。")],
+            timeout_sec=_TOOL_TEST_TIMEOUT_SEC,
         )
         tool_calls = getattr(resp, "tool_calls", []) or []
         if tool_calls and tool_calls[0].get("name") == "get_weather":
@@ -735,8 +812,9 @@ async def test_model_capability(
             supported=False,
             status="failed",
         )
+        timeout_sec = _capability_timeout_sec(capability)
         return _capability_result(
-            capability, "failed", f"请求超时（>{_TEST_TIMEOUT_SEC}s）", started
+            capability, "failed", f"请求超时（>{timeout_sec}s）", started
         )
     except Exception as exc:
         await _record_detected_capability(

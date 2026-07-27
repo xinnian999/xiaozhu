@@ -56,6 +56,31 @@ class _StreamingReasoningAgent:
         )
 
 
+class _TokenOnlyReasoningAgent:
+    async def astream(self, _graph_input, *, stream_mode, config):
+        assert stream_mode == ["updates", "messages"]
+        assert config["configurable"]["thread_id"] == "thread-1"
+        yield (
+            "updates",
+            {
+                "model": {
+                    "messages": [
+                        AIMessage(
+                            content="直接回答",
+                            response_metadata={
+                                "token_usage": {
+                                    "completion_tokens_details": {
+                                        "reasoning_tokens": 5,
+                                    },
+                                },
+                            },
+                        )
+                    ]
+                }
+            },
+        )
+
+
 def _event(frame: str) -> dict:
     return json.loads(frame.removeprefix("data: ").strip())
 
@@ -158,5 +183,48 @@ class ReasoningStreamTests(IsolatedAsyncioTestCase):
             [event["type"] for event in events],
             ["message_delta", "done"],
         )
+        save_reasoning.assert_not_awaited()
+        save_message.assert_awaited_once()
+
+    async def test_reasoning_card_is_omitted_without_real_content(self):
+        with (
+            patch(
+                "app.agents.loop._save_reasoning_message",
+                new_callable=AsyncMock,
+            ) as save_reasoning,
+            patch(
+                "app.agents.loop._save_message",
+                new_callable=AsyncMock,
+            ) as save_message,
+            patch(
+                "app.agents.loop._charge_user",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "app.agents.loop._cleanup_thread",
+                new_callable=AsyncMock,
+            ),
+        ):
+            frames = [
+                frame
+                async for frame in _consume(
+                    _TokenOnlyReasoningAgent(),
+                    {"messages": []},
+                    "thread-1",
+                    session_id="session-1",
+                    summary_text="简单问题不展示空思考卡",
+                    model="test-model",
+                    db=object(),  # type: ignore[arg-type]
+                    db_lock=asyncio.Lock(),
+                    user_id="user-1",
+                )
+            ]
+
+        events = [_event(frame) for frame in frames]
+        self.assertEqual(
+            [event["type"] for event in events],
+            ["message_delta", "done"],
+        )
+        self.assertEqual(events[0]["text"], "直接回答")
         save_reasoning.assert_not_awaited()
         save_message.assert_awaited_once()

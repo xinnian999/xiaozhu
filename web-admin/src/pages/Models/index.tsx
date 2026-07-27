@@ -110,6 +110,60 @@ function capabilityErrorResult(
   }
 }
 
+function capabilityRetryLimit(
+  capability: ModelTestCapability,
+  result: ModelCapabilityTestResult,
+): number {
+  if (result.status === 'failed') {
+    if (/\b429\b|rate.?limit|access_interval_limited/i.test(result.message)) {
+      return 3
+    }
+    if (
+      /\b(?:502|503|504)\b|no routes available|upstream_error|temporar/i
+        .test(result.message)
+    ) {
+      return 2
+    }
+    return /超时|timeout/i.test(result.message) ? 1 : 0
+  }
+  return capability === 'thinking' && result.status === 'unsupported' ? 1 : 0
+}
+
+function capabilityRetryDelay(
+  result: ModelCapabilityTestResult,
+  retryNumber: number,
+): number {
+  if (/\b429\b|rate.?limit|access_interval_limited/i.test(result.message)) {
+    return [5_000, 15_000, 30_000][retryNumber - 1] ?? 30_000
+  }
+  return 1_000 * retryNumber
+}
+
+async function testCapabilityWithRetry(
+  modelId: string,
+  capability: ModelTestCapability,
+  isActive: () => boolean,
+): Promise<ModelCapabilityTestResult | null> {
+  let retryLimit: number | null = null
+  for (let attempt = 0; ; attempt += 1) {
+    let result: ModelCapabilityTestResult
+    try {
+      result = await testModelCapability(modelId, capability)
+    } catch (error) {
+      result = capabilityErrorResult(capability, error)
+    }
+    if (!isActive()) return null
+
+    retryLimit ??= capabilityRetryLimit(capability, result)
+    if (attempt >= retryLimit) return result
+
+    // 给上游路由池留出短暂恢复时间；重试次数有硬上限，不会无限等待。
+    const retryDelay = capabilityRetryDelay(result, attempt + 1)
+    await new Promise((resolve) => window.setTimeout(resolve, retryDelay))
+    if (!isActive()) return null
+  }
+}
+
 /** 解析导入 JSON：支持标准导出包，也兼容直接的 models 数组。 */
 function parseImportFile(json: unknown): ModelExportItem[] {
   if (Array.isArray(json)) {
@@ -129,6 +183,16 @@ function parseImportFile(json: unknown): ModelExportItem[] {
 /** 旧版“自定义 / 中转站”已并入 OpenAI 厂商。 */
 function normalizeProviderId(provider?: string): string {
   return !provider || provider === 'custom_openai' ? 'openai' : provider
+}
+
+function batchProbeQueueKey(row: AdminModel): string {
+  const baseUrl = row.base_url?.trim()
+  if (!baseUrl) return `provider:${normalizeProviderId(row.provider)}`
+  try {
+    return `origin:${new URL(baseUrl).origin.toLowerCase()}`
+  } catch {
+    return `endpoint:${baseUrl.toLowerCase()}`
+  }
 }
 
 // ============================================
@@ -400,20 +464,14 @@ export default function Models() {
     runId: number,
   ): Promise<ModelCapabilityTestResult | null> => {
     setTestStates((prev) => ({ ...prev, [capability]: { phase: 'running' } }))
-    try {
-      const result = await testModelCapability(row.id, capability)
-      if (testRunRef.current !== runId) return null
-      setTestStates((prev) => ({ ...prev, [capability]: { phase: 'done', result } }))
-      return result
-    } catch (error) {
-      if (testRunRef.current !== runId) return null
-      const result = capabilityErrorResult(capability, error)
-      setTestStates((prev) => ({
-        ...prev,
-        [capability]: { phase: 'done', result },
-      }))
-      return result
-    }
+    const result = await testCapabilityWithRetry(
+      row.id,
+      capability,
+      () => testRunRef.current === runId,
+    )
+    if (!result || testRunRef.current !== runId) return null
+    setTestStates((prev) => ({ ...prev, [capability]: { phase: 'done', result } }))
+    return result
   }
 
   const runAllTests = async (row: AdminModel) => {
@@ -485,13 +543,13 @@ export default function Models() {
       if (batchRunRef.current !== runId) return
       updateBatchModel(row.id, { currentCapability: item.key })
 
-      let result: ModelCapabilityTestResult
-      try {
-        result = await testModelCapability(row.id, item.key)
-      } catch (error) {
-        result = capabilityErrorResult(item.key, error)
-      }
-      if (batchRunRef.current !== runId) return
+      // 上游偶发长尾、临时 5xx 或暂未返回思考块时，统一受控复测。
+      const result = await testCapabilityWithRetry(
+        row.id,
+        item.key,
+        () => batchRunRef.current === runId,
+      )
+      if (!result || batchRunRef.current !== runId) return
 
       completed += 1
       if (result.status === 'passed') passed += 1
@@ -545,18 +603,32 @@ export default function Models() {
     setBatchOpen(true)
     setBatchRunning(true)
 
-    // 两个 worker 并发：明显缩短总耗时，同时避免一次把同一厂商的配额打满。
+    // 相同上游接口严格串行；不同接口最多并发两个。不同厂商也可能共用
+    // code0.ai 等网关，因此仅按 provider 分组仍会互相挤压并造成误判。
+    const endpointQueues = Array.from(
+      models.reduce((queues, row) => {
+        const endpoint = batchProbeQueueKey(row)
+        const queue = queues.get(endpoint)
+        if (queue) queue.push(row)
+        else queues.set(endpoint, [row])
+        return queues
+      }, new Map<string, AdminModel[]>()),
+      ([, rows]) => rows,
+    )
     let cursor = 0
     const worker = async () => {
       while (batchRunRef.current === runId) {
         const index = cursor
         cursor += 1
-        if (index >= models.length) return
-        await probeOneModel(models[index], runId)
+        if (index >= endpointQueues.length) return
+        for (const row of endpointQueues[index]) {
+          if (batchRunRef.current !== runId) return
+          await probeOneModel(row, runId)
+        }
       }
     }
     await Promise.all(
-      Array.from({ length: Math.min(2, models.length) }, () => worker()),
+      Array.from({ length: Math.min(2, endpointQueues.length) }, () => worker()),
     )
     if (batchRunRef.current !== runId) return
     await fetchData()
@@ -775,7 +847,7 @@ export default function Models() {
         footer={
           <div className={styles.testFooter}>
             <span className={styles.testFootnote}>
-              全部配置模型（含停用）都会探测；最多同时执行 2 个模型
+              全部配置模型（含停用）都会探测；同接口串行，异常自动复测 1 次
             </span>
             <Space>
               <Button danger={batchRunning} onClick={closeBatchTest}>

@@ -120,6 +120,20 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
 _BY_ID = {item.id: item for item in PROVIDERS}
 _REASONING_FIELDS = ("reasoning_content", "reasoning", "reasoning_details")
 _INLINE_THINKING_RE = re.compile(r"<think>([\s\S]*?)</think>", re.IGNORECASE)
+_ANTHROPIC_ADAPTIVE_THINKING_PREFIXES = (
+    "claude-sonnet-4-6",
+    "claude-sonnet-5",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-opus-5",
+    "claude-fable-5",
+    "claude-mythos",
+)
+_ANTHROPIC_ALWAYS_THINKING_PREFIXES = (
+    "claude-fable-5",
+    "claude-mythos",
+)
 
 
 @dataclass(frozen=True)
@@ -147,6 +161,8 @@ def _reasoning_tokens(value: object) -> int:
             if normalized in {
                 "reasoning_tokens",
                 "reasoning_token_count",
+                "thinking_tokens",
+                "thinking_token_count",
             } and isinstance(child, int):
                 best = max(best, child)
             elif normalized == "reasoning" and isinstance(child, int):
@@ -370,8 +386,38 @@ class ReasoningCompatibleChatOpenAI(_ReasoningHistoryMixin, ChatOpenAI):
         return generation
 
 
+class _AnthropicModelDumpDict(dict[str, Any]):
+    """兼容 Anthropic 中转把新响应对象保留成普通 ``dict`` 的情况。"""
+
+    def model_dump(self, **_: Any) -> dict[str, Any]:
+        return dict(self)
+
+
 class SerialChatAnthropic(_SerialToolsMixin, ChatAnthropic):
     """Anthropic 协议适配器，默认要求一次只返回一个工具调用。"""
+
+    def _make_message_chunk_from_anthropic_event(
+        self,
+        event: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """让中转返回的未建模字典兼容 LangChain 的 Pydantic 序列化路径。
+
+        部分 Anthropic 兼容端点会先于当前 SDK 返回 ``context_management`` /
+        ``container`` 字段。SDK 会把未知嵌套对象原样留成 dict，而
+        langchain-anthropic 会无条件调用其 ``model_dump()``，导致流结束时崩溃。
+        只在字段确实为 dict 时套一个最小兼容壳，官方 SDK 模型保持原样。
+        """
+        context_management = getattr(event, "context_management", None)
+        if isinstance(context_management, dict):
+            event.context_management = _AnthropicModelDumpDict(context_management)
+
+        delta = getattr(event, "delta", None)
+        container = getattr(delta, "container", None)
+        if isinstance(container, dict):
+            delta.container = _AnthropicModelDumpDict(container)
+
+        return super()._make_message_chunk_from_anthropic_event(event, **kwargs)
 
 
 class ReasoningChatDeepSeek(
@@ -504,6 +550,49 @@ def _google_can_disable_thinking(model: str) -> bool:
     return model_name.startswith("gemini-2.5-flash")
 
 
+def _anthropic_uses_adaptive_thinking(model: str) -> bool:
+    """Claude 4.6+ 的新模型使用 adaptive thinking，不再接受固定 token 预算。"""
+    model_name = model.lower().rsplit("/", 1)[-1]
+    return model_name.startswith(_ANTHROPIC_ADAPTIVE_THINKING_PREFIXES)
+
+
+def _anthropic_can_disable_thinking(model: str) -> bool:
+    """少数始终思考的 Claude 5 系列不接受 ``thinking.type=disabled``。"""
+    model_name = model.lower().rsplit("/", 1)[-1]
+    return not model_name.startswith(_ANTHROPIC_ALWAYS_THINKING_PREFIXES)
+
+
+def _anthropic_thinking_kwargs(
+    model: str,
+    thinking: bool | None,
+) -> dict[str, Any]:
+    """按 Claude 模型代际生成思考参数。
+
+    Sonnet / Opus 5 等新模型只支持 adaptive thinking，且默认不返回可读摘要；
+    开启时显式请求 summarized。Opus 5 只有在 effort 不高于 high 时才允许
+    关闭，因此关闭 adaptive thinking 时也固定传 high，避免中转采用更高默认值。
+    """
+    if thinking is None:
+        return {}
+    if _anthropic_uses_adaptive_thinking(model):
+        if thinking:
+            return {
+                "thinking": {"type": "adaptive", "display": "summarized"},
+                "output_config": {"effort": "high"},
+            }
+        if not _anthropic_can_disable_thinking(model):
+            return {}
+        return {
+            "thinking": {"type": "disabled"},
+            "output_config": {"effort": "high"},
+        }
+    return {
+        "thinking": (
+            {"type": "enabled", "budget_tokens": 2048} if thinking else None
+        )
+    }
+
+
 def build_chat_model(meta: dict, *, thinking: bool | None = None) -> BaseChatModel:
     """按厂商构造模型；None 保留厂商默认，布尔值用于能力对比测试。"""
     provider = normalize_provider(meta.get("provider"))
@@ -518,9 +607,7 @@ def build_chat_model(meta: dict, *, thinking: bool | None = None) -> BaseChatMod
             base_url=base_url,
             max_tokens_to_sample=16384,
             max_retries=2,
-            thinking=(
-                {"type": "enabled", "budget_tokens": 2048} if thinking is True else None
-            ),
+            **_anthropic_thinking_kwargs(model, thinking),
         )
     if provider == "minimax":
         # MiniMax M2.x 官方推荐 Anthropic 协议，可原生保留 thinking block 与工具回合。
@@ -637,8 +724,9 @@ def supports_thinking_toggle(
     provider_id = normalize_provider(provider)
     if provider_id == "google":
         return bool(model and _google_can_disable_thinking(model))
+    if provider_id == "anthropic":
+        return bool(model and _anthropic_can_disable_thinking(model))
     return provider_id in {
-        "anthropic",
         "deepseek",
         "qwen",
         "moonshot",
@@ -650,7 +738,7 @@ def supports_thinking_toggle(
 def unsupported_vision_reason(provider: str | None) -> str | None:
     provider = normalize_provider(provider)
     if provider == "deepseek":
-        return "DeepSeek 官方 Chat Completion 当前只接受文本消息"
+        return "DeepSeek V4 官方 API 当前仅接受文本；视觉需通过其它模型代理"
     if provider == "minimax":
         return "MiniMax M2.x 文本生成端点当前不接受图片输入"
     return None

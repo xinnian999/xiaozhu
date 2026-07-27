@@ -228,25 +228,29 @@ TOOL_RESULT_CAP = 4000
 REASONING_CONTENT_CAP = 20_000
 
 
-def _reasoning_payload(response: object) -> dict:
-    """把任意厂商响应归一成前端可直接渲染的思考事件。"""
+def _reasoning_payload(
+    response: object,
+    streamed_text: str = "",
+) -> dict | None:
+    """仅把真实返回了推理正文的响应归一成前端思考事件。
+
+    adaptive thinking 可以对简单请求完全跳过思考；部分接口也只返回 token
+    统计而没有可展示正文。这两种情况都不生成占位卡，避免前端误显示
+    “已完成思考”。若完整消息没保留正文，则使用已收到的流式正文完成卡片。
+    """
     observation = reasoning_observation(response)
-    content = observation.content.strip()
+    content = observation.content.strip() or streamed_text.strip()
+    if not content:
+        return None
     truncated = len(content) > REASONING_CONTENT_CAP
     if truncated:
         content = content[:REASONING_CONTENT_CAP] + "\n\n…（思考过程过长，已截断）"
-
-    fallback = not content
-    if fallback and observation.tokens:
-        content = "模型已完成思考，但当前接口只返回推理 token 数，没有返回可展示的思考过程。"
-    elif fallback:
-        content = "当前模型或接口没有返回可展示的思考过程。"
 
     return {
         "type": "reasoning",
         "text": content,
         "tokens": observation.tokens or None,
-        "fallback": fallback,
+        "fallback": False,
         "truncated": truncated,
     }
 
@@ -1212,8 +1216,12 @@ async def _consume(
 
                         reasoning_payload = None
                         if emit_reasoning:
-                            reasoning_payload = _reasoning_payload(m)
-                            reasoning_payload["id"] = ensure_reasoning_id()
+                            reasoning_payload = _reasoning_payload(
+                                m,
+                                active_reasoning_text,
+                            )
+                            if reasoning_payload is not None:
+                                reasoning_payload["id"] = ensure_reasoning_id()
                         text = extract_text(m)
                         if m.tool_calls:
                             # 这一轮又调了工具,说明之前(若有)攒着没发的

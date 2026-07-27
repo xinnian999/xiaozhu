@@ -363,6 +363,16 @@ import html2canvas from 'html2canvas';
   const reportPath = () => post('xiaozhu-server-navigation', {
     path: logicalPreviewPath(),
   });
+  // pushState / replaceState 本身不会触发 popstate。React Router、Vue Router 等 SPA
+  // 正是靠这两个 API 切路由，所以必须主动补发导航事件，父页面地址栏才会实时同步。
+  for (const method of ['pushState', 'replaceState']) {
+    const original = history[method].bind(history);
+    history[method] = (...args) => {
+      const result = original(...args);
+      queueMicrotask(reportPath);
+      return result;
+    };
+  }
   window.addEventListener('hashchange', reportPath);
   window.addEventListener('popstate', reportPath);
 

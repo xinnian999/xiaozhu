@@ -14,7 +14,13 @@ import {
   makeErrorCard,
 } from '@/store/session'
 import { useUIStore } from '@/store/ui'
-import { streamChat, streamAskResult, streamResume, type SSEEvent } from '@/lib/api'
+import {
+  getResumeState,
+  streamChat,
+  streamAskResult,
+  streamResume,
+  type SSEEvent,
+} from '@/lib/api'
 import { registerSessionStream } from '@/lib/sessionStream'
 import { toast } from '@/lib/toast'
 import { useClickOutside } from '@/hooks/useClickOutside'
@@ -29,6 +35,27 @@ const MAX_IMAGES = 6
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024
 // 每个模型分别记住用户上次选择的深度思考状态，刷新页面 / 重开标签页后仍然生效。
 const THINKING_OVERRIDES_STORAGE_KEY = 'xiaozhu:thinkingOverrides'
+// 一轮生成只要还在正常进行，就在 sessionStorage 留下自动恢复意图。标签页被浏览器
+// 丢弃并重新加载时该标记仍在；用户主动停止或切项目时会清掉，避免误自动续跑。
+const AUTO_RESUME_STORAGE_PREFIX = 'xiaozhu:autoResume:'
+
+function setAutoResumeIntent(sessionId: string, enabled: boolean) {
+  try {
+    const key = `${AUTO_RESUME_STORAGE_PREFIX}${sessionId}`
+    if (enabled) window.sessionStorage.setItem(key, '1')
+    else window.sessionStorage.removeItem(key)
+  } catch {
+    // sessionStorage 不可用时只失去跨重载自动恢复，当前页面的生成与手动续跑不受影响。
+  }
+}
+
+function hasAutoResumeIntent(sessionId: string): boolean {
+  try {
+    return window.sessionStorage.getItem(`${AUTO_RESUME_STORAGE_PREFIX}${sessionId}`) === '1'
+  } catch {
+    return false
+  }
+}
 
 function getInitialThinkingOverrides(): Record<string, boolean> {
   if (typeof window === 'undefined') return {}
@@ -103,6 +130,17 @@ export default function ChatSidebar() {
   const [creating, setCreating] = useState(false)
   // 本轮流式的中断控制器：点"停止"时 abort()，streamChat 内部据此静默收尾
   const abortRef = useRef<AbortController | null>(null)
+  const autoResumeInFlightRef = useRef(false)
+  const handleResumeRef = useRef<() => Promise<void>>(async () => {})
+  const [pageVisible, setPageVisible] = useState(
+    () => typeof document === 'undefined' || document.visibilityState !== 'hidden',
+  )
+
+  useEffect(() => {
+    const syncVisibility = () => setPageVisible(document.visibilityState !== 'hidden')
+    document.addEventListener('visibilitychange', syncVisibility)
+    return () => document.removeEventListener('visibilitychange', syncVisibility)
+  }, [])
 
   // 待发送的图片（data URL 列表）。发送后清空；点缩略图上的 × 可逐个移除。
   const [attachments, setAttachments] = useState<string[]>([])
@@ -388,10 +426,12 @@ export default function ChatSidebar() {
     const controller = new AbortController()
     abortRef.current = controller
     const finishStream = registerSessionStream(targetSessionId, controller)
+    setAutoResumeIntent(targetSessionId, true)
 
     // 3. 流式消费 SSE
+    let settled = false
     try {
-      const settled = await consumeStream(
+      settled = await consumeStream(
         streamChat(
           text,
           targetSessionId,
@@ -408,6 +448,11 @@ export default function ChatSidebar() {
       // 同会话内直接标记可续跑，用户点「继续生成」即可从断点接着跑，无需刷新页面。
       if (!settled) setResumable(targetSessionId, true)
     } finally {
+      // 正常收场、用户停止、切项目都不应被后台自动拉起；只有无 abort reason 的意外断流
+      // 保留 intent，交给下面的可见性恢复 effect 自动从 checkpoint 续跑。
+      if (settled || controller.signal.aborted) {
+        setAutoResumeIntent(targetSessionId, false)
+      }
       // 4. 无论正常结束 / 出错 / 用户中断，都冲刷累积内容并退出流式态。
       //    退出流式态会让 PreviewPane 的构建 effect 重跑：若本轮有改动还没构建过
       //    （AI 没在最后调 check_build），它会兜底构建最终态 + 刷新预览，所以这里
@@ -443,10 +488,12 @@ export default function ChatSidebar() {
     const controller = new AbortController()
     abortRef.current = controller
     const finishStream = registerSessionStream(session.id, controller)
+    setAutoResumeIntent(session.id, true)
 
+    let settled = false
     try {
       // message 传空串、retry=true：真正的 prompt 由后端取最后一条用户消息
-      const settled = await consumeStream(
+      settled = await consumeStream(
         streamChat(
           '',
           session.id,
@@ -461,6 +508,9 @@ export default function ChatSidebar() {
       )
       if (!settled) setResumable(session.id, true)
     } finally {
+      if (settled || controller.signal.aborted) {
+        setAutoResumeIntent(session.id, false)
+      }
       if (abortRef.current === controller) abortRef.current = null
       endStreaming()
       finishStream()
@@ -480,15 +530,20 @@ export default function ChatSidebar() {
     const controller = new AbortController()
     abortRef.current = controller
     const finishStream = registerSessionStream(session.id, controller)
+    setAutoResumeIntent(session.id, true)
 
+    let settled = false
     try {
-      const settled = await consumeStream(
+      settled = await consumeStream(
         streamResume(session.id, selectedModel, controller.signal, thinkingForRequest),
         session.id,
         thinkingForRequest !== false,
       )
       if (!settled) setResumable(session.id, true)
     } finally {
+      if (settled || controller.signal.aborted) {
+        setAutoResumeIntent(session.id, false)
+      }
       if (abortRef.current === controller) abortRef.current = null
       endStreaming()
       finishStream()
@@ -499,8 +554,48 @@ export default function ChatSidebar() {
   // 点"停止"：中断本轮 SSE。abort 后 streamChat 抛出被静默吞掉，
   // 控制流自然走到 handleSend 的 finally，由 endStreaming 收尾。
   const handleStop = () => {
-    abortRef.current?.abort()
+    if (session) setAutoResumeIntent(session.id, false)
+    abortRef.current?.abort('user-stop')
   }
+
+  // 浏览器可能在后台冻结甚至丢弃标签页，SSE 因此断开。只对“这轮原本仍应继续”的会话
+  // 自动恢复：先等页面重新可见，再向后端确认 checkpoint 确实可续，避免把首次联网失败、
+  // 用户主动停止或主动切项目误当成长任务恢复。
+  useEffect(() => {
+    handleResumeRef.current = handleResume
+  })
+  useEffect(() => {
+    if (
+      !activeId
+      || !session?.resumable
+      || isStreaming
+      || awaitingAnswer
+      || !pageVisible
+      || !hasAutoResumeIntent(activeId)
+      || autoResumeInFlightRef.current
+    ) {
+      return
+    }
+
+    let cancelled = false
+    const timer = window.setTimeout(async () => {
+      if (cancelled) return
+      autoResumeInFlightRef.current = true
+      try {
+        // 给服务端取消旧 StreamingResponse、落稳 checkpoint 留一个很短的清理窗口。
+        if (await getResumeState(activeId)) {
+          await handleResumeRef.current()
+        }
+      } finally {
+        autoResumeInFlightRef.current = false
+      }
+    }, 800)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [activeId, awaitingAnswer, isStreaming, pageVisible, session?.resumable])
 
   // ask_user 交互卡片答完（单个问题，或多问题 Tab 全部答完）后的回调：answer 是
   // AskUserChip 内部已经汇总格式化好的一份文本，这里不关心它背后是单选/多选/自定义输入、
@@ -523,8 +618,10 @@ export default function ChatSidebar() {
       const controller = new AbortController()
       abortRef.current = controller
       const finishStream = registerSessionStream(session.id, controller)
+      setAutoResumeIntent(session.id, true)
+      let settled = false
       try {
-        const settled = await consumeStream(
+        settled = await consumeStream(
           streamAskResult(
             session.id,
             toolCallId,
@@ -543,6 +640,9 @@ export default function ChatSidebar() {
         beginAwaitingAnswer()
         throw error
       } finally {
+        if (settled || controller.signal.aborted) {
+          setAutoResumeIntent(session.id, false)
+        }
         if (abortRef.current === controller) abortRef.current = null
         endStreaming()
         finishStream()

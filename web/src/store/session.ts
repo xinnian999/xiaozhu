@@ -487,7 +487,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     if (get().activeId === id) return
     // 非当前项目正常不会再有本页流；这里仍清理可能残留的登记，再发 DELETE。
     // 跨标签页或服务端迟到任务由后端 generation_control 做第二层取消屏障。
-    await interruptSessionStream(id)
+    await interruptSessionStream(id, 'session-delete')
     // 先请求后端删除（连带级联清理子表）；失败会被 axios 拦截器统一 toast，这里不动本地
     await apiDeleteSession(id)
     set((s) => ({ sessions: s.sessions.filter((sess) => sess.id !== id) }))

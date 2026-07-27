@@ -39,7 +39,10 @@ export function registerSessionStream(
 }
 
 /** 中断某会话当前所有流，并等待其前端状态收尾；重复调用安全。 */
-export async function interruptSessionStream(sessionId: string): Promise<boolean> {
+export async function interruptSessionStream(
+  sessionId: string,
+  reason: 'session-switch' | 'session-delete' = 'session-switch',
+): Promise<boolean> {
   let interrupted = false
 
   // 正常 UI 同一会话只会有一条流；循环是为了覆盖极短时间内重复点击造成的并发登记。
@@ -47,7 +50,7 @@ export async function interruptSessionStream(sessionId: string): Promise<boolean
     const entries = [...(activeStreams.get(sessionId) ?? [])]
     if (entries.length === 0) return interrupted
     interrupted = true
-    entries.forEach((entry) => entry.controller.abort())
+    entries.forEach((entry) => entry.controller.abort(reason))
     await Promise.all(entries.map((entry) => entry.completed))
   }
 }

@@ -24,17 +24,109 @@ import asyncio
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Annotated, Literal
 
 from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
 from langgraph.types import interrupt
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import build_store
 from app.models.file import File
 from app.preview_screenshots import build_screenshot_artifact
+
+
+class AskUserOption(BaseModel):
+    """ask_user 的结构化选项。
+
+    label 是提交给用户的短选项；description 只做补充说明。明确建模后，供应商收到的
+    tool schema 不再是任意 dict，能显著减少模型自创字段造成的空白提问卡。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    label: str = Field(min_length=1)
+    description: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def recover_description_only_option(cls, value: object) -> object:
+        """让部署前已经写进 checkpoint 的 description-only 参数仍可恢复执行。"""
+        if not isinstance(value, dict):
+            return value
+        label = value.get("label")
+        description = value.get("description")
+        if (
+            (not isinstance(label, str) or not label.strip())
+            and isinstance(description, str)
+            and description.strip()
+        ):
+            return {"label": description.strip()}
+        return value
+
+
+class AskUserQuestion(BaseModel):
+    """一张 ask_user 问题卡。选项兼容旧版字符串与新版 label/description 对象。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    header: str | None = None
+    question: str = Field(min_length=1)
+    options: list[Annotated[str, Field(min_length=1)] | AskUserOption]
+    multi: bool = False
+
+    @model_validator(mode="after")
+    def validate_option_count(self) -> "AskUserQuestion":
+        lo, hi = (1, 6) if self.multi else (2, 5)
+        if not (lo <= len(self.options) <= hi):
+            kind = "多选" if self.multi else "单选"
+            raise ValueError(f"{kind} options 需要 {lo}~{hi} 个")
+        return self
+
+
+def normalize_ask_user_questions(value: object) -> object:
+    """兼容部分模型把选项正文放进 description、却漏掉 label 的调用参数。
+
+    规范化发生在 loop 下发 SSE 和持久化之前，因此前端、数据库、checkpoint 看到的是
+    同一份可渲染结构。其余畸形值原样保留，交给 Pydantic 工具 schema 拒绝并让模型重试。
+    """
+
+    if not isinstance(value, list):
+        return value
+
+    questions: list[object] = []
+    for raw_question in value:
+        if not isinstance(raw_question, dict):
+            questions.append(raw_question)
+            continue
+        question = dict(raw_question)
+        raw_options = question.get("options")
+        if not isinstance(raw_options, list):
+            questions.append(question)
+            continue
+
+        options: list[object] = []
+        for raw_option in raw_options:
+            if not isinstance(raw_option, dict):
+                options.append(raw_option)
+                continue
+            option = dict(raw_option)
+            label = option.get("label")
+            description = option.get("description")
+            if (
+                (not isinstance(label, str) or not label.strip())
+                and isinstance(description, str)
+                and description.strip()
+            ):
+                # qwen 等模型偶尔只返回 description/description_en。中文 description
+                # 就是用户应看到的完整选项；不要再作为副标题重复显示一遍。
+                option = {"label": description.strip()}
+            options.append(option)
+        question["options"] = options
+        questions.append(question)
+    return questions
 
 
 @dataclass
@@ -376,7 +468,7 @@ def build_tools(
         return f"已切换到{label}画布{suffix}；页面仍需同时兼容桌面与移动端。"
 
     @tool
-    async def ask_user(questions: list[dict]) -> str:
+    async def ask_user(questions: list[AskUserQuestion]) -> str:
         """向用户提一批问题并等待回答，用于这一轮动手前把关键分歧问清楚，或动手过程中
         真正卡住时向用户求助。
 
@@ -412,25 +504,17 @@ def build_tools(
         """
         if not (1 <= len(questions) <= 5):
             return f"questions 必须是 1~5 个问题，当前 {len(questions)} 个，请修正后重新调用 ask_user。"
-        problems: list[str] = []
-        for i, q in enumerate(questions, start=1):
-            options = q.get("options") or []
-            multi = bool(q.get("multi", False))
-            lo, hi = (1, 6) if multi else (2, 5)
-            if not (lo <= len(options) <= hi):
-                kind = "多选" if multi else "单选"
-                problems.append(
-                    f"第 {i} 题（{kind}）options 需要 {lo}~{hi} 个，当前 {len(options)} 个"
-                )
-        if problems:
-            return "；".join(problems) + "。请修正后重新调用 ask_user。"
+        payload = [
+            question.model_dump(exclude_none=True)
+            for question in questions
+        ]
         # interrupt()：把图状态存进 checkpointer 后暂停，这次 astream() 调用到此结束
         # （HTTP 请求随之正常关闭）。resume 时从这里接着往下走，返回值就是
         # Command(resume=answer) 传入的 answer——见 app.agents.loop 的 __interrupt__
         # 处理分支 + app.api.ask_result 的恢复逻辑。注意：resume 会导致本工具函数
         # 从头重新执行一遍（LangGraph 的既定语义），上面的校验逻辑本身是幂等的纯校验，
         # 重跑一遍没问题。
-        return interrupt({"questions": questions})
+        return interrupt({"questions": payload})
 
     return [
         write_file,

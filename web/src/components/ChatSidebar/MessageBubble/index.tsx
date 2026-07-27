@@ -7,6 +7,12 @@ import { useUIStore } from '@/store/ui'
 import { toast } from '@/lib/toast'
 import { fetchAuthenticatedImage } from '@/lib/api'
 import type { Message, PreviewScreenshot } from '@/types/project'
+import {
+  askOptionDescription,
+  askOptionLabel,
+  parseAskQuestions,
+  type AskQuestion,
+} from './askUserData'
 import styles from './index.module.scss'
 
 type Props = {
@@ -364,49 +370,6 @@ function CheckBuildScreenshot({ screenshot }: { screenshot: PreviewScreenshot })
 // 数据来自通用的 tool_call 事件（message.toolArgs.questions），不是独立的 SSE 事件类型。
 // 每个问题各自单选或多选，点「提交/确认」后才切到下一题，全部答完才一次性提交
 // （见 onAnswer：内部会 POST /ask-result 唤醒后端，或降级为发一条新消息）。
-type AskOption = string | { label: string; description?: string }
-type AskQuestion = {
-  header?: string
-  question: string
-  options: AskOption[]
-  multi?: boolean
-}
-
-function isAskOption(v: unknown): v is AskOption {
-  if (typeof v === 'string') return true
-  if (!v || typeof v !== 'object') return false
-  const option = v as { label?: unknown; description?: unknown }
-  return (
-    typeof option.label === 'string' &&
-    (option.description === undefined || typeof option.description === 'string')
-  )
-}
-
-function askOptionLabel(option: AskOption): string {
-  return typeof option === 'string' ? option : option.label
-}
-
-function askOptionDescription(option: AskOption): string | undefined {
-  return typeof option === 'string' ? undefined : option.description
-}
-
-function isAskQuestions(v: unknown): v is AskQuestion[] {
-  return (
-    Array.isArray(v) &&
-    v.length > 0 &&
-    v.every(
-      (q) =>
-        !!q &&
-        typeof q === 'object' &&
-        typeof (q as { question?: unknown }).question === 'string' &&
-        ((q as { header?: unknown }).header === undefined ||
-          typeof (q as { header?: unknown }).header === 'string') &&
-        Array.isArray((q as { options?: unknown }).options) &&
-        (q as { options: unknown[] }).options.every(isAskOption),
-    )
-  )
-}
-
 // 把每题的 Q&A 拼成一份结构化文本，作为最终提交的 answer（也是 ToolMessage 回喂给 LLM 的内容）
 function combineAskAnswers(questions: AskQuestion[], answers: (string | null)[]): string {
   return questions
@@ -483,7 +446,7 @@ function AskUserChip({
   onAnswer?: (message: Message, answer: string) => Promise<void>
 }) {
   const rawQuestions = message.toolArgs?.questions
-  const questions = isAskQuestions(rawQuestions) ? rawQuestions : null
+  const questions = parseAskQuestions(rawQuestions)
   const questionsLen = questions?.length ?? 0
 
   const [activeIndex, setActiveIndex] = useState(0)

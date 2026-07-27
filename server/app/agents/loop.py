@@ -35,6 +35,7 @@ from app.agents.prompts import SYSTEM_PROMPT
 from app.agents.tools import (
     BuildCheckReuseState,
     build_tools,
+    normalize_ask_user_questions,
     project_files_fingerprint,
 )
 from app.agents.version_naming import name_next_generated_version
@@ -1274,6 +1275,10 @@ async def _consume(
                                 if device_event is not None:
                                     yield sse(device_event)
                             for tc in m.tool_calls:
+                                if tc["name"] == "ask_user":
+                                    tc["args"]["questions"] = normalize_ask_user_questions(
+                                        tc["args"].get("questions")
+                                    )
                                 print(f"[tool_call] name={tc['name']} args={list(tc['args'].keys())}")
                                 if tc["name"] == "check_build":
                                     # ── 竞态防护：同批若还有 write_file/edit_file，它们真正的 file_write

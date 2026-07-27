@@ -821,8 +821,8 @@ function ErrorCard({ message }: { message: Message }) {
 // ============================================
 // 版本卡：每产生一个新版本插一张，附带回滚按钮
 // ============================================
-// 点「回滚」→ 用该版本快照覆盖当前文件，并 append 一个新版本（回滚即新版），
-// 因此回滚后又会再插一张新的版本卡。
+// 点「回滚」→ 用原始版本快照覆盖当前文件，并 append 一个记录版本。
+// 回滚生成的记录版本不可再次回滚，避免历史含义混乱。
 function VersionCard({ message }: { message: Message }) {
   const rollbackToVersion = useSessionStore((s) => s.rollbackToVersion)
   // 当前会话所有版本卡里最大的 seq —— 它就是「当前（最新）版本」。
@@ -841,6 +841,8 @@ function VersionCard({ message }: { message: Message }) {
   const [busy, setBusy] = useState(false)
   const seq = message.versionSeq
   const versionId = message.versionId
+  const isRestoreRecord =
+    message.versionIsRestore === true || message.versionName?.startsWith('回滚到 v') === true
   // 是不是当前版本：回滚到自己没有意义，所以当前版本不提供回滚入口
   const isCurrent = seq != null && latestSeq != null && seq === latestSeq
 
@@ -873,6 +875,10 @@ function VersionCard({ message }: { message: Message }) {
         <span className={styles.versionCardCurrent}>
           <Check size={12} />
           <span>当前</span>
+        </span>
+      ) : isRestoreRecord ? (
+        <span className={styles.versionCardLocked} title="回滚生成的记录版本不能再次回滚">
+          回滚记录
         </span>
       ) : (
         <button

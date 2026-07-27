@@ -379,6 +379,7 @@ export type ApiVersion = {
   session_id: string
   seq: number
   summary: string | null
+  is_restore: boolean
   created_at: string
 }
 

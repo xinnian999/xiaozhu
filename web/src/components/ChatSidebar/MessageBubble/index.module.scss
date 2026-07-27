@@ -695,6 +695,12 @@
     color: var(--color-accent);
     font-size: $fs-11;
   }
+
+  .versionCardLocked {
+    flex-shrink: 0;
+    font-size: $fs-10;
+    color: var(--color-text-mute);
+  }
 }
 
 @keyframes version-spin {

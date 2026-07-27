@@ -10,8 +10,9 @@ import styles from './index.module.scss'
 // 顶栏：版本历史下拉（单线递增模型）
 // - 打开面板时拉取该会话的版本列表（后端按 seq 倒序，最新在前）
 // - 列表第一项（seq 最大）即当前 tip，标「当前」
-// - 点旧版本「回滚」：后端用快照覆盖当前文件并 append 一个新版本，
+// - 点原始旧版本「回滚」：后端用快照覆盖当前文件并 append 一个新版本，
 //   前端用返回的文件 replaceFiles → 预览面板提交后端沙箱重建
+// - 回滚操作生成的记录版本只展示，不允许再次回滚
 // ============================================
 export default function VersionMenu() {
   const [open, setOpen] = useState(false)
@@ -48,6 +49,7 @@ export default function VersionMenu() {
   if (!activeId) return null
 
   const handleRestore = async (v: ApiVersion) => {
+    if (v.is_restore) return
     setRestoringId(v.id)
     try {
       // rollbackToVersion 内部完成：覆盖文件 + append 新版本 + 追加版本卡
@@ -76,7 +78,7 @@ export default function VersionMenu() {
       {open && (
         <div className={styles.panel} role="menu" aria-label="版本历史">
           <p className={styles.panelTitle}>版本历史</p>
-          <p className={styles.panelDesc}>单线递增，回滚即生成新版本</p>
+          <p className={styles.panelDesc}>单线递增，回滚记录不可再次回滚</p>
 
           {loading && versions.length === 0 ? (
             <p className={styles.hint}>加载中…</p>
@@ -101,6 +103,13 @@ export default function VersionMenu() {
                       <span className={styles.currentBadge}>
                         <Check size={13} />
                         当前
+                      </span>
+                    ) : v.is_restore ? (
+                      <span
+                        className={styles.restoreRecordBadge}
+                        title="回滚生成的记录版本不能再次回滚"
+                      >
+                        回滚记录
                       </span>
                     ) : (
                       <button

@@ -20,6 +20,8 @@ async def snapshot_current_files(
     session_id: str,
     summary: str | None = None,
     project_title: str | None = None,
+    *,
+    is_restore: bool = False,
 ) -> Version | None:
     """把 session 当前所有文件快照成一个新版本，返回新建的 Version；没文件则返回 None。
 
@@ -47,7 +49,12 @@ async def snapshot_current_files(
     #    flush ≠ commit：flush 只是「把当前改动同步给数据库连接」，commit 才是「真正落盘、结束事务」。
     # Agent 命名异常时 summary 可能为空；仍给每一版稳定名称，避免版本列表出现“无描述”。
     version_name = summary or ("初始版本" if next_seq == 1 else "功能迭代")
-    version = Version(session_id=session_id, seq=next_seq, summary=version_name)
+    version = Version(
+        session_id=session_id,
+        seq=next_seq,
+        summary=version_name,
+        is_restore=is_restore,
+    )
     db.add(version)
     await db.flush()
 
@@ -78,6 +85,7 @@ async def snapshot_current_files(
             "version_id": version.id,
             "seq": version.seq,
             "name": version.summary,
+            "is_restore": version.is_restore,
         },
     ))
 

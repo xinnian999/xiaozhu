@@ -281,6 +281,10 @@ function fromApiMessage(m: ApiMessage): Message {
       versionId: typeof args.version_id === 'number' ? args.version_id : undefined,
       versionSeq: typeof args.seq === 'number' ? args.seq : undefined,
       versionName: typeof args.name === 'string' ? args.name : undefined,
+      // is_restore 是新版结构化字段；摘要判断让迁移前已有的版本卡也能立即禁用。
+      versionIsRestore:
+        args.is_restore === true ||
+        (typeof args.name === 'string' && args.name.startsWith('回滚到 v')),
     }
   }
   return base
@@ -318,12 +322,18 @@ export function makeReasoningCard(
 
 /** 构造一张「版本卡」消息（kind='version'）。AI 流 / 手动保存 / 回滚 三处共用，
  *  让对话时间线在每次产生新版本时插入一张带回滚按钮的卡片。 */
-export function makeVersionCard(versionId: number, seq: number, name?: string): Message {
+export function makeVersionCard(
+  versionId: number,
+  seq: number,
+  name?: string,
+  isRestore = false,
+): Message {
   return makeMessage('assistant', '', {
     kind: 'version',
     versionId,
     versionSeq: seq,
     versionName: name,
+    versionIsRestore: isRestore,
   })
 }
 
@@ -1015,7 +1025,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const vers = await listVersions(id)
     if (vers[0]) {
       get().appendMessage(
-        makeVersionCard(vers[0].id, vers[0].seq, vers[0].summary ?? undefined),
+        makeVersionCard(
+          vers[0].id,
+          vers[0].seq,
+          vers[0].summary ?? undefined,
+          vers[0].is_restore,
+        ),
       )
     }
   },
@@ -1030,7 +1045,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const vers = await listVersions(id)
     if (vers[0]) {
       get().appendMessage(
-        makeVersionCard(vers[0].id, vers[0].seq, vers[0].summary ?? undefined),
+        makeVersionCard(
+          vers[0].id,
+          vers[0].seq,
+          vers[0].summary ?? undefined,
+          vers[0].is_restore,
+        ),
       )
     }
   },

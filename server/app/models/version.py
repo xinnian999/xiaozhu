@@ -23,7 +23,7 @@ versions / version_files 是它之上的历史层，回滚时把某个快照覆�
 from datetime import datetime
 
 from pydantic import BaseModel
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -50,6 +50,15 @@ class Version(Base):
     # 版本摘要：一句话描述这版干了啥（比如那轮用户的需求），可空。
     # 列表 UI 会用它给每个版本配个说明，先留着，生成时再填。
     summary: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # 回滚生成的版本只用于记录“当前态曾切回哪个快照”，不能再次作为回滚目标。
+    # 否则 v4→v2、v5→v3 之后还能继续点 v4/v5，版本含义会迅速变得难以理解。
+    is_restore: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="0",
+    )
 
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
@@ -94,4 +103,5 @@ class VersionRead(BaseModel):
     session_id: str
     seq: int
     summary: str | None
+    is_restore: bool
     created_at: datetime

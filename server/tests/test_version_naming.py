@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
 
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -10,11 +11,13 @@ from app.agents.version_naming import (
     name_next_generated_version,
     parse_generated_names,
 )
+from app.api.versions import restore_version
 from app.db import Base
 from app.models.file import File
 from app.models.message import Message
 from app.models.session import Session
 from app.models.user import User
+from app.models.version import Version
 from app.versioning import snapshot_current_files
 
 
@@ -171,3 +174,76 @@ class VersionSnapshotNamingTests(IsolatedAsyncioTestCase):
                 [row.tool_args.get("name") for row in rows if row.tool_args],
                 ["完成博客首页", "增加文章搜索"],
             )
+
+    async def test_restore_snapshot_is_marked_and_cannot_be_restored_again(self):
+        async with self.sessions() as db:
+            user = User(
+                email="restore@example.com",
+                password_hash="hash",
+                nickname="测试用户",
+                avatar="seed",
+            )
+            db.add(user)
+            await db.flush()
+            session = Session(
+                id="session-restore",
+                user_id=user.id,
+                title="版本测试",
+            )
+            db.add_all([
+                session,
+                File(
+                    session_id=session.id,
+                    path="src/App.tsx",
+                    content="export default function App() { return null }",
+                ),
+            ])
+            await db.commit()
+
+            original = await snapshot_current_files(
+                db,
+                session.id,
+                summary="完成初始页面",
+            )
+            self.assertIsNotNone(original)
+            assert original is not None
+
+            files = await restore_version(session.id, original.id, db)
+            self.assertEqual([file.content for file in files], [
+                "export default function App() { return null }"
+            ])
+
+            versions = (
+                await db.execute(
+                    select(Version)
+                    .where(Version.session_id == session.id)
+                    .order_by(Version.seq)
+                )
+            ).scalars().all()
+            self.assertEqual(len(versions), 2)
+            restored = versions[-1]
+            self.assertTrue(restored.is_restore)
+            self.assertEqual(restored.summary, "回滚到 v1")
+
+            card = (
+                await db.execute(
+                    select(Message)
+                    .where(Message.session_id == session.id, Message.kind == "version")
+                    .order_by(Message.id.desc())
+                )
+            ).scalars().first()
+            self.assertIsNotNone(card)
+            assert card is not None
+            self.assertTrue(card.tool_args and card.tool_args.get("is_restore"))
+
+            with self.assertRaises(HTTPException) as raised:
+                await restore_version(session.id, restored.id, db)
+            self.assertEqual(raised.exception.status_code, 409)
+            self.assertIn("不能再次回滚", raised.exception.detail)
+
+            versions_after_rejection = (
+                await db.execute(
+                    select(Version).where(Version.session_id == session.id)
+                )
+            ).scalars().all()
+            self.assertEqual(len(versions_after_rejection), 2)

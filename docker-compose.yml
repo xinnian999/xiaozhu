@@ -5,7 +5,8 @@
 #
 # 用法（服务器上）：
 #   1. cp server/.env.example .env，再按 README 配置预览域名与密钥
-#   2. 在 .env 设置 XIAOZHU_IMAGE_TAG；Git tag release-v1.2.3 对应镜像 tag 1.2.3
+#   2. 在 .env 设置 XIAOZHU_IMAGE_TAG 和 XIAOZHU_DATA_DIR；
+#      Git tag release-v1.2.3 对应镜像 tag 1.2.3
 #   3. docker login 到阿里云仓库（拉私有镜像需要）
 #   4. docker compose pull && docker compose up -d
 #   5. docker compose logs -f   # 看启动日志
@@ -37,10 +38,11 @@ services:
       - SANDBOX_DATA_DIR=/app/data/sandbox-worker
       - SANDBOX_TEMPLATE_DIR=/app/templates/vite-react
 
-    # 把宿主机 ./data 挂到容器 /app/data，让 SQLite 数据库文件持久化。
-    # 升级 / 重建容器后数据还在。
+    # 把宿主机数据目录挂到容器 /app/data，让 SQLite 数据库文件持久化。
+    # 生产环境必须把 XIAOZHU_DATA_DIR 配到面板内部目录之外，避免面板维护
+    # 自身数据时递归修改权限；本地未配置时仍默认使用当前目录的 ./data。
     volumes:
-      - ./data:/app/data
+      - ${XIAOZHU_DATA_DIR:-./data}:/app/data
 
     # 单容器的资源上限覆盖 API 与 Worker；Worker 自身仍保持单并发和构建超时。
     mem_limit: 1800m
@@ -55,7 +57,9 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD-SHELL", "/app/.venv/bin/python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/setup-status', timeout=2); urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=2)\""]
+      # API 存活不代表 SQLite 可写；先校验数据目录和数据库文件，避免业务已 500
+      # 时容器仍被 Docker 判定为 healthy。
+      test: ["CMD-SHELL", "test -w /app/data && test -x /app/data && test -w /app/data/xiaozhu.db && /app/.venv/bin/python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/setup-status', timeout=2); urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=2)\""]
       interval: 10s
       timeout: 3s
       retries: 5

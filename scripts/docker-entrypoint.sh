@@ -29,6 +29,14 @@ SANDBOX_PORT="${SANDBOX_PORT:-8010}"
 SANDBOX_DATA_DIR="${SANDBOX_DATA_DIR:-/app/data/sandbox-worker}"
 SANDBOX_TEMPLATE_DIR="${SANDBOX_TEMPLATE_DIR:-/app/templates/vite-react}"
 
+# 容器以去除全部 capabilities 的 root 身份运行。目录缺少执行或写权限时，
+# SQLite 可能仍能读取旧数据，却会在创建会话时才暴露 readonly database。
+# 在启动前直接失败，避免出现“健康检查正常、业务写请求 500”的半失效状态。
+if [ ! -w /app/data ] || [ ! -x /app/data ]; then
+  echo "[entrypoint] 数据目录 /app/data 不可写或不可进入，请检查宿主机挂载目录权限" >&2
+  exit 1
+fi
+
 mkdir -p "$SANDBOX_DATA_DIR/jobs" "$SANDBOX_DATA_DIR/previews"
 
 echo "[entrypoint] 应用数据库迁移"

@@ -141,7 +141,7 @@ function ReasoningCard({ message }: { message: Message }) {
         <strong>{streaming ? '正在思考' : fallback ? '已完成思考' : '思考过程'}</strong>
         <small>
           {streaming
-            ? '推理内容正在实时输出'
+            ? ''
             : fallback
               ? message.text
               : expanded

@@ -63,9 +63,9 @@ cp server/.env.example server/.env
 JWT_SECRET=随机长密钥
 SANDBOX_WORKER_TOKEN=另一个随机长密钥
 SANDBOX_CAPABILITY_SECRET=第三个随机长密钥
-SANDBOX_WORKER_URL=http://127.0.0.1:8010
+SANDBOX_WORKER_URL=http://127.0.0.1:7010
 SANDBOX_PREVIEW_DIR=../data/sandbox-worker-dev/previews
-SANDBOX_PREVIEW_ORIGIN=http://preview.localhost:9000
+SANDBOX_PREVIEW_ORIGIN=http://preview.localhost:7000
 SANDBOX_FRAME_ANCESTORS=*
 ```
 
@@ -81,8 +81,9 @@ Chrome 扩展、桌面 WebView 和 HMR 的 opaque 调试祖先；响应级 CSP s
 iframe sandbox 仍然保留。该配置只作用于 loopback dev，生产环境必须显式收紧为
 真实主站 Origin。
 
-开发地址：前台 `http://localhost:9000`，管理后台
-`http://localhost:9100/admin/`，API `http://localhost:9200`。
+开发地址：前台 `http://localhost:7000`，管理后台
+`http://localhost:7100/admin/`，API `http://localhost:7200`；沙箱 Worker 监听
+`http://127.0.0.1:7010`。
 
 完整 Compose 部署使用根目录 `.env`：
 

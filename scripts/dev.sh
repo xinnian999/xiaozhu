@@ -7,11 +7,11 @@ project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
 export SANDBOX_WORKER_TOKEN="${SANDBOX_WORKER_TOKEN:-xiaozhu-local-dev-worker-token}"
 export SANDBOX_CAPABILITY_SECRET="${SANDBOX_CAPABILITY_SECRET:-xiaozhu-local-dev-capability-secret}"
-export SANDBOX_WORKER_URL="${SANDBOX_WORKER_URL:-http://127.0.0.1:8010}"
+export SANDBOX_WORKER_URL="${SANDBOX_WORKER_URL:-http://127.0.0.1:7010}"
 export SANDBOX_PREVIEW_DIR="${SANDBOX_PREVIEW_DIR:-$project_dir/data/sandbox-worker-dev/previews}"
-export SANDBOX_PREVIEW_ORIGIN="${SANDBOX_PREVIEW_ORIGIN:-http://preview.localhost:9000}"
+export SANDBOX_PREVIEW_ORIGIN="${SANDBOX_PREVIEW_ORIGIN:-http://preview.localhost:7000}"
 # 本地 Chrome、扩展调试和桌面 WebView 可能在顶层页面外再套一层祖先；严格写死
-# localhost:9000 会让浏览器偶发拒绝嵌入，但生产仍由部署环境显式配置真实主站域名。
+# localhost:7000 会让浏览器偶发拒绝嵌入，但生产仍由部署环境显式配置真实主站域名。
 export SANDBOX_FRAME_ANCESTORS="${SANDBOX_FRAME_ANCESTORS:-*}"
 
 exec pnpm exec concurrently \

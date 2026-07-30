@@ -2,13 +2,13 @@
 # 启动 dev 前清理本仓库遗留的完整监督进程树。
 #
 # 只杀监听子进程不够：FastAPI reloader、Node --watch、pnpm/concurrently 父进程会立即
-# 把它们重新拉起，导致新 Vite 偷跑到 9001、API/Worker 却仍是旧进程。这里先用监听
+# 把它们重新拉起，导致新 Vite 偷跑到 7001、API/Worker 却仍是旧进程。这里先用监听
 # 端口定位进程，再校验 cwd 确实属于本仓库，最后终止其整个进程组。
 set -eu
 
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 current_pgid=$(ps -o pgid= -p $$ | tr -d ' ')
-ports="9200 8010 9000 9100"
+ports="7200 7010 7000 7100"
 old_pgids=""
 
 if command -v lsof >/dev/null 2>&1; then

@@ -432,7 +432,7 @@ class PreviewFileTests(CapabilitySecretTestCase):
             patch.object(
                 sandbox.settings,
                 "sandbox_preview_origin",
-                "http://preview.localhost:9000",
+                "http://preview.localhost:7000",
             ),
             patch.object(
                 sandbox.settings,
@@ -440,7 +440,7 @@ class PreviewFileTests(CapabilitySecretTestCase):
                 "*",
             ),
         ):
-            csp = sandbox._preview_headers("preview.localhost:9000")[
+            csp = sandbox._preview_headers("preview.localhost:7000")[
                 "Content-Security-Policy"
             ]
 

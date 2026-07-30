@@ -13,7 +13,7 @@ fi
 
 mkdir -p "$data_dir"
 
-export SANDBOX_PORT="${SANDBOX_PORT:-8010}"
+export SANDBOX_PORT="${SANDBOX_PORT:-7010}"
 export SANDBOX_DATA_DIR="${SANDBOX_DATA_DIR:-$data_dir}"
 export SANDBOX_TEMPLATE_DIR="${SANDBOX_TEMPLATE_DIR:-$template_dir}"
 

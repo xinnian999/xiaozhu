@@ -11,7 +11,7 @@
     "dev:web": "sh scripts/wait-dev-services.sh && pnpm --dir web dev",
     "dev:admin": "sh scripts/wait-dev-services.sh && pnpm --dir web-admin dev",
     "db:migrate": "uv run --directory server alembic upgrade head",
-    "dev:server": "pnpm run db:migrate && uv run --directory server fastapi dev app/main.py --port 9200",
+    "dev:server": "pnpm run db:migrate && uv run --directory server fastapi dev app/main.py --port 7200",
     "dev:sandbox": "sh scripts/dev-sandbox.sh",
     "build": "pnpm --dir web build",
     "build:admin": "pnpm --dir web-admin build",

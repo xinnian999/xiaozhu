@@ -467,6 +467,7 @@ export async function postBuildResult(
     ok: boolean
     errors: string
     runtime?: boolean
+    infrastructure?: boolean
     screenshot_id?: string
     device?: 'desktop' | 'mobile'
   },

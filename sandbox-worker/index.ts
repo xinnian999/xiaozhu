@@ -36,7 +36,7 @@ const MAX_WIRE_BYTES = 32 * 1024 * 1024
 const MAX_LOG_BYTES = 100 * 1024
 const MAX_PREVIEWS_PER_SESSION = 3
 // 修改可信模板、构建器或运行时 bridge 后递增，避免复用旧格式产物。
-const BUILD_CACHE_VERSION = '2'
+const BUILD_CACHE_VERSION = '3'
 
 const protectedFiles = [
   '.npmrc',
@@ -294,7 +294,6 @@ function validatePayload(value: unknown): BuildPayload {
 
 function runtimeBridge(): string {
   return `<script type="module">
-import html2canvas from 'html2canvas';
 (() => {
   if (window.__xiaozhuServerBridge) return;
   window.__xiaozhuServerBridge = true;
@@ -496,7 +495,16 @@ import html2canvas from 'html2canvas';
       else reject(new Error('浏览器未能编码 WebP 截图'));
     }, 'image/webp', 0.75);
   });
+  let html2canvasPromise = null;
+  const loadHtml2canvas = () => {
+    if (!html2canvasPromise) {
+      // 截图依赖体积较大，不能阻塞 bridge 启动和 ready 握手；只在真正截图时加载。
+      html2canvasPromise = import('html2canvas').then((module) => module.default);
+    }
+    return html2canvasPromise;
+  };
   const capture = async (background) => {
+    const html2canvas = await loadHtml2canvas();
     // 字体或第三方图片可能长时间不结束；截图尽量等稳定，但不能被它们无限拖住。
     await waitAtMost(waitForAssets(), 4000);
     const viewportWidth = Math.max(

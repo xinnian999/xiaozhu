@@ -30,6 +30,7 @@ class BuildResult(BaseModel):
     覆盖编译与运行时两类报错（前端在 vite build 后、iframe 重载渲染收集完一并回报）：
     - 编译没过：ok=false, runtime=false
     - 编译过但渲染时崩：ok=false, runtime=true
+    - 预览网络/bridge 验收失败：ok=false, infrastructure=true
     - 都没问题：ok=true
     """
 
@@ -39,6 +40,8 @@ class BuildResult(BaseModel):
     ok: bool  # 构建与运行是否都通过
     errors: str = ""  # 报错摘要；ok=true 时空串
     runtime: bool = False  # 报错是「运行时」还是「编译期」—— 供 check_build 区分文案
+    # iframe 导航、bridge ready 等验收链路异常不是用户代码错误，Agent 不应据此改代码。
+    infrastructure: bool = False
     # 兼容部署切换期间仍打开着的旧前端；新前端不再发送启发式布局探针结果。
     visual: bool = False
     # 截图先通过独立原始 body 接口上传，这里只关联服务端生成的轻量 ID。
@@ -104,6 +107,7 @@ async def report_build_result(session_id: str, body: BuildResult) -> None:
             "ok": ok,
             "errors": errors,
             "runtime": body.runtime,
+            "infrastructure": body.infrastructure,
             "screenshot_id": screenshot_id,
             "device": screenshot.device if screenshot is not None else body.device,
         },

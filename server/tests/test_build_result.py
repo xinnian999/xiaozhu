@@ -50,6 +50,21 @@ class NormalizeBuildOutcomeTests(TestCase):
         self.assertFalse(ok)
         self.assertEqual(errors, "src/App.tsx: Unexpected token")
 
+    def test_preview_infrastructure_failure_remains_distinct_from_runtime_error(self):
+        body = BuildResult(
+            check_id="check-4",
+            ok=False,
+            errors="预览页面未在 30 秒内完成加载",
+            infrastructure=True,
+        )
+
+        ok, errors = _normalize_build_outcome(body)
+
+        self.assertFalse(ok)
+        self.assertFalse(body.runtime)
+        self.assertTrue(body.infrastructure)
+        self.assertEqual(errors, "预览页面未在 30 秒内完成加载")
+
 
 if __name__ == "__main__":
     main()

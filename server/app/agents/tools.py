@@ -433,9 +433,21 @@ def build_tools(
             )
         build_reuse_state.note_fresh_result(
             check_id,
-            cacheable=None if synthetic else True,
+            cacheable=(
+                None
+                if synthetic
+                else not bool(result.get("infrastructure"))
+            ),
         )
         errors = str(result.get("errors") or "").strip() or "（无详细错误信息）"
+        if result.get("infrastructure"):
+            return (
+                f"{device_note}项目代码没有被判定为编译或运行失败，但预览基础设施"
+                f"未能完成验收：\n{errors}\n"
+                "这不是已确认的项目代码错误；不要据此修改或简化业务代码，也不要重复"
+                "调用 check_build 碰运气。请保留当前实现并向用户如实说明预览验收暂不可用。",
+                artifact,
+            )
         if result.get("runtime"):
             # 编译过了、但 iframe 渲染时崩（如 undefined is not a function）
             return (

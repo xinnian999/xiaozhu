@@ -6,7 +6,10 @@ import { useUIStore, type PreviewDevice } from '@/store/ui'
 import styles from '../PreviewPane/index.module.scss'
 
 const RUNTIME_COLLECT_MS = 1500
-const READY_FALLBACK_MS = 8000
+// 构建成功后先给 iframe 足够的网络导航时间；load 后再单独等待 bridge ready。
+// 两段超时都属于预览基础设施验收，不能伪装成用户代码的运行时错误。
+const IFRAME_LOAD_FALLBACK_MS = 30_000
+const READY_FALLBACK_MS = 15_000
 const IFRAME_READY_RETRY_BASE_MS = 1500
 const IFRAME_READY_RETRY_MAX_MS = 10000
 const IFRAME_READY_REBUILD_AFTER = 2
@@ -268,7 +271,10 @@ export default function ServerPreviewPane() {
     }
   }, [prepareCaptureLayout])
 
-  const finishPendingCheck = useCallback((terminalError?: string) => {
+  const finishPendingCheck = useCallback((
+    terminalError?: string,
+    terminalInfrastructure = false,
+  ) => {
     const pending = pendingCheckRef.current
     if (!pending || pending.done) return
     pending.done = true
@@ -279,11 +285,17 @@ export default function ServerPreviewPane() {
       ...pending.runtimeErrors,
       ...(terminalError ? [terminalError] : []),
     ]
+    // 已收到真实运行时报错时仍按代码问题回报；只有没有代码证据的导航/ready
+    // 超时才标记为基础设施异常，避免 Agent 因网络波动反复改写业务代码。
+    const infrastructure = (
+      terminalInfrastructure
+      && pending.runtimeErrors.length === 0
+    )
     const result = {
       ok: allErrors.length === 0,
       errors: allErrors.join('\n'),
-      // ready 超时发生在编译成功、iframe 启动验收阶段，不能误导 Agent 当成编译错误改代码。
-      runtime: pending.runtimeErrors.length > 0 || Boolean(terminalError),
+      runtime: pending.runtimeErrors.length > 0,
+      infrastructure,
     }
 
     void (async () => {
@@ -338,6 +350,15 @@ export default function ServerPreviewPane() {
     })()
   }, [captureIframeScreenshot, clearCheckTimers])
 
+  const armPendingCheckTimeout = useCallback((message: string, timeoutMs: number) => {
+    if (readyFallbackRef.current) clearTimeout(readyFallbackRef.current)
+    readyFallbackRef.current = null
+    if (!pendingCheckRef.current || pendingCheckRef.current.done) return
+    readyFallbackRef.current = setTimeout(() => {
+      finishPendingCheck(message, true)
+    }, timeoutMs)
+  }, [finishPendingCheck])
+
   const beginRuntimeCollection = useCallback(() => {
     if (!pendingCheckRef.current || pendingCheckRef.current.done) return
     if (readyFallbackRef.current) clearTimeout(readyFallbackRef.current)
@@ -358,7 +379,7 @@ export default function ServerPreviewPane() {
     const device = useUIStore.getState().previewDevice
     if (checkId) {
       cancelPendingCaptures('预览检查已被新的构建取代')
-      finishPendingCheck('上一轮预览检查已被新的构建取代')
+      finishPendingCheck('上一轮预览检查已被新的构建取代', true)
     }
     setPreviewStatus('building')
     setPreviewError(null)
@@ -396,9 +417,10 @@ export default function ServerPreviewPane() {
           documentId: null,
           done: false,
         }
-        readyFallbackRef.current = setTimeout(() => {
-          finishPendingCheck('预览未在 8 秒内发送就绪信号，无法完成运行时验收')
-        }, READY_FALLBACK_MS)
+        armPendingCheckTimeout(
+          '预览页面未在 30 秒内完成加载，无法进行运行时验收',
+          IFRAME_LOAD_FALLBACK_MS,
+        )
       }
       setPreviewUrl(result.preview_url)
       // 相同源码可能返回相同 build_id；仍要重挂 iframe，不能让旧错误文档继续占位。
@@ -416,12 +438,14 @@ export default function ServerPreviewPane() {
           ok: false,
           errors: message,
           runtime: false,
+          infrastructure: true,
           device,
         })
       }
     }
   }, [
     cancelPendingCaptures,
+    armPendingCheckTimeout,
     clearIframeReadyTimer,
     finishPendingCheck,
     pushPreviewLog,
@@ -763,9 +787,13 @@ export default function ServerPreviewPane() {
     // load 只表示文档完成导航；加载层继续显示，直到 bridge 确认 React 首屏已绘制。
     setLoadedIframeSrc(iframeRef.current?.src ?? null)
     setReadyIframeSrc(null)
+    armPendingCheckTimeout(
+      '预览页面已加载，但未在 15 秒内发送就绪信号，无法进行运行时验收',
+      READY_FALLBACK_MS,
+    )
     requestIframeReady()
     armIframeReadyRecovery()
-  }, [armIframeReadyRecovery, requestIframeReady])
+  }, [armIframeReadyRecovery, armPendingCheckTimeout, requestIframeReady])
 
   useEffect(() => {
     if (!navCmd.seq) return

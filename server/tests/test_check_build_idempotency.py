@@ -529,6 +529,16 @@ class CheckBuildIdempotencyTests(IsolatedAsyncioTestCase):
                 False,
             ),
             (
+                {
+                    "ok": False,
+                    "errors": "预览页面加载超时",
+                    "runtime": False,
+                    "infrastructure": True,
+                },
+                None,
+                False,
+            ),
+            (
                 None,
                 None,
                 False,
@@ -566,6 +576,37 @@ class CheckBuildIdempotencyTests(IsolatedAsyncioTestCase):
                     state.prepare_check("check-2", "same-files"),
                     expected_reuse,
                 )
+
+    async def test_tool_does_not_present_infrastructure_failure_as_code_error(self):
+        state = BuildCheckReuseState()
+        state.prepare_check("check-1", "same-files")
+        tools = build_tools(
+            AsyncMock(),  # type: ignore[arg-type]
+            "session-1",
+            asyncio.Lock(),
+            build_reuse_state=state,
+        )
+        check_build = next(tool for tool in tools if tool.name == "check_build")
+
+        with patch(
+            "app.agents.tools.build_store.wait",
+            new=AsyncMock(
+                return_value={
+                    "ok": False,
+                    "errors": "预览页面加载超时",
+                    "runtime": False,
+                    "infrastructure": True,
+                }
+            ),
+        ):
+            content, artifact = await check_build.coroutine(
+                SimpleNamespace(tool_call_id="check-1")
+            )
+
+        self.assertIn("预览基础设施未能完成验收", content)
+        self.assertIn("不要据此修改或简化业务代码", content)
+        self.assertNotIn("请定位并修复", content)
+        self.assertIsNone(artifact)
 
 
 class BuildCheckRestoreTests(IsolatedAsyncioTestCase):

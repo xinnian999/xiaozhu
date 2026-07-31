@@ -190,6 +190,62 @@ class PreviewScreenshotStorageTests(IsolatedAsyncioTestCase):
 
 
 class ScreenshotVisionMiddlewareTests(IsolatedAsyncioTestCase):
+    async def test_text_only_model_is_told_it_cannot_review_screenshot(self):
+        artifact = {
+            "screenshot": {
+                "id": "shot-id",
+                "ref": {
+                    "url": "/api/sessions/session-safe/preview-screenshots/shot-id",
+                    "width": 1130,
+                    "height": 703,
+                },
+            }
+        }
+        messages = [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "check_build",
+                        "args": {},
+                        "id": "tool-id",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            ToolMessage(
+                content="构建通过",
+                tool_call_id="tool-id",
+                artifact=artifact,
+            ),
+        ]
+        request = ModelRequest(
+            model=object(),  # type: ignore[arg-type]
+            messages=messages,
+        )
+        captured: list[ModelRequest] = []
+
+        async def handler(next_request: ModelRequest) -> ModelResponse:
+            captured.append(next_request)
+            return ModelResponse(result=[])
+
+        with patch(
+            "app.agents.middleware.load_screenshot_data_url",
+            new=AsyncMock(),
+        ) as load:
+            middleware = ScreenshotVisionMiddleware(
+                enabled=False,
+                session_id="session-safe",
+            )
+            await middleware.awrap_model_call(request, handler)
+
+        load.assert_not_awaited()
+        self.assertEqual(len(captured[0].messages), len(messages) + 1)
+        notice = captured[0].messages[-1]
+        self.assertIsInstance(notice, HumanMessage)
+        self.assertIn("当前模型不支持识图", str(notice.content))
+        self.assertIn("禁止描述或评价截图内容", str(notice.content))
+
     async def test_image_is_loaded_only_for_transient_model_request(self):
         artifact = {
             "screenshot": {

@@ -22,6 +22,11 @@ from app.models.llm_config import LlmModelAdminUpdate
 
 
 class PublicModelCapabilityTests(TestCase):
+    def test_hard_blocked_provider_cannot_inherit_stale_vision_flag(self):
+        self.assertFalse(llm.effective_vision_capability("deepseek", True))
+        self.assertFalse(llm.effective_vision_capability("minimax", True))
+        self.assertTrue(llm.effective_vision_capability("qwen", True))
+
     def test_public_models_exposes_persisted_capabilities(self):
         registry = {
             "qwen-test": {

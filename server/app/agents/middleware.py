@@ -149,9 +149,6 @@ class ScreenshotVisionMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
-        if not self._enabled:
-            return await handler(request)
-
         # 只看「最后一条 AIMessage 之后」的工具结果。这恰好是当前这一批工具调用，
         # 不会把更早轮次的截图重复注入。若一批里意外有多次 check_build，取最后一张。
         current_tool_results: list[Any] = []
@@ -172,6 +169,20 @@ class ScreenshotVisionMiddleware(AgentMiddleware):
 
         if screenshot_id is None or screenshot_ref is None:
             return await handler(request)
+
+        if not self._enabled:
+            # 文本模型仍会看到 check_build 的文字结果。显式告知它没有收到图片，
+            # 避免模型仅凭“附带截图”等字样编造“截图看起来正常”。
+            text_only_notice = HumanMessage(
+                content=(
+                    "系统提示（非用户发言）：本次 check_build 生成了预览截图，"
+                    "但当前模型不支持识图，因此你没有收到、也无法查看这张图片。"
+                    "禁止描述或评价截图内容；只能依据工具返回的编译与运行时文字结果继续。"
+                )
+            )
+            return await handler(
+                request.override(messages=[*request.messages, text_only_notice])
+            )
 
         try:
             screenshot_data_url = await load_screenshot_data_url(

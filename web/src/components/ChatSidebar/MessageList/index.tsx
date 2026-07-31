@@ -36,6 +36,9 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
   const endRef = useRef<HTMLDivElement>(null)
   // 用户手动离开底部后暂停自动跟随；只有再次滚回底部才恢复。
   const shouldFollowRef = useRef(true)
+  // scroll 事件本身分不出「用户滚动」和「聊天栏变窄导致文本换行」。
+  // 只有先收到明确的滚轮 / 触摸 / 滚动条操作，才允许 scroll 事件暂停跟随。
+  const userScrollIntentRef = useRef(false)
   // 记录已经为哪个会话做过「首次定位到底部」。首次（刷新 / 切会话）延时滚，
   // 避开预览区展开动画 + 布局抖动；之后的新消息才即时 smooth 平滑滚动。
   const didInitScrollRef = useRef<string | null>(null)
@@ -52,6 +55,9 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
     ),
   )
   const isStreaming = session?.isStreaming ?? false
+  // 历史消息是异步加载的：sessionId 可能先出现，消息列表稍后才真正挂载。
+  // 这个标记用于在 listRef 从不存在变为可用时重新安装滚动监听。
+  const hasMessageList = messages.length > 0 || isStreaming
   const awaitingAnswer = session?.awaitingAnswer ?? false
   // 最新一轮被中断、可从断点续跑：据此在对话流末尾显示「继续生成」按钮
   const resumable = session?.resumable ?? false
@@ -97,24 +103,121 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
   }, [isStreaming, streamingText, hasLiveReasoning, phaseKey])
 
   // 监听真正承载滚动的 chatBody。用户向上查看历史消息后立刻暂停自动跟随，
-  // 滚回底部时再恢复；切换会话则重新从最新消息开始。
+  // 滚回底部时再恢复；聊天栏宽度变化引起的内容重排则继续贴底。
   useEffect(() => {
     const scrollContainer = listRef.current?.parentElement
-    if (!scrollContainer) return
+    const list = listRef.current
+    if (!scrollContainer || !list) return
 
     shouldFollowRef.current = true
-    const syncFollowState = () => {
+    userScrollIntentRef.current = false
+
+    const isNearBottom = () => {
       const distanceToBottom = (
         scrollContainer.scrollHeight
         - scrollContainer.scrollTop
         - scrollContainer.clientHeight
       )
-      shouldFollowRef.current = distanceToBottom <= FOLLOW_BOTTOM_THRESHOLD
+      return distanceToBottom <= FOLLOW_BOTTOM_THRESHOLD
     }
 
+    const syncFollowState = () => {
+      if (isNearBottom()) {
+        shouldFollowRef.current = true
+      } else if (userScrollIntentRef.current) {
+        shouldFollowRef.current = false
+      }
+      userScrollIntentRef.current = false
+    }
+
+    let intentResetTimer = 0
+    const expireTransientIntent = () => {
+      window.clearTimeout(intentResetTimer)
+      intentResetTimer = window.setTimeout(() => {
+        userScrollIntentRef.current = false
+      }, 150)
+    }
+    const markWheelIntent = (event: WheelEvent) => {
+      userScrollIntentRef.current = true
+      expireTransientIntent()
+      // 向上滚时立即暂停，避免同一帧的新流式内容先把用户拉回底部。
+      if (event.deltaY < 0) shouldFollowRef.current = false
+    }
+    const markTouchIntent = () => {
+      userScrollIntentRef.current = true
+    }
+    const markPointerIntent = (event: PointerEvent) => {
+      // 点击消息里的按钮不算滚动意图；只有直接操作滚动容器（含原生滚动条）才算。
+      if (event.target === scrollContainer) {
+        userScrollIntentRef.current = true
+      }
+    }
+    const clearPointerIntent = () => {
+      userScrollIntentRef.current = false
+    }
+    const markKeyboardIntent = (event: KeyboardEvent) => {
+      const activeElement = document.activeElement
+      if (
+        activeElement instanceof HTMLInputElement
+        || activeElement instanceof HTMLTextAreaElement
+        || activeElement instanceof HTMLSelectElement
+        || (activeElement instanceof HTMLElement && activeElement.isContentEditable)
+      ) {
+        return
+      }
+
+      const scrollKeys = ['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ']
+      if (!scrollKeys.includes(event.key)) return
+      userScrollIntentRef.current = true
+      expireTransientIntent()
+      if (
+        event.key === 'ArrowUp'
+        || event.key === 'PageUp'
+        || event.key === 'Home'
+        || (event.key === ' ' && event.shiftKey)
+      ) {
+        shouldFollowRef.current = false
+      }
+    }
+
+    // 首次预览展开时 sidebar 有宽度动画，文本会持续换行、scrollHeight 逐帧增长。
+    // 只要用户没有主动离开底部，就在每次尺寸变化后继续贴住最新消息。
+    let resizeFrame = 0
+    const resizeObserver = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(() => {
+          if (!shouldFollowRef.current) return
+          cancelAnimationFrame(resizeFrame)
+          resizeFrame = requestAnimationFrame(() => {
+            if (!shouldFollowRef.current) return
+            scrollContainer.scrollTop = scrollContainer.scrollHeight
+          })
+        })
+
+    resizeObserver?.observe(scrollContainer)
+    resizeObserver?.observe(list)
+
+    scrollContainer.addEventListener('wheel', markWheelIntent, { passive: true })
+    scrollContainer.addEventListener('touchstart', markTouchIntent, { passive: true })
+    scrollContainer.addEventListener('pointerdown', markPointerIntent)
+    window.addEventListener('pointerup', clearPointerIntent)
+    window.addEventListener('pointercancel', clearPointerIntent)
+    window.addEventListener('keydown', markKeyboardIntent)
+
     scrollContainer.addEventListener('scroll', syncFollowState, { passive: true })
-    return () => scrollContainer.removeEventListener('scroll', syncFollowState)
-  }, [sessionId])
+    return () => {
+      window.clearTimeout(intentResetTimer)
+      cancelAnimationFrame(resizeFrame)
+      resizeObserver?.disconnect()
+      scrollContainer.removeEventListener('wheel', markWheelIntent)
+      scrollContainer.removeEventListener('touchstart', markTouchIntent)
+      scrollContainer.removeEventListener('pointerdown', markPointerIntent)
+      scrollContainer.removeEventListener('scroll', syncFollowState)
+      window.removeEventListener('pointerup', clearPointerIntent)
+      window.removeEventListener('pointercancel', clearPointerIntent)
+      window.removeEventListener('keydown', markKeyboardIntent)
+    }
+  }, [sessionId, hasMessageList])
 
   // 新消息到来 / 进入思考态时，仅在用户仍停留于底部时继续跟随。
   useEffect(() => {

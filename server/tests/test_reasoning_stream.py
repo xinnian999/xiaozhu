@@ -221,6 +221,82 @@ class _SilentToolAgent:
         )
 
 
+class _ParallelToolIntroAgent:
+    """同一句开场后并发写多个文件，只应展示一次开场。"""
+
+    async def astream(self, _graph_input, *, stream_mode, config):
+        assert stream_mode == ["updates", "messages"]
+        paths = [
+            "src/main.tsx",
+            "src/App.tsx",
+            "src/pages/Home.tsx",
+            "src/pages/Post.tsx",
+        ]
+        tool_calls = [
+            {
+                "name": "write_file",
+                "args": {"path": path, "content": f"// {path}"},
+                "id": f"write-{index}",
+                "type": "tool_call",
+            }
+            for index, path in enumerate(paths)
+        ]
+        yield (
+            "messages",
+            (
+                AIMessageChunk(content="我来创建博客的完整结构。"),
+                {"langgraph_node": "model"},
+            ),
+        )
+        yield (
+            "messages",
+            (
+                AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        {
+                            "name": "write_file",
+                            "args": f'{{"path":"{path}","content":"',
+                            "id": f"write-{index}",
+                            "index": index,
+                            "type": "tool_call_chunk",
+                        }
+                        for index, path in enumerate(paths)
+                    ],
+                ),
+                {"langgraph_node": "model"},
+            ),
+        )
+        yield (
+            "updates",
+            {
+                "model": {
+                    "messages": [
+                        AIMessage(
+                            content="我来创建博客的完整结构。",
+                            tool_calls=tool_calls,
+                        )
+                    ]
+                }
+            },
+        )
+        yield (
+            "updates",
+            {
+                "tools": {
+                    "messages": [
+                        ToolMessage(
+                            content=f"已写入 {path}",
+                            tool_call_id=f"write-{index}",
+                        )
+                        for index, path in enumerate(paths)
+                    ]
+                }
+            },
+        )
+        yield ("updates", {"model": {"messages": [AIMessage(content="完成")]}})
+
+
 def _event(frame: str) -> dict:
     return json.loads(frame.removeprefix("data: ").strip())
 
@@ -314,6 +390,34 @@ class ReasoningStreamTests(IsolatedAsyncioTestCase):
                 if event["type"] == "message_delta" and event["text"] == intro
             ],
             [{"type": "message_delta", "text": intro}],
+        )
+        saved_texts = [
+            call.args[4]
+            for call in save_message_mock.await_args_list
+            if len(call.args) >= 5 and call.args[3] == "assistant"
+        ]
+        self.assertEqual(saved_texts.count(intro), 1)
+
+    async def test_parallel_tools_share_one_intro(self):
+        events, save_message_mock = await self._run_tool_agent(
+            _ParallelToolIntroAgent()
+        )
+        intro = "我来创建博客的完整结构。"
+        self.assertEqual(
+            [
+                event
+                for event in events
+                if event["type"] == "message_delta" and event["text"] == intro
+            ],
+            [{"type": "message_delta", "text": intro}],
+        )
+        self.assertEqual(
+            {
+                event["id"]
+                for event in events
+                if event["type"] == "tool_call"
+            },
+            {"write-0", "write-1", "write-2", "write-3"},
         )
         saved_texts = [
             call.args[4]

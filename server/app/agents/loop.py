@@ -81,6 +81,29 @@ class ChatRequest(BaseModel):
     retry: bool = False
 
 
+def successful_file_tool_path(
+    name: str, args: object, tool_result: str
+) -> str | None:
+    """识别真正成功的写文件工具结果，并安全取出路径。
+
+    部分模型偶尔会发出缺少必填参数的工具调用。LangChain 会把校验错误作为
+    ToolMessage 返回；这里必须把它当成可恢复的工具失败，不能再用 ``args["path"]``
+    触发 KeyError、终止整条 SSE。
+    """
+    if not isinstance(args, dict):
+        return None
+    path = args.get("path")
+    if not isinstance(path, str) or not path:
+        return None
+    expected_prefix = {
+        "write_file": "已写入",
+        "edit_file": "已编辑",
+    }.get(name)
+    if expected_prefix is None or tool_result != f"{expected_prefix} {path}":
+        return None
+    return path
+
+
 # ── SSE 工具函数 ────────────────────────────────────────────────────────────────
 
 def sse(event: dict) -> str:
@@ -1204,21 +1227,21 @@ async def _consume(
                                 if not intro and not has_emitted_round_intro:
                                     intro = fallback_tool_intro(name)
                                 emitted_tool_intro = intro
-                            if emitted_tool_intro:
-                                has_emitted_round_intro = True
-                                yield sse(
-                                    {
-                                        "type": "message_delta",
-                                        "text": emitted_tool_intro,
-                                    }
-                                )
-                                await _save_message(
-                                    db,
-                                    db_lock,
-                                    session_id,
-                                    "assistant",
-                                    emitted_tool_intro,
-                                )
+                                if emitted_tool_intro:
+                                    has_emitted_round_intro = True
+                                    yield sse(
+                                        {
+                                            "type": "message_delta",
+                                            "text": emitted_tool_intro,
+                                        }
+                                    )
+                                    await _save_message(
+                                        db,
+                                        db_lock,
+                                        session_id,
+                                        "assistant",
+                                        emitted_tool_intro,
+                                    )
                             # check_build 要等完整 model update 才能知道是否命中同轮幂等缓存；
                             # 先不亮卡，避免随后判定为复用时留下一张空的重复自检卡。
                             if name == "check_build":
@@ -1569,22 +1592,41 @@ async def _consume(
                         # 抢先补发过（id 在 early_written 里），这里就只落 tool_result、不再重发
                         # file_write，避免前端收到同一文件两遍。
                         elif name == "write_file":
-                            wrote_files = True
-                            if tm.tool_call_id not in early_written:
+                            written_path = successful_file_tool_path(
+                                name, args, tool_result
+                            )
+                            content = (
+                                args.get("content")
+                                if isinstance(args, dict)
+                                else None
+                            )
+                            if written_path is not None and isinstance(content, str):
+                                wrote_files = True
+                            if (
+                                written_path is not None
+                                and isinstance(content, str)
+                                and tm.tool_call_id not in early_written
+                            ):
                                 yield sse({
                                     "type": "file_write",
-                                    "path": args["path"],
-                                    "content": args["content"],
+                                    "path": written_path,
+                                    "content": content,
                                 })
-                        elif name == "edit_file" and tool_result == f"已编辑 {args['path']}":
-                            if tm.tool_call_id in early_written:
+                        elif name == "edit_file":
+                            edited_path = successful_file_tool_path(
+                                name, args, tool_result
+                            )
+                            if (
+                                edited_path is not None
+                                and tm.tool_call_id in early_written
+                            ):
                                 wrote_files = True
-                            else:
+                            elif edited_path is not None:
                                 async with db_lock:
                                     res = await db.execute(
                                         select(File.content).where(
                                             File.session_id == session_id,
-                                            File.path == args["path"],
+                                            File.path == edited_path,
                                         )
                                     )
                                     content = res.scalar_one_or_none()
@@ -1592,7 +1634,7 @@ async def _consume(
                                     wrote_files = True
                                     yield sse({
                                         "type": "file_write",
-                                        "path": args["path"],
+                                        "path": edited_path,
                                         "content": content,
                                     })
 

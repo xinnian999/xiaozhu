@@ -21,6 +21,7 @@ from app.model_providers import (
     infer_provider,
     normalize_provider,
     provider_logo,
+    unsupported_vision_reason,
 )
 from app.models.llm_config import LlmModel
 
@@ -48,6 +49,15 @@ _MODELS_BY_ID: dict[str, dict] = {}
 _ORDERED_IDS: list[str] = []
 
 
+def effective_vision_capability(provider: str | None, detected: bool) -> bool:
+    """返回运行时真正可用的识图能力。
+
+    数据库里的探测结果可能来自旧版本或错误配置。对于已经明确不支持图片输入的
+    厂商，不能让残留的 ``vision=True`` 继续进入聊天校验、截图注入和前端能力展示。
+    """
+    return bool(detected and unsupported_vision_reason(provider) is None)
+
+
 async def reload_registry(session: AsyncSession) -> None:
     """从数据库重建内存缓存。启动时与后台改动后调用。"""
     global _MODELS_BY_ID, _ORDERED_IDS
@@ -64,10 +74,14 @@ async def reload_registry(session: AsyncSession) -> None:
             "base_url": m.base_url,
             "api_key": m.api_key,
             "logo": provider_logo(m.provider),
-            "vision": m.vision,
+            "vision": effective_vision_capability(m.provider, m.vision),
             "thinking": m.thinking,
             "thinking_toggle": m.thinking_toggle,
-            "vision_status": m.vision_status,
+            "vision_status": (
+                "unsupported"
+                if unsupported_vision_reason(m.provider) is not None
+                else m.vision_status
+            ),
             "thinking_status": m.thinking_status,
             "cost": m.cost,
             "enabled": m.enabled,

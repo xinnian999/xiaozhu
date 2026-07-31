@@ -1046,6 +1046,9 @@ async def _consume(
     # write_file 的 content 可能很长，不能等整条消息结束才把这句开场展示出来。
     active_visible_text = ""
     emitted_tool_intro = ""
+    # 提示词不能保证所有模型都在首个工具前输出正文。服务端只为整轮首个真实操作
+    # 补一次简短确认，后续工具仍完全按模型原始叙述展示，避免每写一个文件都刷一句。
+    has_emitted_round_intro = False
     wrote_files = initial_wrote_files
     truncated = False
     build_reuse_state = build_reuse_state or BuildCheckReuseState()
@@ -1122,6 +1125,16 @@ async def _consume(
         active_visible_text = ""
         emitted_tool_intro = ""
 
+    def fallback_tool_intro(tool_name: str) -> str:
+        """模型首个工具调用没有正文时，给用户一个克制的开工反馈。"""
+        if tool_name in {"list_files", "read_files"}:
+            return "好的，我先看看现有项目结构，然后开始实现。"
+        if tool_name in {"write_file", "edit_file"}:
+            return "好的，我已经理解需求，现在开始实现。"
+        if tool_name == "check_build":
+            return "代码已经准备好，我来做一次构建检查。"
+        return ""
+
     try:
         # 同时开 updates(节点边界,做副作用)+ messages(token 流)。
         #
@@ -1186,8 +1199,13 @@ async def _consume(
                             continue
                         name = tool_chunk_name.get(cid, "")
                         if name and cid not in announced_tools:
-                            if active_visible_text and not emitted_tool_intro:
-                                emitted_tool_intro = active_visible_text
+                            if not emitted_tool_intro:
+                                intro = active_visible_text
+                                if not intro and not has_emitted_round_intro:
+                                    intro = fallback_tool_intro(name)
+                                emitted_tool_intro = intro
+                            if emitted_tool_intro:
+                                has_emitted_round_intro = True
                                 yield sse(
                                     {
                                         "type": "message_delta",

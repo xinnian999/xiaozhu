@@ -155,12 +155,78 @@ class _ToolIntroAgent:
         )
 
 
+class _SilentToolAgent:
+    """模型不输出开场，直接开始工具调用。"""
+
+    async def astream(self, _graph_input, *, stream_mode, config):
+        assert stream_mode == ["updates", "messages"]
+        assert config["configurable"]["thread_id"] == "thread-1"
+        yield (
+            "messages",
+            (
+                AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        {
+                            "name": "write_file",
+                            "args": '{"path":"src/App.tsx","content":"',
+                            "id": "write-1",
+                            "index": 0,
+                            "type": "tool_call_chunk",
+                        }
+                    ],
+                ),
+                {"langgraph_node": "model"},
+            ),
+        )
+        yield (
+            "updates",
+            {
+                "model": {
+                    "messages": [
+                        AIMessage(
+                            content="",
+                            tool_calls=[
+                                {
+                                    "name": "write_file",
+                                    "args": {
+                                        "path": "src/App.tsx",
+                                        "content": "export default function App() { return null }",
+                                    },
+                                    "id": "write-1",
+                                    "type": "tool_call",
+                                }
+                            ],
+                        )
+                    ]
+                }
+            },
+        )
+        yield (
+            "updates",
+            {
+                "tools": {
+                    "messages": [
+                        ToolMessage(
+                            content="已写入 src/App.tsx",
+                            tool_call_id="write-1",
+                        )
+                    ]
+                }
+            },
+        )
+        yield (
+            "updates",
+            {"model": {"messages": [AIMessage(content="完成")]}},
+        )
+
+
 def _event(frame: str) -> dict:
     return json.loads(frame.removeprefix("data: ").strip())
 
 
 class ReasoningStreamTests(IsolatedAsyncioTestCase):
-    async def test_tool_intro_is_emitted_before_tool_card_without_duplication(self):
+    async def _run_tool_agent(self, agent) -> tuple[list[dict], AsyncMock]:
         db = SimpleNamespace(commit=AsyncMock())
 
         async def save_message(*_args, **_kwargs):
@@ -196,7 +262,7 @@ class ReasoningStreamTests(IsolatedAsyncioTestCase):
             frames = [
                 frame
                 async for frame in _consume(
-                    _ToolIntroAgent(),
+                    agent,
                     {"messages": []},
                     "thread-1",
                     session_id="session-1",
@@ -207,8 +273,10 @@ class ReasoningStreamTests(IsolatedAsyncioTestCase):
                     user_id="user-1",
                 )
             ]
+        return [_event(frame) for frame in frames], save_message_mock
 
-        events = [_event(frame) for frame in frames]
+    async def test_tool_intro_is_emitted_before_tool_card_without_duplication(self):
+        events, save_message_mock = await self._run_tool_agent(_ToolIntroAgent())
         event_types = [event["type"] for event in events]
         self.assertLess(
             event_types.index("message_delta"),
@@ -230,6 +298,29 @@ class ReasoningStreamTests(IsolatedAsyncioTestCase):
             if len(call.args) >= 5 and call.args[3] == "assistant"
         ]
         self.assertEqual(saved_texts.count("我来做一个作品主页，马上开始。"), 1)
+
+    async def test_silent_first_tool_gets_one_fallback_intro(self):
+        events, save_message_mock = await self._run_tool_agent(_SilentToolAgent())
+        event_types = [event["type"] for event in events]
+        self.assertLess(
+            event_types.index("message_delta"),
+            event_types.index("tool_call"),
+        )
+        intro = "好的，我已经理解需求，现在开始实现。"
+        self.assertEqual(
+            [
+                event
+                for event in events
+                if event["type"] == "message_delta" and event["text"] == intro
+            ],
+            [{"type": "message_delta", "text": intro}],
+        )
+        saved_texts = [
+            call.args[4]
+            for call in save_message_mock.await_args_list
+            if len(call.args) >= 5 and call.args[3] == "assistant"
+        ]
+        self.assertEqual(saved_texts.count(intro), 1)
 
     async def test_reasoning_chunks_arrive_before_final_answer(self):
         with (

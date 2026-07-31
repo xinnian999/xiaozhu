@@ -41,9 +41,8 @@ export type ChatSession = {
   // 和 isStreaming 是两个独立的锁：迁移到 interrupt() 后这段等待期间没有任何请求挂着，
   // 但发送框依然要保持禁用，直到 resume 流真正推来 done/error。
   awaitingAnswer: boolean
-  // 「最新一轮生成被中断、可从断点续跑」标记。断连（刷新 / 锁屏 / 停止 / 断网）会让
-  // 那一轮 SSE 半途而废，但后端 checkpointer 留着断点。为 true 时对话流末尾显示
-  // 「继续生成」按钮，点它调 resume 从断点接着跑。切会话拉数据时探测、同会话内断连兜底置位。
+  // 「最新一轮生成被中断、可从断点续跑」内部标记。断连（刷新 / 锁屏 / 断网）后，
+  // 前端据此自动重新订阅后台任务或从 checkpoint 续跑，不再展示需要手动点击的按钮。
   resumable: boolean
   // 当前 session 的文件快照：path -> content（已保存/已生成的内容）
   files: Record<string, string>
@@ -53,6 +52,9 @@ export type ChatSession = {
   drafts: Record<string, string>
   // 文件快照版本号，每次 files 变更 +1
   versionId: number
+  // 当前项目是否曾经进入过可预览阶段。它与聊天时间线解耦：重新生成会截掉旧工具卡和
+  // 版本卡，但上一版稳定预览仍应保留，直到新 check_build 成功后无缝替换。
+  previewRevealed: boolean
 }
 
 type SessionState = {
@@ -84,6 +86,8 @@ type SessionState = {
   /** 删除会话：DELETE 后端，成功后从列表移除；删的若是当前会话则回到空态首屏 */
   deleteSession: (id: string) => Promise<void>
   switchTo: (id: string) => Promise<void>
+  /** 从服务端重新同步消息和文件；用于后台任务重连结束后的最终一致性收口。 */
+  refreshSessionContent: (id: string) => Promise<void>
   /** 回到"无激活会话"的空态首屏；若正在生成，先中断并等流收尾 */
   goToEmpty: () => Promise<void>
   appendMessage: (msg: Message) => void
@@ -177,6 +181,7 @@ function fromApi(api: ApiSession): ChatSession {
     files: {},
     drafts: {},
     versionId: 0,
+    previewRevealed: false,
   }
 }
 
@@ -288,6 +293,20 @@ function fromApiMessage(m: ApiMessage): Message {
     }
   }
   return base
+}
+
+/** 历史里存在尚未回答的 ask_user 工具卡时，恢复“等待回答”交互态。 */
+function hasPendingAskUser(messages: Message[]): boolean {
+  // interrupt 落库后，这张空结果工具卡就是本轮最后一条消息。只检查末尾，避免历史上
+  // 已失效但未补结果的旧卡片把整个会话永久锁成“等待回答”。
+  const message = messages.at(-1)
+  return !!(
+    message
+    && message.kind === 'tool'
+    && message.toolName === 'ask_user'
+    && message.toolCallId
+    && !message.toolResult
+  )
 }
 
 export function makeMessage(
@@ -519,26 +538,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       url.searchParams.set('sessionId', id)
       window.history.replaceState(null, '', url.toString())
     }
-    // 切换到的目标会话如果还没拉过文件（files 为空且 versionId 为 0），从后端拉一次
     const target = get().sessions.find((s) => s.id === id)
     if (!target) return
-    if (Object.keys(target.files).length > 0) return  // 已加载过，不重复拉
-    // 并行拉文件和消息 —— 两个请求互相不依赖，并发更快
     try {
-      const [files, apiMessages] = await Promise.all([
-        listSessionFiles(id),
-        listSessionMessages(id),
-      ])
-      const messages = apiMessages.map(fromApiMessage)
-      set((s) => ({
-        sessions: s.sessions.map((sess) =>
-          sess.id === id
-            ? { ...sess, files, messages, versionId: sess.versionId + 1 }
-            : sess,
-        ),
-      }))
+      // 后台生成不再依赖当前页面，因此每次切回项目都以服务端持久化结果同步一次。
+      // drafts 保留不动，避免覆盖用户尚未保存的手工编辑。
+      await get().refreshSessionContent(id)
       // 拉完历史后探测这一轮是否被中断、可续跑（覆盖刷新 / 锁屏后重开的场景——
-      // 那时 JS 上下文已重建，只能问服务端）。当前没在流式 / 等回答时才问，避免打断进行中的轮次。
+      // 那时 JS 上下文已重建，只能问服务端）。已有本地文件的会话也必须探测：
+      // 用户切走只会断开订阅，服务端任务仍可能正在运行。
       // fire-and-forget：不阻塞切会话本身。
       const cur = get().sessions.find((s) => s.id === id)
       if (cur && !cur.isStreaming && !cur.awaitingAnswer) {
@@ -547,6 +555,34 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     } catch (e) {
       console.error(`加载会话 ${id} 的内容失败`, e)
     }
+  },
+
+  refreshSessionContent: async (id) => {
+    // 文件与消息互不依赖，并行读取可缩短刷新、切项目与任务重连后的恢复时间。
+    const [files, apiMessages] = await Promise.all([
+      listSessionFiles(id),
+      listSessionMessages(id),
+    ])
+    const messages = apiMessages.map(fromApiMessage)
+    const awaitingAnswer = hasPendingAskUser(messages)
+    const hasPreviewHistory = messages.some((message) => (
+      message.kind === 'version'
+      || (message.kind === 'tool' && message.toolName === 'check_build')
+    ))
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === id
+          ? {
+              ...sess,
+              files,
+              messages,
+              awaitingAnswer,
+              versionId: sess.versionId + 1,
+              previewRevealed: sess.previewRevealed || hasPreviewHistory,
+            }
+          : sess,
+      ),
+    }))
   },
 
   goToEmpty: async () => {
@@ -716,6 +752,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           }
         }
         if (lastUserIdx === -1) return sess
+        const previewRevealed = sess.previewRevealed || sess.messages.some((message) => (
+          message.kind === 'version'
+          || (message.kind === 'tool' && message.toolName === 'check_build')
+        ))
         const messages = sess.messages.slice(0, lastUserIdx + 1)
         // 重新生成是一轮新的执行，耗时应从点击按钮重新开始计算，而不是沿用用户
         // 最初发送这条需求的时间。消息内容和后端主键不变，只更新当前页面的计时锚点。
@@ -723,7 +763,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           ...messages[lastUserIdx],
           createdAt: Date.now(),
         }
-        return { ...sess, messages }
+        return { ...sess, messages, previewRevealed }
       }),
     }))
   },

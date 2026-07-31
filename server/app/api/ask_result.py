@@ -28,7 +28,8 @@ from app.agents.loop import (
 from app.agents.tools import BuildCheckReuseState
 from app.db import get_db
 from app.deps import get_owned_session
-from app.generation_control import managed_generation, reserve_generation
+from app.generation_control import reserve_generation
+from app.generation_runtime import start_generation
 from app.llm import allowed_model_ids, default_model_id, validate_thinking_option
 from app.models.message import Message as DBMessage
 from app.models.session import Session
@@ -184,11 +185,17 @@ async def report_ask_result(
     lease = reserve_generation(session_id)
     if lease is None:
         raise HTTPException(status_code=409, detail="项目正在删除，无法继续生成")
-    return StreamingResponse(
-        managed_generation(
-            lease,
-            with_heartbeat(_resume_stream(session_id, body, db, session.user_id)),
+    stream = start_generation(
+        session_id,
+        lease,
+        lambda task_db: with_heartbeat(
+            _resume_stream(session_id, body, task_db, session.user_id)
         ),
+    )
+    if stream is None:
+        raise HTTPException(status_code=409, detail="这个项目已有生成任务正在运行")
+    return StreamingResponse(
+        stream,
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

@@ -15,6 +15,7 @@ from app.agents.loop import (
     sse,
 )
 from app.agents.tools import BuildCheckReuseState, build_tools
+from app.api.sandbox import SandboxBuildRead
 from app.api.resume import (
     ResumeStart,
     _claim_resume_thread,
@@ -28,6 +29,14 @@ _PASS_CONTENT = (
     "这不代表视觉截图已经合格，附带截图仍需由支持视觉的模型严格审查。"
 )
 _ARTIFACT = {
+    "sandbox_preview": {
+        "ok": True,
+        "build_id": "build-1",
+        "preview_url": "/api/sandbox-preview/capability/",
+        "logs": "构建完成",
+        "errors": "",
+        "device": "desktop",
+    },
     "screenshot": {
         "id": "shot-1",
         "ref": {
@@ -38,6 +47,16 @@ _ARTIFACT = {
             "path": "/",
             "mime": "image/webp",
         },
+    }
+}
+_FAILED_PREVIEW_ARTIFACT = {
+    "sandbox_preview": {
+        "ok": False,
+        "build_id": None,
+        "preview_url": None,
+        "logs": "",
+        "errors": "构建失败",
+        "device": "desktop",
     }
 }
 
@@ -355,10 +374,14 @@ class CheckBuildIdempotencyTests(IsolatedAsyncioTestCase):
             and event["id"].startswith("check-")
         ]
         self.assertEqual([event["id"] for event in refreshes], ["check-1"])
+        self.assertEqual(
+            refreshes[0]["preview_url"],
+            "/api/sandbox-preview/capability/",
+        )
         self.assertEqual([event["id"] for event in check_cards], ["check-1"])
         self.assertEqual([event["id"] for event in check_results], ["check-1"])
-        # 第二项只使用内部会合点即时返回，不会触发第二次浏览器构建。
-        self.assertEqual(len(arm_calls), 2)
+        # 第二项由工具共享状态直接标记为重复，不再建立浏览器会合点或占用 Worker。
+        self.assertEqual(len(arm_calls), 1)
 
     async def test_duplicate_check_without_write_skips_second_refresh(self):
         state = BuildCheckReuseState()
@@ -418,7 +441,7 @@ class CheckBuildIdempotencyTests(IsolatedAsyncioTestCase):
             _TwoChecksAgent(
                 state,
                 first_content="预览构建失败（编译没通过）：语法错误",
-                first_artifact=None,
+                first_artifact=_FAILED_PREVIEW_ARTIFACT,
                 first_cacheable=True,
             ),
             state,
@@ -439,7 +462,7 @@ class CheckBuildIdempotencyTests(IsolatedAsyncioTestCase):
                     _TwoChecksAgent(
                         state,
                         first_content=first_content,
-                        first_artifact=None,
+                        first_artifact=_FAILED_PREVIEW_ARTIFACT,
                         first_cacheable=False,
                     ),
                     state,
@@ -469,15 +492,10 @@ class CheckBuildIdempotencyTests(IsolatedAsyncioTestCase):
             build_reuse_state=state,
         )
         check_build = next(tool for tool in tools if tool.name == "check_build")
-        with patch(
-            "app.agents.tools.build_store.wait",
-            new_callable=AsyncMock,
-        ) as wait:
-            content, artifact = await check_build.coroutine(
-                SimpleNamespace(tool_call_id="check-2")
-            )
+        content, artifact = await check_build.coroutine(
+            SimpleNamespace(tool_call_id="check-2")
+        )
 
-        wait.assert_not_awaited()
         self.assertIn("已跳过重复构建和截图", content)
         self.assertIn(_PASS_CONTENT, content)
         self.assertIsNone(artifact)
@@ -493,63 +511,41 @@ class CheckBuildIdempotencyTests(IsolatedAsyncioTestCase):
         )
         check_build = next(tool for tool in tools if tool.name == "check_build")
 
-        with (
-            patch(
-                "app.agents.tools.project_files_fingerprint",
-                new=AsyncMock(return_value="same-files"),
-            ),
-            patch(
-                "app.agents.tools.build_store.wait",
-                new_callable=AsyncMock,
-            ) as wait,
+        with patch(
+            "app.agents.tools.project_files_fingerprint",
+            new=AsyncMock(return_value="same-files"),
         ):
             content, artifact = await check_build.coroutine(
                 SimpleNamespace(tool_call_id="resumed-check")
             )
 
-        wait.assert_not_awaited()
         self.assertIn("已跳过重复构建和截图", content)
         self.assertIsNone(artifact)
 
-    async def test_tool_only_caches_complete_or_deterministic_results(self):
+    async def test_tool_runs_server_build_without_browser_result(self):
         cases = [
             (
-                {"ok": True, "screenshot_id": "shot-1"},
-                _ARTIFACT,
+                SandboxBuildRead(ok=True, build_id="build-1", preview_url="/preview"),
                 True,
             ),
             (
-                {"ok": False, "errors": "语法错误", "runtime": False},
-                None,
+                SandboxBuildRead(ok=False, errors="语法错误"),
                 True,
-            ),
-            (
-                {"ok": True},
-                None,
-                False,
-            ),
-            (
-                {
-                    "ok": False,
-                    "errors": "预览页面加载超时",
-                    "runtime": False,
-                    "infrastructure": True,
-                },
-                None,
-                False,
-            ),
-            (
-                None,
-                None,
-                False,
             ),
         ]
-        for result, artifact, expected_reuse in cases:
+        for result, expected_reuse in cases:
             with self.subTest(result=result):
                 state = BuildCheckReuseState()
                 state.prepare_check("check-1", "same-files")
+                db = SimpleNamespace(
+                    execute=AsyncMock(
+                        return_value=SimpleNamespace(
+                            all=lambda: [("src/App.tsx", "export default 1")]
+                        )
+                    )
+                )
                 tools = build_tools(
-                    AsyncMock(),  # type: ignore[arg-type]
+                    db,  # type: ignore[arg-type]
                     "session-1",
                     asyncio.Lock(),
                     build_reuse_state=state,
@@ -557,57 +553,24 @@ class CheckBuildIdempotencyTests(IsolatedAsyncioTestCase):
                 check_build = next(
                     tool for tool in tools if tool.name == "check_build"
                 )
-                with (
-                    patch(
-                        "app.agents.tools.build_store.wait",
-                        new=AsyncMock(return_value=result),
-                    ),
-                    patch(
-                        "app.agents.tools.build_screenshot_artifact",
-                        new=AsyncMock(return_value=artifact),
-                    ),
-                ):
-                    content, _ = await check_build.coroutine(
+                with patch(
+                    "app.agents.tools._submit_sandbox_build",
+                    new=AsyncMock(return_value=result),
+                ) as submit:
+                    content, artifact = await check_build.coroutine(
                         SimpleNamespace(tool_call_id="check-1")
                     )
 
+                submit.assert_awaited_once()
+                self.assertEqual(
+                    artifact and artifact.get("sandbox_preview", {}).get("ok"),
+                    result.ok,
+                )
                 state.finish_check("check-1", "same-files", content)
                 self.assertEqual(
                     state.prepare_check("check-2", "same-files"),
                     expected_reuse,
                 )
-
-    async def test_tool_does_not_present_infrastructure_failure_as_code_error(self):
-        state = BuildCheckReuseState()
-        state.prepare_check("check-1", "same-files")
-        tools = build_tools(
-            AsyncMock(),  # type: ignore[arg-type]
-            "session-1",
-            asyncio.Lock(),
-            build_reuse_state=state,
-        )
-        check_build = next(tool for tool in tools if tool.name == "check_build")
-
-        with patch(
-            "app.agents.tools.build_store.wait",
-            new=AsyncMock(
-                return_value={
-                    "ok": False,
-                    "errors": "预览页面加载超时",
-                    "runtime": False,
-                    "infrastructure": True,
-                }
-            ),
-        ):
-            content, artifact = await check_build.coroutine(
-                SimpleNamespace(tool_call_id="check-1")
-            )
-
-        self.assertIn("预览基础设施未能完成验收", content)
-        self.assertIn("不要据此修改或简化业务代码", content)
-        self.assertNotIn("请定位并修复", content)
-        self.assertIsNone(artifact)
-
 
 class BuildCheckRestoreTests(IsolatedAsyncioTestCase):
     @staticmethod
@@ -952,7 +915,7 @@ class ResumeBuildCheckTests(IsolatedAsyncioTestCase):
         self.assertTrue(_claim_resume_thread(thread_id))
         _release_resume_thread(thread_id)
 
-    async def test_disconnect_after_rearm_disarms_pending_check(self):
+    async def test_disconnect_before_server_build_does_not_arm_preview(self):
         graph_state = SimpleNamespace(
             next=("tools",),
             interrupts=(),
@@ -1012,18 +975,14 @@ class ResumeBuildCheckTests(IsolatedAsyncioTestCase):
                     "id": "check-1",
                 },
             )
-            first = _event(await anext(stream))
-            self.assertEqual(
-                first,
-                {"type": "preview_refresh", "id": "check-1"},
-            )
-            # 模拟客户端刚收到刷新信号就再次断线；生成器关闭也必须清理会合点。
+            # 服务端构建完成前不再发 preview_refresh；此时断线也不应提前建立浏览器
+            # 回报归属，避免留下永远不会被消费的会合点。
             await stream.aclose()
 
-        arm.assert_called_once_with("session-1", "check-1")
-        disarm.assert_called_once_with("session-1", "check-1")
+        arm.assert_not_called()
+        disarm.assert_not_called()
 
-    async def test_resume_applies_write_before_preview_and_hides_secondary(self):
+    async def test_resume_applies_write_before_server_build_and_hides_secondary(self):
         graph_state = SimpleNamespace(
             next=("tools",),
             interrupts=(),
@@ -1092,32 +1051,18 @@ class ResumeBuildCheckTests(IsolatedAsyncioTestCase):
                 db,  # type: ignore[arg-type]
                 "user-1",
             )
-            events = [_event(await anext(stream)) for _ in range(4)]
+            events = [_event(await anext(stream)) for _ in range(3)]
             await stream.aclose()
 
         self.assertEqual(
             [event["id"] for event in events if event["type"] == "tool_call"],
             ["write-1", "check-1"],
         )
-        event_types = [event["type"] for event in events]
-        self.assertLess(
-            event_types.index("file_write"),
-            event_types.index("preview_refresh"),
-        )
-        self.assertEqual(events[-1]["id"], "check-1")
-        self.assertEqual(
-            [call.args for call in arm.call_args_list],
-            [("session-1", "check-2"), ("session-1", "check-1")],
-        )
-        report.assert_called_once()
-        self.assertEqual(report.call_args.args[:2], ("session-1", "check-2"))
-        self.assertEqual(
-            {call.args for call in disarm.call_args_list},
-            {
-                ("session-1", "check-1"),
-                ("session-1", "check-2"),
-            },
-        )
+        self.assertEqual(events[-1]["type"], "file_write")
+        self.assertFalse(any(event["type"] == "preview_refresh" for event in events))
+        arm.assert_not_called()
+        report.assert_not_called()
+        disarm.assert_not_called()
 
     async def test_resume_replays_completed_result_without_new_preview(self):
         graph_state = SimpleNamespace(

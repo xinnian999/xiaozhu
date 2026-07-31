@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { MessageSquare, RotateCcw, PlayCircle } from 'lucide-react'
+import { MessageSquare, RotateCcw } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
 import { formatDuration } from '@/lib/format'
 import type { Message } from '@/types/project'
@@ -21,8 +21,6 @@ const SLOW_GEN_HINT_AFTER = 6
 type Props = {
   /** 重试最新一轮的回调（由 ChatSidebar 提供，内部走流式重生成） */
   onRetry?: () => void
-  /** 「继续生成」回调：从断点续跑被中断的那一轮（由 ChatSidebar 提供） */
-  onResume?: () => void
   /** ask_user 交互卡片答完的回调（由 ChatSidebar 提供），原样透传给每条消息 */
   onAskUserAnswer?: (message: Message, answer: string) => Promise<void>
 }
@@ -30,7 +28,7 @@ type Props = {
 // ============================================
 // 对话列表：渲染当前会话消息 + 流式输出中的 AI 消息
 // ============================================
-export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Props) {
+export default function MessageList({ onRetry, onAskUserAnswer }: Props) {
   const session = useSessionStore((s) => s.activeSession())
   const listRef = useRef<HTMLDivElement>(null)
   const endRef = useRef<HTMLDivElement>(null)
@@ -58,9 +56,6 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
   // 历史消息是异步加载的：sessionId 可能先出现，消息列表稍后才真正挂载。
   // 这个标记用于在 listRef 从不存在变为可用时重新安装滚动监听。
   const hasMessageList = messages.length > 0 || isStreaming
-  const awaitingAnswer = session?.awaitingAnswer ?? false
-  // 最新一轮被中断、可从断点续跑：据此在对话流末尾显示「继续生成」按钮
-  const resumable = session?.resumable ?? false
   const sessionId = session?.id ?? null
   // 本轮流式已累积的文本：非空 = 已经在吐字了，就不再显示「思考中」计时提示。
   const streamingText = session?.streamingText ?? ''
@@ -238,7 +233,7 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
     if (!shouldFollowRef.current) return
     // 流式分片频繁到达，使用即时贴底；平滑滚动的中间帧会被误判成用户离开底部。
     endRef.current.scrollIntoView({ behavior: 'auto' })
-  }, [sessionId, messages.length, liveReasoningTextLength, isStreaming, resumable])
+  }, [sessionId, messages.length, liveReasoningTextLength, isStreaming])
 
   if (messages.length === 0 && !isStreaming) {
     return (
@@ -309,23 +304,6 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
           onAskUserAnswer={onAskUserAnswer}
         />
       ))}
-
-      {/* 中断续跑提示卡：最新一轮被打断（刷新 / 锁屏 / 断网）后显示。点「继续生成」从
-          断点接着跑，不用从头重来。仅在没有进行中的流 / 没在等 ask_user 回答时出现。 */}
-      {resumable && !isStreaming && !awaitingAnswer && onResume && (
-        <div className={styles.resumeCard}>
-          <p className={styles.resumeText}>上一次生成被中断了，可从断点继续。</p>
-          <button
-            type="button"
-            className={styles.resumeBtn}
-            onClick={onResume}
-            title="从上次中断的地方继续生成，不用从头重来"
-          >
-            <PlayCircle size={14} className={styles.resumeIcon} />
-            <span>继续生成</span>
-          </button>
-        </div>
-      )}
 
       {/* 生成中：不再逐字显示打字，改成带扫光动画的「正在生成」。
           但当对话末尾正好是一张运行中的工具卡（自带 loading 转圈）时就不再显示，

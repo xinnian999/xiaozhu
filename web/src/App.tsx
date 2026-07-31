@@ -24,13 +24,14 @@ function App() {
   const activeId = useSessionStore((s) => s.activeId)
   const hasActive = activeId !== null
   // 新项目的模板文件会在创建会话时立即加载，但这不代表第一版已经写完。
-  // 只有时间线里真正出现过 check_build / 版本卡，才说明可以揭晓工作区。
+  // 时间线首次出现 check_build / 版本卡后永久揭晓工作区；重新生成虽会截掉旧卡片，
+  // 上一版稳定预览仍要保留，不能把整个 WorkArea 卸载掉。
   const hasPreviewHistory = useSessionStore((s) => {
     const active = s.sessions.find((session) => session.id === s.activeId)
-    return active?.messages.some((message) => (
-      message.kind === 'version'
-      || (message.kind === 'tool' && message.toolName === 'check_build')
-    )) ?? false
+    return !!(active?.previewRevealed || active?.messages.some((message) => (
+        message.kind === 'version'
+        || (message.kind === 'tool' && message.toolName === 'check_build')
+      )))
   })
   // 移动端顶层视图（对话 / 工作区）：桌面端两栏并排、忽略它。有活动会话时才需要切换
   const mobileView = useUIStore((s) => s.mobileView)

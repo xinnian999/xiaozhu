@@ -5,6 +5,12 @@ import { create } from 'zustand'
 // ============================================
 
 export type WorkTab = 'preview' | 'code'
+export type ServerPreviewBuild = {
+  ok: boolean
+  previewUrl: string | null
+  logs: string
+  errors: string
+}
 
 /** 预览画布设备。它只决定 iframe 的 viewport，不改变生成页面必须响应式的原则。 */
 export type PreviewDevice = 'desktop' | 'mobile'
@@ -122,11 +128,19 @@ type UIState = {
   previewReloadTick: number
   reloadPreview: () => void
 
-  /** 预览应用请求：seq 自增触发同步与构建，checkId 把本次结果/截图绑定到对应工具卡。
-   *  与 reloadPreview 的区别：这个触发「同步文件 + 重新构建」，构建成功后才由 PreviewPane
-   *  调 reloadPreview 整页重载换上新 dist。 */
-  previewApplyRequest: { seq: number; checkId: string | null; sessionId: string | null }
-  requestPreviewApply: (checkId: string, sessionId: string) => void
+  /** 预览应用请求：seq 自增触发应用，checkId 把运行时结果/截图绑定到对应工具卡。
+   *  check_build 始终直接加载服务端已完成的构建结果，不再由浏览器重复提交构建。 */
+  previewApplyRequest: {
+    seq: number
+    checkId: string | null
+    sessionId: string | null
+    serverBuild: ServerPreviewBuild | null
+  }
+  requestPreviewApply: (
+    checkId: string,
+    sessionId: string,
+    serverBuild: ServerPreviewBuild,
+  ) => void
 
   // —— 预览路由导航（地址栏 + 前进后退）——
   // sandbox 使用独立预览 origin（未配置时回退 opaque origin），父页面不能读 iframe
@@ -213,13 +227,19 @@ export const useUIStore = create<UIState>((set) => ({
   previewReloadTick: 0,
   reloadPreview: () => set((s) => ({ previewReloadTick: s.previewReloadTick + 1 })),
 
-  previewApplyRequest: { seq: 0, checkId: null, sessionId: null },
-  requestPreviewApply: (checkId, sessionId) =>
+  previewApplyRequest: {
+    seq: 0,
+    checkId: null,
+    sessionId: null,
+    serverBuild: null,
+  },
+  requestPreviewApply: (checkId, sessionId, serverBuild) =>
     set((s) => ({
       previewApplyRequest: {
         seq: s.previewApplyRequest.seq + 1,
         checkId,
         sessionId,
+        serverBuild,
       },
     })),
 

@@ -47,6 +47,11 @@ def _finish_lease(lease: GenerationLease) -> None:
     lease.done.set()
 
 
+def release_generation(lease: GenerationLease) -> None:
+    """释放尚未绑定任务的 lease（例如同会话后台任务竞争失败）。"""
+    _finish_lease(lease)
+
+
 async def managed_generation(
     lease: GenerationLease,
     gen: AsyncGenerator[str, None],

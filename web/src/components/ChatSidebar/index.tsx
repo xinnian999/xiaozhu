@@ -20,6 +20,9 @@ import {
 import { useUIStore } from '@/store/ui'
 import {
   getResumeState,
+  getGenerationState,
+  streamGeneration,
+  stopGeneration,
   streamChat,
   streamAskResult,
   streamResume,
@@ -120,6 +123,7 @@ export default function ChatSidebar({ conversationOnly = false }: {
   const selectedModel = useSessionStore((s) => s.selectedModel)
   const models = useSessionStore((s) => s.models)
   const loadBilling = useSessionStore((s) => s.loadBilling)
+  const refreshSessionContent = useSessionStore((s) => s.refreshSessionContent)
   const chatCollapsed = useUIStore((s) => s.chatCollapsed)
   // 移动端发起对话后自动切到「工作区」视图看预览
   const setMobileView = useUIStore((s) => s.setMobileView)
@@ -261,7 +265,7 @@ export default function ChatSidebar({ conversationOnly = false }: {
   // 避免两份几乎一样的事件分发代码各写一遍、日后改协议还得改两处。
   // 返回值：这次流是否「正常收场」（收到 done / error / awaiting_answer 之一）。
   // 返回 false 说明 for-await 是因为连接中途断掉才结束的（网络抖动等）——调用方据此把
-  // 会话标记为可续跑，让用户点「继续生成」从断点接着跑，而不用从头重来。
+  // 会话标记为可续跑，交给下方 effect 自动重新订阅或从断点接着跑。
   const consumeStream = async (
     stream: AsyncGenerator<SSEEvent>,
     ownerSessionId: string,
@@ -334,9 +338,18 @@ export default function ChatSidebar({ conversationOnly = false }: {
       } else if (event.type === 'file_delete') {
         applyFileDelete(event.path)
       } else if (event.type === 'preview_refresh') {
-        // AI 调 check_build：这一组改动写完、可渲染了 —— 把暂存文件应用进预览并重新构建
-        // 请求显式带上流所属会话，切换后仍在完成的旧构建不会污染新项目。
-        requestPreviewApply(event.id, ownerSessionId)
+        // 后端已经完成 Worker 构建，直接把 capability URL 交给预览；不能再提交一次
+        // 相同构建，否则刷新重连时会与后台任务争抢单并发 Worker。
+        requestPreviewApply(
+          event.id,
+          ownerSessionId,
+          {
+            ok: event.ok,
+            previewUrl: event.preview_url,
+            logs: event.logs,
+            errors: event.errors,
+          },
+        )
         // 移动端不要在用户刚发送需求时就展示一个“空转”的预览加载页。等代码真正
         // 写完并进入 check_build，再切到工作区；生产实测真正构建到 iframe 首屏只需
         // 数秒，用户此前看到的几分钟转圈其实都发生在这条事件之前。
@@ -457,7 +470,7 @@ export default function ChatSidebar({ conversationOnly = false }: {
         thinkingForRequest !== false,
       )
       // 流没正常收场（既非 done/error，也非 ask_user 暂停）= 连接中途断了。
-      // 同会话内直接标记可续跑，用户点「继续生成」即可从断点接着跑，无需刷新页面。
+      // 同会话内直接标记可续跑，由自动恢复 effect 接着处理，无需用户操作。
       if (!settled) setResumable(targetSessionId, true)
     } finally {
       // 正常收场、用户停止、切项目都不应被后台自动拉起；只有无 abort reason 的意外断流
@@ -530,7 +543,7 @@ export default function ChatSidebar({ conversationOnly = false }: {
     }
   }
 
-  // 「继续生成」：从断点续跑被中断的那一轮（刷新 / 锁屏 / 断网导致 SSE 半途而废）。
+  // 自动恢复：从断点续跑被中断的那一轮（刷新 / 锁屏 / 断网导致 SSE 半途而废）。
   // 后端 checkpointer 留着断点，streamResume 用同一 thread 从断点接着跑，喂给和
   // handleSend 一样的 consumeStream 管线。跑法与 handleRetry 完全对称，「停止」按钮同样能中断。
   const handleResume = async () => {
@@ -545,19 +558,33 @@ export default function ChatSidebar({ conversationOnly = false }: {
     setAutoResumeIntent(session.id, true)
 
     let settled = false
+    let attachedToActiveTask = false
     try {
+      const active = await getGenerationState(session.id)
+      attachedToActiveTask = active
       settled = await consumeStream(
-        streamResume(session.id, selectedModel, controller.signal, thinkingForRequest),
+        active
+          ? streamGeneration(session.id, controller.signal)
+          : streamResume(session.id, selectedModel, controller.signal, thinkingForRequest),
         session.id,
         thinkingForRequest !== false,
       )
       if (!settled) setResumable(session.id, true)
     } finally {
+      endStreaming()
+      // 重连窗口内可能恰好有事件已写库但尚未来得及进入新订阅；后台任务结束后
+      // 用数据库快照收口，保证刷新、切项目和浏览器冻结都不会造成 UI 少消息/少文件。
+      if (attachedToActiveTask) {
+        try {
+          await refreshSessionContent(session.id)
+        } catch (error) {
+          console.error('同步后台任务最终结果失败', error)
+        }
+      }
       if (settled || controller.signal.aborted) {
         setAutoResumeIntent(session.id, false)
       }
       if (abortRef.current === controller) abortRef.current = null
-      endStreaming()
       finishStream()
       loadBilling()
     }
@@ -568,6 +595,7 @@ export default function ChatSidebar({ conversationOnly = false }: {
   const handleStop = () => {
     if (session) setAutoResumeIntent(session.id, false)
     abortRef.current?.abort('user-stop')
+    if (session) void stopGeneration(session.id)
   }
 
   // 浏览器可能在后台冻结甚至丢弃标签页，SSE 因此断开。只对“这轮原本仍应继续”的会话
@@ -583,7 +611,6 @@ export default function ChatSidebar({ conversationOnly = false }: {
       || isStreaming
       || awaitingAnswer
       || !pageVisible
-      || !hasAutoResumeIntent(activeId)
       || autoResumeInFlightRef.current
     ) {
       return
@@ -594,8 +621,10 @@ export default function ChatSidebar({ conversationOnly = false }: {
       if (cancelled) return
       autoResumeInFlightRef.current = true
       try {
-        // 给服务端取消旧 StreamingResponse、落稳 checkpoint 留一个很短的清理窗口。
-        if (await getResumeState(activeId)) {
+        // 活跃后台任务无需旧标签页留下恢复标记；刷新或重新打开项目都直接订阅。
+        // 只有真正中断、需要从 checkpoint 续跑时才沿用用户未主动停止的意图标记。
+        const active = await getGenerationState(activeId)
+        if (active || (hasAutoResumeIntent(activeId) && await getResumeState(activeId))) {
           await handleResumeRef.current()
         }
       } finally {
@@ -688,7 +717,6 @@ export default function ChatSidebar({ conversationOnly = false }: {
         ) : (
           <MessageList
             onRetry={handleRetry}
-            onResume={handleResume}
             onAskUserAnswer={handleAskUserAnswer}
           />
         )}

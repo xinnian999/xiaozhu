@@ -1,10 +1,20 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
-import { ChevronDown, Plus, FolderKanban, Pencil, Trash2, Search } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  ChevronDown,
+  Plus,
+  FolderKanban,
+  Pencil,
+  Trash2,
+  Search,
+  LoaderCircle,
+} from 'lucide-react'
 import { useSessionStore } from '@/store/session'
+import { getActiveGenerationIds } from '@/lib/api'
 import { useClickOutside } from '@/hooks/useClickOutside'
 import styles from './index.module.scss'
 
 const PROJECT_PAGE_SIZE = 20
+const GENERATION_STATUS_POLL_MS = 2000
 
 // ============================================
 // 顶栏：项目切换下拉（支持重命名 / 删除）
@@ -19,6 +29,8 @@ export default function ProjectMenu() {
   const [query, setQuery] = useState('')
   // 项目较多时分批渲染；滚动到列表底部附近再追加下一批，避免菜单首次打开过重。
   const [visibleCount, setVisibleCount] = useState(PROJECT_PAGE_SIZE)
+  // 菜单需要同时展示其它项目的后台任务，不能只依赖当前页面的 isStreaming。
+  const [activeGenerationIds, setActiveGenerationIds] = useState<Set<string>>(new Set())
   // 标记「这次 input 失焦是因为按了 Esc 取消」，让 onBlur 区分提交还是放弃
   const cancelRef = useRef(false)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -49,6 +61,28 @@ export default function ProjectMenu() {
     setVisibleCount(PROJECT_PAGE_SIZE)
   }, [])
   useClickOutside(rootRef, close)
+
+  // 仅在菜单展开时轮询；关闭后立即停止，避免常驻请求。当前项目的本地 isStreaming
+  // 会在请求返回前即时兜底，因此刚点击发送再打开菜单也不会短暂显示成空闲。
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    const syncGenerationStates = async () => {
+      try {
+        const ids = await getActiveGenerationIds()
+        if (!cancelled) setActiveGenerationIds(new Set(ids))
+      } catch (error) {
+        // 状态提示是增强信息；短暂网络失败时保留上一份结果，不影响项目切换。
+        console.warn('同步项目生成状态失败', error)
+      }
+    }
+    void syncGenerationStates()
+    const timer = window.setInterval(syncGenerationStates, GENERATION_STATUS_POLL_MS)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [open])
 
   const handleSelect = async (id: string) => {
     await switchTo(id)
@@ -139,6 +173,7 @@ export default function ProjectMenu() {
           >
             {visibleSessions.map((s) => {
               const userRounds = s.messages.filter((message) => message.role === 'user').length
+              const isGenerating = s.isStreaming || activeGenerationIds.has(s.id)
               return (
                 <li key={s.id}>
                 {editingId === s.id ? (
@@ -199,8 +234,18 @@ export default function ProjectMenu() {
                     >
                       <span className={styles.itemMain}>
                         <span className={styles.itemName}>{s.title}</span>
-                        <span className={styles.itemMeta}>
-                          {userRounds > 0 ? `${userRounds} 轮对话` : '未开始'}
+                        <span
+                          className={`${styles.itemMeta} ${isGenerating ? styles.itemMetaLoading : ''}`}
+                          aria-label={isGenerating ? '项目正在生成' : undefined}
+                        >
+                          {isGenerating ? (
+                            <>
+                              <LoaderCircle className={styles.loadingIcon} size={11} aria-hidden />
+                              <span>生成中</span>
+                            </>
+                          ) : (
+                            userRounds > 0 ? `${userRounds} 轮对话` : '未开始'
+                          )}
                         </span>
                       </span>
                     </button>

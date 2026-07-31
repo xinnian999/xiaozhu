@@ -1,9 +1,9 @@
 """Resume API —— 生成中断后从断点续跑。
 
-用户在 AI 生成过程中刷新页面 / 手机锁屏 / 网络抖动，SSE 长连接会断，那次 astream()
-被 CancelledError 打断。关键在于：LangGraph 的 checkpointer（见 app.checkpointer）在
+服务端后台任务通常不会因浏览器刷新、锁屏或网络抖动而中断。只有服务进程异常退出等
+情况才需要从断点恢复。关键在于：LangGraph 的 checkpointer（见 app.checkpointer）在
 每个图节点跑完后都会存一次检查点，而 _consume 的收尾清理 _cleanup_thread 只在正常/报错
-路径跑（断连的 CancelledError 是 BaseException，不被 except Exception 捕获）——所以断连
+路径跑（任务取消的 CancelledError 是 BaseException，不被 except Exception 捕获）——所以中断
 时检查点会留存下来。
 
 于是「续跑」= 用同一个确定性的 thread_id（见 app.agents.loop 的说明，由触发本轮的用户
@@ -31,7 +31,6 @@ from app.agents.loop import (
     _consume,
     _early_file_write,
     _file_tree_note,
-    _synthetic_duplicate_check_result,
     build_round_agent,
     latest_round_thread_id,
     preview_device_event,
@@ -43,7 +42,8 @@ from app.agents.loop import (
 from app.agents.tools import BuildCheckReuseState
 from app.db import get_db
 from app.deps import get_owned_session
-from app.generation_control import managed_generation, reserve_generation
+from app.generation_control import reserve_generation
+from app.generation_runtime import start_generation
 from app.llm import allowed_model_ids, default_model_id, validate_thinking_option
 from app.models.message import Message as DBMessage
 from app.models.session import Session
@@ -53,9 +53,8 @@ router = APIRouter(
     tags=["resume"],
 )
 
-# 同一个 LangGraph thread 同时只能有一条 /resume 流。项目的 build_store/checkpointer
-# 本来就是单进程运行时状态；这里用同进程互斥阻止两个标签页对同一 check_id 重复 arm，
-# 否则后一个会覆盖前一个 waiter，造成一边成功、一边超时。
+# 同一个 LangGraph thread 同时只能有一条 /resume 后台任务。checkpointer 本来就是
+# 单进程运行时状态；这里用同进程互斥阻止两个请求把同一断点重复跑两遍。
 _active_resume_threads: set[str] = set()
 _active_resume_lock = Lock()
 
@@ -188,8 +187,9 @@ async def _resume_stream(session_id: str, body: ResumeStart, db: AsyncSession, u
             build_reuse_state,
         )
         initial_pending = recovery.pending
-        # model 节点里的可见工具卡、提前文件同步以及 arm + preview_refresh 都不会在断点
-        # 续跑时重放；必须按 checkpoint 的原始批次补发，且文件同步严格先于预览构建。
+        # model 节点里的可见工具卡、提前文件同步以及回报归属不会在断点续跑时重放；
+        # 必须按 checkpoint 的原始批次补发。预览刷新则等续跑后的服务端构建完成，
+        # 由 _consume 携 capability URL 下发，不能在这里让浏览器重复提交构建。
         rearmed_check_ids: set[str] = set()
         initial_early_written: set[str] = set()
         try:
@@ -207,8 +207,8 @@ async def _resume_stream(session_id: str, body: ResumeStart, db: AsyncSession, u
             for event in recovery.replay_events:
                 yield sse(event)
 
-            # 断线前的画布 SSE 可能没有送达。先恢复目标设备，再重放任何
-            # preview_refresh，确保续跑的自检仍截取正确 viewport。
+            # 断线前的画布 SSE 可能没有送达。先恢复目标设备，确保续跑后的预览与截图
+            # 使用正确 viewport。
             for tc in [*recovery.completed_calls, *recovery.open_calls]:
                 device_event = preview_device_event(tc)
                 if device_event is not None:
@@ -235,20 +235,15 @@ async def _resume_stream(session_id: str, body: ResumeStart, db: AsyncSession, u
                 initial_early_written.add(tc["id"])
                 yield sse(event)
 
-            # 隐藏的 secondary 也要给 ToolNode 一个即时结果，否则恢复后会独自等满 90 秒。
+            # 隐藏的 secondary 也要标记为重复检查，避免恢复后并发占用单并发 Worker。
             for check_id in recovery.synthetic_check_ids:
-                build_store.arm(session_id, check_id)
-                rearmed_check_ids.add(check_id)
-                build_store.report(
-                    session_id,
-                    check_id,
-                    _synthetic_duplicate_check_result(),
-                )
+                build_reuse_state.mark_duplicate(check_id)
 
             for check_id in recovery.primary_check_ids:
+                # 仅为服务端构建完成后的可选运行时/截图回报保留归属；不提前通知浏览器，
+                # 避免它在 Worker 忙碌时重复构建。
                 build_store.arm(session_id, check_id)
                 rearmed_check_ids.add(check_id)
-                yield sse({"type": "preview_refresh", "id": check_id})
 
             # 输入传 None：LangGraph 对「有检查点且 next 非空」的 thread 以 None 输入即从断点
             # 继续（区别于 ask_result 的 Command(resume=answer)）。收尾三件套（存最终文本 /
@@ -299,11 +294,17 @@ async def start_resume(
     lease = reserve_generation(session_id)
     if lease is None:
         raise HTTPException(status_code=409, detail="项目正在删除，无法继续生成")
-    return StreamingResponse(
-        managed_generation(
-            lease,
-            with_heartbeat(_resume_stream(session_id, body, db, session.user_id)),
+    stream = start_generation(
+        session_id,
+        lease,
+        lambda task_db: with_heartbeat(
+            _resume_stream(session_id, body, task_db, session.user_id)
         ),
+    )
+    if stream is None:
+        raise HTTPException(status_code=409, detail="这个项目已有生成任务正在运行")
+    return StreamingResponse(
+        stream,
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

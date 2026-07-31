@@ -15,8 +15,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.loop import ChatRequest, agent_loop, with_heartbeat
 from app.billing import allowance_for, used_today
 from app.db import get_db
-from app.deps import get_current_user
-from app.generation_control import managed_generation, reserve_generation
+from app.deps import get_current_user, get_owned_session
+from app.generation_control import cancel_session_generations, reserve_generation
+from app.generation_runtime import (
+    active_generation_ids,
+    is_generation_active,
+    start_generation,
+    subscribe_generation,
+)
 # 模型注册表 + LLM 构造都集中在 app.llm，这里只是引用方。
 # 现在模型在数据库、由内存缓存提供，所以引用的是「读缓存的函数」而非模块常量。
 from app.llm import (
@@ -102,19 +108,69 @@ async def chat(
     if used_today(current_user, now.date()) + cost > allowance_for(current_user, now):
         raise HTTPException(status_code=402, detail="今日额度已用完，明天恢复或升级套餐")
 
-    # 注意：StreamingResponse 拿到的是生成器，FastAPI 会保持 db 依赖存活
-    # 直到生成器耗尽（即整个 SSE 流结束），所以工具里使用 db 是安全的。
-    # 把 user_id 传进去：loop 跑完干净收尾时按它扣点。
-    # 外面包一层 with_heartbeat：check_build 最多等 90s，靠它保活连接
-    #（ask_user 已改用 interrupt()，不会再让这条请求长时间挂起，见 app.agents.loop）。
     lease = reserve_generation(req.session_id)
     if lease is None:
         raise HTTPException(status_code=409, detail="项目正在删除，无法继续生成")
-    return StreamingResponse(
-        managed_generation(
-            lease,
-            with_heartbeat(agent_loop(req, db, current_user.id)),
+    stream = start_generation(
+        req.session_id,
+        lease,
+        lambda task_db: with_heartbeat(
+            agent_loop(req, task_db, current_user.id)
         ),
+    )
+    if stream is None:
+        raise HTTPException(status_code=409, detail="这个项目已有生成任务正在运行")
+    return StreamingResponse(
+        stream,
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.get("/sessions/{session_id}/generation-state")
+async def generation_state(
+    session_id: str,
+    session: Session = Depends(get_owned_session),
+) -> dict:
+    """浏览器刷新后查询服务端任务是否仍在运行。"""
+    return {"active": is_generation_active(session_id)}
+
+
+@router.get("/sessions/generation-states")
+async def generation_states(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """批量返回当前用户仍在后台运行的项目，避免项目菜单逐项发请求。"""
+    result = await db.execute(
+        select(Session.id).where(Session.user_id == current_user.id)
+    )
+    owned_ids = set(result.scalars().all())
+    return {
+        "active_session_ids": sorted(active_generation_ids(owned_ids)),
+    }
+
+
+@router.get("/sessions/{session_id}/generation-stream")
+async def generation_stream(
+    session_id: str,
+    session: Session = Depends(get_owned_session),
+) -> StreamingResponse:
+    """重新订阅后台任务；断开这条响应不会取消任务。"""
+    stream = subscribe_generation(session_id)
+    if stream is None:
+        raise HTTPException(status_code=409, detail="这个项目当前没有运行中的生成任务")
+    return StreamingResponse(
+        stream,
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.delete("/sessions/{session_id}/generation", status_code=204)
+async def stop_generation(
+    session_id: str,
+    session: Session = Depends(get_owned_session),
+) -> None:
+    """用户主动停止服务端任务；单纯关闭或刷新浏览器不会调用这里。"""
+    await cancel_session_generations(session_id)

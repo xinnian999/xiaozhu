@@ -32,6 +32,18 @@ class PromptInformationArchitectureTests(unittest.TestCase):
         self.assertIn("新增 XX 页面 / XX 页 / 详情页 / 列表页", SYSTEM_PROMPT)
         self.assertIn("禁止把\n  “页面”擅自降级解释成当前页", SYSTEM_PROMPT)
 
+    def test_clear_site_with_core_modules_skips_clarification(self):
+        """交付类型和核心模块齐全时，不能再拿可选增强项阻塞生成。"""
+        self.assertIn(
+            "带作品展示和联系表单的个人主页",
+            SYSTEM_PROMPT,
+        )
+        self.assertIn("必须直接生成", SYSTEM_PROMPT)
+        self.assertIn("禁止再询问网站还要包含哪些内容", SYSTEM_PROMPT)
+        self.assertIn("从零生成不等于必须提问", SYSTEM_PROMPT)
+        self.assertIn("不要为了收集“锦上添花”的偏好而问", SYSTEM_PROMPT)
+        self.assertIn("只要能形成完整可用的合理首版，就直接动手", SYSTEM_PROMPT)
+
 
 if __name__ == "__main__":
     unittest.main()

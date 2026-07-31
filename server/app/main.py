@@ -206,7 +206,7 @@ async def health() -> dict:
 # ── 生产模式：托管前端构建产物 ──────────────────────────────
 # 约定：把前端 `pnpm run build` 出的 dist 拷到 server/static/ 即可，无需任何环境变量。
 # 用 __file__ 定位目录，不受 uvicorn 启动时工作目录影响。
-#   - dev 期：没拷 dist，static/ 不存在 → 跳过托管，前端走 Vite(7000)。
+#   - dev 期：没拷 dist，static/ 不存在 → 跳过托管，前端走 Vite(7300)。
 #   - 生产期：static/ 里有文件 → 挂载，前后端成「同源单进程」。
 # 必须放在所有 API 路由「之后」：Starlette 按注册顺序匹配，前面的 /api/* 和
 # /health 先命中，剩下的一切路径才落到这个静态挂载上。

@@ -88,6 +88,7 @@ async def _resume_stream(session_id: str, body: AskResult, db: AsyncSession, use
             db_lock,
             build_reuse_state,
         )
+        # 用同一套工具重建 agent 并读取 checkpoint，确定当前待回答的是哪张 ask_user 卡。
         agent = build_round_agent(
             db,
             session_id,

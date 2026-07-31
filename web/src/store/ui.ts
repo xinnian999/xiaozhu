@@ -182,8 +182,8 @@ export const useUIStore = create<UIState>((set) => ({
   chatCollapsed: false,
   toggleChatCollapsed: () => set((s) => ({ chatCollapsed: !s.chatCollapsed })),
 
-  // 移动端默认停在「对话」视图 —— 首屏没有活动会话时本就只有对话，
-  // 发起会话后由 ChatSidebar 自动切到「工作区」看预览（见 App）。
+  // 移动端默认停在「对话」视图。发起会话后继续展示生成进度，直到 Agent
+  // 发出 preview_refresh、真正开始构建时才由 ChatSidebar 切到工作区。
   mobileView: 'chat',
   setMobileView: (mobileView) => set({ mobileView }),
 

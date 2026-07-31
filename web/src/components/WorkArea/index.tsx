@@ -26,11 +26,14 @@ export default function WorkArea() {
       <TabBar />
 
       <div className={styles.body}>
-        {/* 用条件渲染保留各自状态：预览 iframe 不会因 tab 切换而被销毁 */}
-        <div className={styles.pane} style={{ display: workTab === 'preview' ? 'block' : 'none' }}>
+        {/* 预览切到代码页后仍在画布外运行，保证生成中的运行时验收不会因 iframe 尺寸归零而暂停。 */}
+        <div className={`${styles.pane} ${workTab === 'preview' ? '' : styles.paneHidden}`}>
           <ServerPreviewPane />
         </div>
-        <div className={styles.pane} style={{ display: workTab === 'code' ? 'flex' : 'none' }}>
+        <div
+          className={`${styles.pane} ${workTab === 'code' ? styles.paneForeground : ''}`}
+          style={{ display: workTab === 'code' ? 'flex' : 'none' }}
+        >
           <CodePane />
         </div>
 

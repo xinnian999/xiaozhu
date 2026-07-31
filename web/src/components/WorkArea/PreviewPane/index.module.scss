@@ -140,10 +140,21 @@
               animation: preview-loader-spin 0.8s linear infinite;
             }
 
+            .waitingIcon {
+              color: var(--color-accent);
+            }
+
             .stateLabel {
               margin: 0;
               color: var(--color-text-dim);
               font-size: $fs-12;
+              line-height: $lh-snug;
+            }
+
+            .stateHint {
+              margin: -$space-1 0 0;
+              color: var(--color-text-mute);
+              font-size: $fs-10;
               line-height: $lh-snug;
             }
 

@@ -55,9 +55,8 @@
     overflow: hidden;
     position: relative;
 
-    // —— 无激活会话：对话区全屏 ——
-    // 让 ChatSidebar 占满整个主区域，去掉右边框与固定宽度
-    &.noSession {
+    // —— 单栏阶段：空态或第一版尚未调用 check_build ——
+    &.singlePane {
       justify-content: center;
     }
   }
@@ -69,14 +68,25 @@
   .main {
     // 给底部悬浮的视图开关让出空间，避免遮住内容 / 输入框。
     // 仅在有活动会话（开关才渲染）时留位；空态没有开关，留位会显得底部凭空多一块。
-    &:not(.noSession) {
+    &:not(.singlePane) {
       padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px));
     }
 
-    // 对话视图：显示 ChatSidebar（第 1 个子元素），隐藏工作区（第 2 个）
+    // 对话视图：工作区移到画布外但继续保留布局尺寸。
+    // 生成期间的 check_build 依赖预览 iframe 完成首屏握手与截图，display: none
+    // 会让 iframe 尺寸归零，用户只要切回对话就可能把验收流程拖到超时。
     &[data-mobile-view='chat'] {
+      > :first-child {
+        position: relative;
+        z-index: 1;
+      }
+
       > :nth-child(2) {
-        display: none;
+        position: absolute;
+        inset: 0;
+        z-index: 0;
+        visibility: hidden;
+        pointer-events: none;
       }
     }
 

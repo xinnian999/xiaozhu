@@ -20,9 +20,9 @@
 versions / version_files 是它之上的历史层，回滚时把某个快照覆盖回 files 即可。
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -105,3 +105,14 @@ class VersionRead(BaseModel):
     summary: str | None
     is_restore: bool
     created_at: datetime
+
+    @field_serializer("created_at")
+    def serialize_created_at(self, dt: datetime) -> str:
+        """SQLite 的 CURRENT_TIMESTAMP 是 UTC naive 时间，API 必须补齐时区。
+
+        若直接返回无时区字符串，浏览器会按本地时间解释，上海时区就会把刚创建的
+        版本误显示成“8 小时前”。
+        """
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.isoformat()

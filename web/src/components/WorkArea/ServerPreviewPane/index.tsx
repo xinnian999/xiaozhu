@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { AlertTriangle, LoaderCircle } from 'lucide-react'
+import { AlertTriangle, Braces, LoaderCircle } from 'lucide-react'
 import { buildServerPreview, postBuildResult, uploadPreviewScreenshot } from '@/lib/api'
 import { useSessionStore } from '@/store/session'
 import { useUIStore, type PreviewDevice } from '@/store/ui'
@@ -831,6 +831,9 @@ export default function ServerPreviewPane() {
   const isIframeReady = Boolean(iframeSrc && readyIframeSrc === iframeSrc)
   const isPreviewReady = previewStatus === 'ready' && isIframeReady
   const isPreviewError = previewStatus === 'error'
+  // 首次生成尚未进入 check_build 时，右侧只是等待模型写完代码，不是 iframe 在加载。
+  // 此阶段使用静态说明，避免持续旋转的 loading 让用户误以为预览服务卡住。
+  const isWaitingForFirstBuild = previewStatus === 'idle' && !hasIframe
   const loadingLabel = previewStatus === 'building'
     ? '正在构建预览…'
     : !hasIframe
@@ -893,13 +896,28 @@ export default function ServerPreviewPane() {
                 </div>
               ) : (
                 <div className={styles.stateContent}>
-                  <LoaderCircle
-                    className={styles.loaderIcon}
-                    size={34}
-                    strokeWidth={1.8}
-                    aria-hidden
-                  />
-                  <p className={styles.stateLabel}>{loadingLabel}</p>
+                  {isWaitingForFirstBuild ? (
+                    <>
+                      <Braces
+                        className={styles.waitingIcon}
+                        size={32}
+                        strokeWidth={1.7}
+                        aria-hidden
+                      />
+                      <p className={styles.stateLabel}>代码生成中</p>
+                      <p className={styles.stateHint}>完成后会自动展示可交互预览</p>
+                    </>
+                  ) : (
+                    <>
+                      <LoaderCircle
+                        className={styles.loaderIcon}
+                        size={34}
+                        strokeWidth={1.8}
+                        aria-hidden
+                      />
+                      <p className={styles.stateLabel}>{loadingLabel}</p>
+                    </>
+                  )}
                   {previewStatus === 'building' && previewLog && (
                     <pre className={styles.stateDetail}>{previewLog}</pre>
                   )}

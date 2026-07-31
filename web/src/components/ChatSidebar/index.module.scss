@@ -32,11 +32,16 @@
     background: transparent;
 
     .chatBody {
-      // 居中欢迎语，且底部紧挨着 composer，类似 ChatGPT 首屏
+      // 欢迎区是产品能力橱窗，输入框仍独立固定在底部。
       display: flex;
       align-items: center;
       justify-content: center;
-      padding: $space-12 $space-6;
+      padding: $space-10 $space-6 $space-6;
+      background:
+        radial-gradient(circle at 50% 18%, var(--color-accent-fade), transparent 34%),
+        linear-gradient(var(--color-grid) 1px, transparent 1px),
+        linear-gradient(90deg, var(--color-grid) 1px, transparent 1px);
+      background-size: auto, 32px 32px, 32px 32px;
     }
 
     .composer {
@@ -46,6 +51,34 @@
       margin: 0 auto;
       border-top-color: transparent;
       background: transparent;
+    }
+  }
+
+  // 第一版首次 check_build 前：会话已经存在，但工作区尚未揭晓。
+  // 保留正常时间线排版，只把对话列扩成单栏主舞台。
+  &[data-conversation-only='true'] {
+    width: 100%;
+    border-right-width: 0;
+    overflow: visible;
+
+    // 上一个项目若把侧栏折叠了，新项目单栏阶段也必须恢复可见，否则整页会是空白。
+    > * {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .chatBody {
+      width: 100%;
+      max-width: 720px;
+      margin: 0 auto;
+      padding: $space-6 $space-5 $space-4;
+    }
+
+    .composer {
+      width: 100%;
+      max-width: 680px;
+      margin: 0 auto;
+      border-top-color: transparent;
     }
   }
 
@@ -59,25 +92,143 @@
 
   // —— 空态欢迎区 ——
   .hero {
-    max-width: 520px;
+    width: min(780px, 100%);
     text-align: center;
     display: flex;
     flex-direction: column;
-    gap: $space-3;
+    align-items: center;
+    gap: $space-6;
 
-    .heroTitle {
-      font-size: $fs-32;
-      font-weight: $fw-semibold;
-      line-height: $lh-tight;
-      color: var(--color-text);
-      margin: 0;
+    .heroIntro {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: $space-3;
+
+      .heroEyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: $space-2;
+        padding: $space-1 $space-3;
+        border: 1px solid var(--color-border);
+        border-radius: $radius-full;
+        background: var(--color-bg-soft);
+        color: var(--color-accent);
+        font-family: var(--font-mono);
+        font-size: $fs-10;
+        font-weight: $fw-semibold;
+        letter-spacing: 0.12em;
+      }
+
+      .heroTitle {
+        max-width: 680px;
+        font-size: clamp(#{$fs-32}, 5vw, #{$fs-64});
+        font-weight: $fw-semibold;
+        line-height: 0.98;
+        letter-spacing: -0.045em;
+        color: var(--color-text);
+        margin: 0;
+
+        em {
+          display: inline-block;
+          margin-left: 0.16em;
+          font-family: var(--font-serif);
+          font-weight: $fw-normal;
+          color: var(--color-accent);
+        }
+      }
+
+      .heroSubtitle {
+        max-width: 590px;
+        font-size: $fs-15;
+        line-height: $lh-relaxed;
+        color: var(--color-text-dim);
+        margin: 0;
+      }
     }
 
-    .heroSubtitle {
-      font-size: $fs-14;
-      line-height: $lh-relaxed;
-      color: var(--color-text-dim);
-      margin: 0;
+    .heroProofs {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      width: min(600px, 100%);
+      border: 1px solid var(--color-border);
+      border-radius: $radius-lg;
+      background: var(--color-bg-soft);
+      box-shadow: var(--shadow-card);
+      overflow: hidden;
+
+      span {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: $space-2;
+        min-width: 0;
+        padding: $space-3 $space-4;
+        color: var(--color-text-dim);
+        font-size: $fs-12;
+        font-weight: $fw-medium;
+
+        & + span {
+          border-left: 1px solid var(--color-border);
+        }
+
+        svg {
+          flex-shrink: 0;
+          color: var(--color-accent);
+        }
+      }
+    }
+
+    .heroStarters {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: $space-2;
+      width: min(680px, 100%);
+
+      .heroStartersLabel {
+        color: var(--color-text-mute);
+        font-size: $fs-11;
+      }
+
+      .heroStarterList {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: $space-2;
+        width: 100%;
+
+        button {
+          @include button-reset;
+          display: flex;
+          align-items: flex-end;
+          justify-content: space-between;
+          gap: $space-3;
+          min-height: 76px;
+          padding: $space-3;
+          text-align: left;
+          border: 1px solid var(--color-border);
+          border-radius: $radius-md;
+          background: color-mix(in srgb, var(--color-bg-soft) 88%, transparent);
+          color: var(--color-text-dim);
+          font-size: $fs-12;
+          line-height: $lh-normal;
+          transition: transform $dur-base $ease-out, border-color $dur-base $ease-out,
+            background $dur-base $ease-out, color $dur-base $ease-out;
+
+          &:hover {
+            transform: translateY(-2px);
+            border-color: var(--color-border-strong);
+            background: var(--color-bg-elev);
+            color: var(--color-text);
+          }
+
+          svg {
+            flex-shrink: 0;
+            transform: rotate(45deg);
+            color: var(--color-accent);
+          }
+        }
+      }
     }
   }
 
@@ -367,6 +518,58 @@
               }
             }
 
+          }
+        }
+      }
+    }
+
+    &.fullscreen {
+      .chatBody {
+        align-items: flex-start;
+        padding: $space-8 $space-4 $space-4;
+      }
+
+      .hero {
+        gap: $space-5;
+
+        .heroIntro {
+          .heroTitle {
+            font-size: $fs-32;
+            line-height: $lh-tight;
+
+            em {
+              display: block;
+              margin: $space-1 0 0;
+            }
+          }
+
+          .heroSubtitle {
+            font-size: $fs-13;
+          }
+        }
+
+        .heroProofs {
+          grid-template-columns: 1fr;
+
+          span {
+            justify-content: flex-start;
+            padding: $space-2 $space-3;
+
+            & + span {
+              border-left: 0;
+              border-top: 1px solid var(--color-border);
+            }
+          }
+        }
+
+        .heroStarters {
+          .heroStarterList {
+            grid-template-columns: 1fr;
+
+            button {
+              min-height: 0;
+              align-items: center;
+            }
           }
         }
       }

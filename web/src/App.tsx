@@ -21,10 +21,25 @@ function App() {
   const init = useSessionStore((s) => s.init)
   const loadModels = useSessionStore((s) => s.loadModels)
   const loadBilling = useSessionStore((s) => s.loadBilling)
-  // 没有激活会话时进入"空态"：隐藏右侧工作区，让对话框全屏展开
-  const hasActive = useSessionStore((s) => s.activeId !== null)
+  const activeId = useSessionStore((s) => s.activeId)
+  const hasActive = activeId !== null
+  // 新项目的模板文件会在创建会话时立即加载，但这不代表第一版已经写完。
+  // 只有时间线里真正出现过 check_build / 版本卡，才说明可以揭晓工作区。
+  const hasPreviewHistory = useSessionStore((s) => {
+    const active = s.sessions.find((session) => session.id === s.activeId)
+    return active?.messages.some((message) => (
+      message.kind === 'version'
+      || (message.kind === 'tool' && message.toolName === 'check_build')
+    )) ?? false
+  })
   // 移动端顶层视图（对话 / 工作区）：桌面端两栏并排、忽略它。有活动会话时才需要切换
   const mobileView = useUIStore((s) => s.mobileView)
+  const previewApplySessionId = useUIStore((s) => s.previewApplyRequest.sessionId)
+  // preview_refresh 可能紧跟在 tool_call 后抵达；把它也作为揭晓信号，保证 WorkArea
+  // 即使尚未来得及响应消息更新，挂载后仍能消费已经进入 store 的构建请求。
+  const showWorkArea = hasActive && (
+    hasPreviewHistory || previewApplySessionId === activeId
+  )
 
   // 登录态：ready 表示首次"恢复登录态"已完成；isAuthed 表示当前已登录
   const authReady = useAuthStore((s) => s.ready)
@@ -79,21 +94,20 @@ function App() {
   return (
     <div className={styles.app}>
       <TopBar />
-      {/* data-mobile-view 只在移动端由 CSS 消费：决定全屏展示对话还是工作区。
-          没有活动会话时移动端只有对话，强制回到 'chat'，避免露出空工作区。 */}
+      {/* 第一版首次 check_build 前只展示对话；揭晓后再进入桌面双栏 / 移动端切换。 */}
       <main
-        className={`${styles.main} ${hasActive ? '' : styles.noSession}`}
-        data-mobile-view={hasActive ? mobileView : 'chat'}
+        className={`${styles.main} ${showWorkArea ? '' : styles.singlePane}`}
+        data-mobile-view={showWorkArea ? mobileView : 'chat'}
       >
-        <ChatSidebar />
-        {hasActive && (
+        <ChatSidebar conversationOnly={hasActive && !showWorkArea} />
+        {showWorkArea && (
           <Suspense fallback={<div className={styles.workLoading}>加载工作区…</div>}>
             <WorkArea />
           </Suspense>
         )}
       </main>
-      {/* 移动端底部分段开关：对话 ⇄ 预览。仅有活动会话时显示（空态无工作区可切） */}
-      {hasActive && <MobileViewSwitch />}
+      {/* 第一次 check_build 前没有工作区，移动端也不展示无效的“预览”入口。 */}
+      {showWorkArea && <MobileViewSwitch />}
       <Toast />
       <ImageLightbox />
     </div>

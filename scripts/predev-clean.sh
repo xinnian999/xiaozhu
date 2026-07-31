@@ -8,7 +8,7 @@ set -eu
 
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 current_pgid=$(ps -o pgid= -p $$ | tr -d ' ')
-ports="7200 7010 7000 7100"
+ports="7200 7010 7300 7100"
 old_pgids=""
 
 if command -v lsof >/dev/null 2>&1; then

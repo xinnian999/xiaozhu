@@ -80,7 +80,7 @@ SANDBOX_WORKER_TOKEN=config-check-placeholder docker compose config --no-env-res
 
 本地要求 Node.js 22，并通过 Corepack 使用仓库锁定的 pnpm 版本。
 
-本地开发端口：前台 7000、管理后台 7100、API 7200、Worker 7010。生产容器内 Worker
+本地开发端口：前台 7300、管理后台 7100、API 7200、Worker 7010。生产容器内 Worker
 使用 8010；Compose 不会把它暴露到公网网卡。
 
 ## 发布

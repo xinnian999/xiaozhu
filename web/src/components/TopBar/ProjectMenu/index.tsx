@@ -1,8 +1,10 @@
-import { useCallback, useRef, useState } from 'react'
-import { ChevronDown, Plus, FolderKanban, Pencil, Trash2 } from 'lucide-react'
+import { useCallback, useMemo, useRef, useState } from 'react'
+import { ChevronDown, Plus, FolderKanban, Pencil, Trash2, Search } from 'lucide-react'
 import { useSessionStore } from '@/store/session'
 import { useClickOutside } from '@/hooks/useClickOutside'
 import styles from './index.module.scss'
+
+const PROJECT_PAGE_SIZE = 20
 
 // ============================================
 // 顶栏：项目切换下拉（支持重命名 / 删除）
@@ -14,6 +16,9 @@ export default function ProjectMenu() {
   const [editValue, setEditValue] = useState('')
   // 正在等待二次确认删除的会话 id
   const [confirmId, setConfirmId] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
+  // 项目较多时分批渲染；滚动到列表底部附近再追加下一批，避免菜单首次打开过重。
+  const [visibleCount, setVisibleCount] = useState(PROJECT_PAGE_SIZE)
   // 标记「这次 input 失焦是因为按了 Esc 取消」，让 onBlur 区分提交还是放弃
   const cancelRef = useRef(false)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -25,12 +30,23 @@ export default function ProjectMenu() {
   const goToEmpty = useSessionStore((s) => s.goToEmpty)
   const renameSession = useSessionStore((s) => s.renameSession)
   const deleteSession = useSessionStore((s) => s.deleteSession)
+  const normalizedQuery = query.trim().toLocaleLowerCase()
+  const filteredSessions = useMemo(
+    () => sessions.filter((session) => (
+      session.title.toLocaleLowerCase().includes(normalizedQuery)
+    )),
+    [normalizedQuery, sessions],
+  )
+  const visibleSessions = filteredSessions.slice(0, visibleCount)
+  const hasMore = visibleSessions.length < filteredSessions.length
 
-  // 关闭面板时一并清掉编辑/确认中间态，下次打开是干净的
+  // 关闭面板时一并清掉搜索、编辑和确认中间态，下次打开是干净的。
   const close = useCallback(() => {
     setOpen(false)
     setEditingId(null)
     setConfirmId(null)
+    setQuery('')
+    setVisibleCount(PROJECT_PAGE_SIZE)
   }, [])
   useClickOutside(rootRef, close)
 
@@ -90,10 +106,41 @@ export default function ProjectMenu() {
 
       {open && (
         <div className={styles.panel} role="menu" aria-label="选择项目">
-          <p className={styles.panelTitle}>项目</p>
-          <ul className={styles.list}>
-            {sessions.map((s) => (
-              <li key={s.id}>
+          <div className={styles.panelHeader}>
+            <p className={styles.panelTitle}>项目</p>
+            <span>{sessions.length}</span>
+          </div>
+          {sessions.length > 8 && (
+            <label className={styles.search}>
+              <Search size={13} aria-hidden />
+              <input
+                value={query}
+                onChange={(event) => {
+                  setQuery(event.target.value)
+                  setVisibleCount(PROJECT_PAGE_SIZE)
+                }}
+                placeholder="搜索项目"
+                aria-label="搜索项目"
+              />
+            </label>
+          )}
+          <ul
+            className={styles.list}
+            onScroll={(event) => {
+              if (!hasMore) return
+              const list = event.currentTarget
+              const distanceToBottom = list.scrollHeight - list.scrollTop - list.clientHeight
+              if (distanceToBottom <= 48) {
+                setVisibleCount((count) => (
+                  Math.min(count + PROJECT_PAGE_SIZE, filteredSessions.length)
+                ))
+              }
+            }}
+          >
+            {visibleSessions.map((s) => {
+              const userRounds = s.messages.filter((message) => message.role === 'user').length
+              return (
+                <li key={s.id}>
                 {editingId === s.id ? (
                   // ── 内联重命名输入框 ──
                   <div className={styles.editWrap}>
@@ -152,7 +199,9 @@ export default function ProjectMenu() {
                     >
                       <span className={styles.itemMain}>
                         <span className={styles.itemName}>{s.title}</span>
-                        <span className={styles.itemMeta}>{s.messages.length} 条消息</span>
+                        <span className={styles.itemMeta}>
+                          {userRounds > 0 ? `${userRounds} 轮对话` : '未开始'}
+                        </span>
                       </span>
                     </button>
                     <button
@@ -177,8 +226,12 @@ export default function ProjectMenu() {
                   </div>
                 )}
               </li>
-            ))}
+              )
+            })}
           </ul>
+          {visibleSessions.length === 0 && (
+            <p className={styles.empty}>没有找到匹配的项目</p>
+          )}
           <button type="button" className={styles.createBtn} onClick={() => void handleCreate()}>
             <Plus size={14} />
             <span>新建项目</span>

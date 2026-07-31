@@ -101,7 +101,7 @@ class Settings(BaseSettings):
     # ── CORS ──────────────────────────────────────────────────
     # list[str] 让我们可以在 .env 里写逗号分隔的多个源，
     # pydantic-settings 会自动解析成列表。
-    cors_origins: list[str] = ["http://localhost:7000", "http://127.0.0.1:7000"]
+    cors_origins: list[str] = ["http://localhost:7300", "http://127.0.0.1:7300"]
 
     # ── 后端预览沙箱 ───────────────────────────────────────────
     # 生产单容器内 Worker 只监听 loopback；主 API 代用户转发，浏览器拿不到内部 token。

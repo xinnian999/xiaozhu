@@ -6,6 +6,10 @@ import {
   Image as ImageIcon,
   X,
   Plus,
+  Braces,
+  ShieldCheck,
+  GitBranch,
+  Sparkles,
 } from 'lucide-react'
 import {
   useSessionStore,
@@ -90,7 +94,9 @@ function fileToDataUrl(file: File): Promise<string> {
 // ============================================
 // 左侧聊天侧栏
 // ============================================
-export default function ChatSidebar() {
+export default function ChatSidebar({ conversationOnly = false }: {
+  conversationOnly?: boolean
+}) {
   const session = useSessionStore((s) => s.activeSession())
   const activeId = useSessionStore((s) => s.activeId)
   const createNew = useSessionStore((s) => s.createNew)
@@ -150,7 +156,8 @@ export default function ChatSidebar() {
   // 输入框工具栏的「加号」展开态：图片 / 语音等次要输入方式收进这个菜单里。
   // 点菜单外的任意处自动收起（复用和 ModelSelector 同一套 useClickOutside）。
   const [toolsOpen, setToolsOpen] = useState(false)
-  // 每个模型各记一份持久化偏好；支持思考的模型首次出现时默认开启。
+  // 每个模型各记一份持久化偏好；可关闭思考的模型首次出现时默认关闭，
+  // 优先保证常规生成速度。用户主动开启后仍会按模型持久化选择。
   const [thinkingOverrides, setThinkingOverrides] = useState<Record<string, boolean>>(
     getInitialThinkingOverrides,
   )
@@ -184,8 +191,8 @@ export default function ChatSidebar() {
     ? (!thinkingToggleable
         ? true
         : selectedModel
-          ? (thinkingOverrides[selectedModel] ?? true)
-          : true)
+          ? (thinkingOverrides[selectedModel] ?? false)
+          : false)
     : false
   // 支持但不可关闭的模型仍显式请求开启；完全不支持时不发送参数，保留厂商默认。
   const thinkingForRequest = thinkingSupported ? thinkingEnabled : undefined
@@ -330,6 +337,12 @@ export default function ChatSidebar() {
         // AI 调 check_build：这一组改动写完、可渲染了 —— 把暂存文件应用进预览并重新构建
         // 请求显式带上流所属会话，切换后仍在完成的旧构建不会污染新项目。
         requestPreviewApply(event.id, ownerSessionId)
+        // 移动端不要在用户刚发送需求时就展示一个“空转”的预览加载页。等代码真正
+        // 写完并进入 check_build，再切到工作区；生产实测真正构建到 iframe 首屏只需
+        // 数秒，用户此前看到的几分钟转圈其实都发生在这条事件之前。
+        if (useSessionStore.getState().activeId === ownerSessionId) {
+          setMobileView('work')
+        }
       } else if (event.type === 'preview_device') {
         // 切项目会中断旧流，但网络上仍可能有一帧迟到事件；再次核对归属，不能让旧项目
         // 把用户正在看的新项目画布切走。
@@ -417,9 +430,8 @@ export default function ChatSidebar() {
     // 1. 把用户消息（连同图片缩略图）追加到列表
     appendMessage(makeMessage('user', text, images.length ? { images } : undefined))
 
-    // 移动端：发出消息后自动切到「工作区」视图，让用户直接看到预览生成过程
-    // （桌面端两栏并排，这个状态被 CSS 忽略，无副作用）
-    setMobileView('work')
+    // 移动端发出需求后继续留在对话区，让用户看到真实生成进度。等收到
+    // preview_refresh（代码已写完、即将真实构建）时再自动切到预览。
 
     // 2. 立刻进入流式态（不等首个 token）：发送键即时变"停止"，并建好中断控制器
     beginStreaming()
@@ -667,10 +679,19 @@ export default function ChatSidebar() {
   return (
     <aside
       className={`${styles.sidebar} ${chatCollapsed ? styles.collapsed : ''} ${noSession ? styles.fullscreen : ''}`}
+      data-conversation-only={conversationOnly || undefined}
       aria-label="对话"
     >
       <div className={styles.chatBody}>
-        {noSession ? <EmptyHero /> : <MessageList onRetry={handleRetry} onResume={handleResume} onAskUserAnswer={handleAskUserAnswer} />}
+        {noSession ? (
+          <EmptyHero onSelectPrompt={setDraft} />
+        ) : (
+          <MessageList
+            onRetry={handleRetry}
+            onResume={handleResume}
+            onAskUserAnswer={handleAskUserAnswer}
+          />
+        )}
       </div>
 
       <footer className={styles.composer}>
@@ -826,13 +847,55 @@ export default function ChatSidebar() {
 // ============================================
 // 空态欢迎区：没有激活会话时的引导文案
 // ============================================
-function EmptyHero() {
+const STARTER_PROMPTS = [
+  '做一个能记录收支和分类统计的移动端记账工具',
+  '做一个带作品展示和联系表单的个人主页',
+  '做一个可以拖拽任务的项目看板',
+]
+
+function EmptyHero({ onSelectPrompt }: { onSelectPrompt: (prompt: string) => void }) {
   return (
     <div className={styles.hero}>
-      <h1 className={styles.heroTitle}>开始构建你的应用</h1>
-      <p className={styles.heroSubtitle}>
-        在下方输入一句话需求，我会立刻为你生成一个可运行的前端项目
-      </p>
+      <div className={styles.heroIntro}>
+        <span className={styles.heroEyebrow}>
+          <Sparkles size={13} />
+          AI 代码工坊
+        </span>
+        <h1 className={styles.heroTitle}>
+          从一句话，到
+          <em>真正跑起来</em>
+        </h1>
+        <p className={styles.heroSubtitle}>
+          描述你的想法，小筑会编写 React 代码、完成沙箱构建，并把可交互的结果直接放到你面前。
+        </p>
+      </div>
+
+      <div className={styles.heroProofs} aria-label="核心能力">
+        <span>
+          <Braces size={15} />
+          真实项目源码
+        </span>
+        <span>
+          <ShieldCheck size={15} />
+          沙箱构建预览
+        </span>
+        <span>
+          <GitBranch size={15} />
+          版本快照回滚
+        </span>
+      </div>
+
+      <div className={styles.heroStarters}>
+        <span className={styles.heroStartersLabel}>不知道从哪开始？试试</span>
+        <div className={styles.heroStarterList}>
+          {STARTER_PROMPTS.map((prompt) => (
+            <button key={prompt} type="button" onClick={() => onSelectPrompt(prompt)}>
+              <span>{prompt}</span>
+              <ArrowUp size={13} />
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   )
 }

@@ -18,7 +18,7 @@ export default defineConfig({
     },
   },
   server: {
-    // 与主前端(7000)、后端(7200)区分开的独立开发端口。
+    // 与主前端(7300)、后端(7200)区分开的独立开发端口。
     port: 7100,
     strictPort: true,
     proxy: {

@@ -124,6 +124,8 @@ export default function TabBar() {
                 key={key}
                 className={`${styles.tab} ${active ? styles.active : ''}`}
                 onClick={() => setWorkTab(key)}
+                aria-label={label}
+                aria-pressed={active}
               >
                 <Icon size={13} />
                 <span>{label}</span>

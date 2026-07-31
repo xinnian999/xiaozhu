@@ -10,6 +10,9 @@ import styles from './index.module.scss'
 // 否则在动画/布局还没稳的时候滚，会滚不到最底。留一点余量取 700ms。
 const INIT_SCROLL_DELAY = 700
 
+// 距离底部在这个范围内视为用户已经主动回到底部，可恢复自动跟随。
+const FOLLOW_BOTTOM_THRESHOLD = 8
+
 // 「正在生成」等了这么多秒还没出内容，就补一句耐心提示 + 亮出计时。
 // 部分模型（如推理型 Gemini）会先思考几十秒才吐第一个字，且中转不回传思维链 ——
 // 期间界面只有 shimmer 容易被当成卡死，这里用「秒数在走」证明它还在干活。
@@ -29,7 +32,10 @@ type Props = {
 // ============================================
 export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Props) {
   const session = useSessionStore((s) => s.activeSession())
+  const listRef = useRef<HTMLDivElement>(null)
   const endRef = useRef<HTMLDivElement>(null)
+  // 用户手动离开底部后暂停自动跟随；只有再次滚回底部才恢复。
+  const shouldFollowRef = useRef(true)
   // 记录已经为哪个会话做过「首次定位到底部」。首次（刷新 / 切会话）延时滚，
   // 避开预览区展开动画 + 布局抖动；之后的新消息才即时 smooth 平滑滚动。
   const didInitScrollRef = useRef<string | null>(null)
@@ -90,7 +96,27 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
     }
   }, [isStreaming, streamingText, hasLiveReasoning, phaseKey])
 
-  // 新消息到来 / 进入思考态时滚动到底部
+  // 监听真正承载滚动的 chatBody。用户向上查看历史消息后立刻暂停自动跟随，
+  // 滚回底部时再恢复；切换会话则重新从最新消息开始。
+  useEffect(() => {
+    const scrollContainer = listRef.current?.parentElement
+    if (!scrollContainer) return
+
+    shouldFollowRef.current = true
+    const syncFollowState = () => {
+      const distanceToBottom = (
+        scrollContainer.scrollHeight
+        - scrollContainer.scrollTop
+        - scrollContainer.clientHeight
+      )
+      shouldFollowRef.current = distanceToBottom <= FOLLOW_BOTTOM_THRESHOLD
+    }
+
+    scrollContainer.addEventListener('scroll', syncFollowState, { passive: true })
+    return () => scrollContainer.removeEventListener('scroll', syncFollowState)
+  }, [sessionId])
+
+  // 新消息到来 / 进入思考态时，仅在用户仍停留于底部时继续跟随。
   useEffect(() => {
     if (!endRef.current) return
     const isFirst = didInitScrollRef.current !== sessionId
@@ -99,13 +125,16 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
       // 等展开动画 + 布局稳定后再瞬时定位到底。
       didInitScrollRef.current = sessionId
       const timer = setTimeout(() => {
-        endRef.current?.scrollIntoView({ behavior: 'auto' })
+        if (shouldFollowRef.current) {
+          endRef.current?.scrollIntoView({ behavior: 'auto' })
+        }
       }, INIT_SCROLL_DELAY)
       // 清理：会话在延时内被切走 / 组件卸载，撤掉这次滚动，免得滚错会话
       return () => clearTimeout(timer)
     }
-    // 同会话后续更新：即时平滑滚动
-    endRef.current.scrollIntoView({ behavior: 'smooth' })
+    if (!shouldFollowRef.current) return
+    // 流式分片频繁到达，使用即时贴底；平滑滚动的中间帧会被误判成用户离开底部。
+    endRef.current.scrollIntoView({ behavior: 'auto' })
   }, [sessionId, messages.length, liveReasoningTextLength, isStreaming, resumable])
 
   if (messages.length === 0 && !isStreaming) {
@@ -169,7 +198,7 @@ export default function MessageList({ onRetry, onResume, onAskUserAnswer }: Prop
   }
 
   return (
-    <div className={styles.list}>
+    <div ref={listRef} className={styles.list}>
       {messages.map((msg) => (
         <MessageBubble
           key={msg.id}

@@ -7,7 +7,7 @@
     "node": ">=22 <23"
   },
   "scripts": {
-    "dev": "sh scripts/predev-clean.sh && sh scripts/dev.sh",
+    "dev": "nvm use && sh scripts/predev-clean.sh && sh scripts/dev.sh",
     "dev:web": "sh scripts/wait-dev-services.sh && pnpm --dir web dev",
     "dev:admin": "sh scripts/wait-dev-services.sh && pnpm --dir web-admin dev",
     "db:migrate": "uv run --directory server alembic upgrade head",

@@ -373,7 +373,9 @@ function CheckBuildScreenshot({ screenshot }: { screenshot: PreviewScreenshot })
 // 把每题的 Q&A 拼成一份结构化文本，作为最终提交的 answer（也是 ToolMessage 回喂给 LLM 的内容）
 function combineAskAnswers(questions: AskQuestion[], answers: (string | null)[]): string {
   return questions
-    .map((q, i) => `问题${i + 1}：${q.question}\n回答：${answers[i] ?? ''}`)
+    .map((question, index) =>
+      `问题${index + 1}：${question.question}\n回答：${answers[index] ?? ''}`
+    )
     .join('\n\n')
 }
 
@@ -432,8 +434,8 @@ function parseMultiAskAnswer(
 // 从 activeIndex 之后开始找下一个未答的题，找不到就从头找一圈；全部答完返回 -1
 function findNextUnanswered(answers: (string | null)[], from: number): number {
   for (let step = 1; step <= answers.length; step++) {
-    const i = (from + step) % answers.length
-    if (answers[i] == null) return i
+    const index = (from + step) % answers.length
+    if (answers[index] == null) return index
   }
   return -1
 }
@@ -538,33 +540,37 @@ function AskUserChip({
     <div className={styles.askChip}>
       {questions.length > 1 && (
         <div className={styles.askChipTabs} role="tablist">
-          {questions.map((q, i) => (
+          {questions.map((question, index) => (
             <button
-              key={i}
+              key={index}
               type="button"
               role="tab"
-              aria-selected={i === activeIndex}
+              aria-selected={index === activeIndex}
               disabled={busy}
-              title={q.question}
-              className={`${styles.askChipTab} ${i === activeIndex ? styles.askChipTabActive : ''}`}
-              onClick={() => setActiveIndex(i)}
+              title={question.question}
+              className={`${styles.askChipTab} ${index === activeIndex ? styles.askChipTabActive : ''}`}
+              onClick={() => setActiveIndex(index)}
             >
-              {answers[i] != null && <Check size={11} className={styles.askChipTabCheck} aria-hidden />}
-              <span className={styles.askChipTabLabel}>{q.header || `问题${i + 1}`}</span>
+              {answers[index] != null && (
+                <Check size={11} className={styles.askChipTabCheck} aria-hidden />
+              )}
+              <span className={styles.askChipTabLabel}>
+                {question.header || `问题${index + 1}`}
+              </span>
             </button>
           ))}
         </div>
       )}
 
-      {questions.map((q, i) => (
+      {questions.map((question, index) => (
         <AskQuestionBody
           // 每题各挂一份面板并常驻 DOM，切 Tab 只切换显隐，避免卸载后丢失勾选/选中态
-          key={i}
-          hidden={i !== activeIndex}
-          question={q}
-          initialAnswer={answers[i]}
+          key={index}
+          hidden={index !== activeIndex}
+          question={question}
+          initialAnswer={answers[index]}
           disabled={busy}
-          onFinalize={(answer) => finalizeQuestion(i, answer)}
+          onFinalize={(answer) => finalizeQuestion(index, answer)}
         />
       ))}
     </div>

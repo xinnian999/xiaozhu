@@ -84,6 +84,8 @@ type SessionState = {
   /** 删除会话：DELETE 后端，成功后从列表移除；删的若是当前会话则回到空态首屏 */
   deleteSession: (id: string) => Promise<void>
   switchTo: (id: string) => Promise<void>
+  /** 从服务端重新同步消息和文件；用于后台任务重连结束后的最终一致性收口。 */
+  refreshSessionContent: (id: string) => Promise<void>
   /** 回到"无激活会话"的空态首屏；若正在生成，先中断并等流收尾 */
   goToEmpty: () => Promise<void>
   appendMessage: (msg: Message) => void
@@ -288,6 +290,20 @@ function fromApiMessage(m: ApiMessage): Message {
     }
   }
   return base
+}
+
+/** 历史里存在尚未回答的 ask_user 工具卡时，恢复“等待回答”交互态。 */
+function hasPendingAskUser(messages: Message[]): boolean {
+  // interrupt 落库后，这张空结果工具卡就是本轮最后一条消息。只检查末尾，避免历史上
+  // 已失效但未补结果的旧卡片把整个会话永久锁成“等待回答”。
+  const message = messages.at(-1)
+  return !!(
+    message
+    && message.kind === 'tool'
+    && message.toolName === 'ask_user'
+    && message.toolCallId
+    && !message.toolResult
+  )
 }
 
 export function makeMessage(
@@ -519,26 +535,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       url.searchParams.set('sessionId', id)
       window.history.replaceState(null, '', url.toString())
     }
-    // 切换到的目标会话如果还没拉过文件（files 为空且 versionId 为 0），从后端拉一次
     const target = get().sessions.find((s) => s.id === id)
     if (!target) return
-    if (Object.keys(target.files).length > 0) return  // 已加载过，不重复拉
-    // 并行拉文件和消息 —— 两个请求互相不依赖，并发更快
     try {
-      const [files, apiMessages] = await Promise.all([
-        listSessionFiles(id),
-        listSessionMessages(id),
-      ])
-      const messages = apiMessages.map(fromApiMessage)
-      set((s) => ({
-        sessions: s.sessions.map((sess) =>
-          sess.id === id
-            ? { ...sess, files, messages, versionId: sess.versionId + 1 }
-            : sess,
-        ),
-      }))
+      // 后台生成不再依赖当前页面，因此每次切回项目都以服务端持久化结果同步一次。
+      // drafts 保留不动，避免覆盖用户尚未保存的手工编辑。
+      await get().refreshSessionContent(id)
       // 拉完历史后探测这一轮是否被中断、可续跑（覆盖刷新 / 锁屏后重开的场景——
-      // 那时 JS 上下文已重建，只能问服务端）。当前没在流式 / 等回答时才问，避免打断进行中的轮次。
+      // 那时 JS 上下文已重建，只能问服务端）。已有本地文件的会话也必须探测：
+      // 用户切走只会断开订阅，服务端任务仍可能正在运行。
       // fire-and-forget：不阻塞切会话本身。
       const cur = get().sessions.find((s) => s.id === id)
       if (cur && !cur.isStreaming && !cur.awaitingAnswer) {
@@ -547,6 +552,29 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     } catch (e) {
       console.error(`加载会话 ${id} 的内容失败`, e)
     }
+  },
+
+  refreshSessionContent: async (id) => {
+    // 文件与消息互不依赖，并行读取可缩短刷新、切项目与任务重连后的恢复时间。
+    const [files, apiMessages] = await Promise.all([
+      listSessionFiles(id),
+      listSessionMessages(id),
+    ])
+    const messages = apiMessages.map(fromApiMessage)
+    const awaitingAnswer = hasPendingAskUser(messages)
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === id
+          ? {
+              ...sess,
+              files,
+              messages,
+              awaitingAnswer,
+              versionId: sess.versionId + 1,
+            }
+          : sess,
+      ),
+    }))
   },
 
   goToEmpty: async () => {

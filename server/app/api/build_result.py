@@ -1,10 +1,8 @@
-"""Build result API —— 接收前端 vite build 的结果。
+"""Build result API —— 接收浏览器预览的增强结果。
 
 独立 sandbox-worker 跑 `vite build`，构建速度取决于 Worker 的资源配额。主后端
-无关。构建一结束，前端就把「成没成、错在哪」POST 到这里；后端的 check_build 工具正
-挂在 build_store 上等这个结果，收到即被唤醒返回 —— 不再靠固定窗口轮询去猜构建多久。
-
-详见 build_store.py 对这条「前端事件 → 后端 await」会合机制的说明。
+会直接调用 Worker 得到 Agent 所需的编译结论，不等待浏览器。浏览器在线时仍会把 iframe
+运行结果与截图 POST 到这里，供当前页面展示；断线、刷新或关闭页面不会阻塞生成任务。
 """
 
 from typing import Literal
@@ -65,10 +63,10 @@ def _normalize_build_outcome(body: BuildResult) -> tuple[bool, str]:
 
 @router.post("", status_code=204)
 async def report_build_result(session_id: str, body: BuildResult) -> None:
-    """接收前端的构建结果，唤醒正在等待的 check_build。
+    """接收在线浏览器的运行结果与截图。
 
-    会话归属由路由级守卫 get_owned_session 把关。通过后，把结果交给 build_store，
-    它会立旗唤醒挂在 wait 上的 check_build。返回 204：报到即可，没有 body 要回。
+    会话归属由路由级守卫 get_owned_session 把关。build_store 只用于校验这次可选回报
+    是否仍属于当前 check_id，不再承担 Agent 推进的会合职责。
     """
     # 上传请求可能已经在服务端成功 commit，但响应在网络上丢失，前端只好回报
     # screenshot_id=None。waiter 仍记得那张图，此处自动补上，避免孤儿文件和漏传 Agent。

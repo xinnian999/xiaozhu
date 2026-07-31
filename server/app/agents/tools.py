@@ -3,7 +3,7 @@
 工具要操作"当前 session 的文件"，但 LLM 不该感知 session_id（那是后端会话身份，
 不是业务参数）。所以这里用闭包把 db / session_id "封进去"，工具的 JSON Schema
 里只暴露真正的业务参数（path / content）。每次请求重新构造一份工具实例，
-因为它们绑定的是请求级别的 db。
+因为它们绑定的是后台任务自己的 db。
 
 注意：工具闭包里没法 yield SSE 事件，所以这些工具只负责「读写数据库 + 返回字符串」；
 「写完后推 file_write / preview_refresh 给前端」这类事件，统一在 agent_loop 里
@@ -13,8 +13,9 @@
 在后台任务里跑图：工具的 db 写入会和 agent_loop 消费端的落库（add_message / 写
 tool_result）并发，撞同一个会话就报 "concurrent operations are not permitted" /
 "transaction is closed"。所以由 agent_loop 建一把请求级 asyncio.Lock 传进来，**工具和
-消费端共用同一把锁**，把所有碰 db 的操作串起来。check_build 不碰 db、且会长等（最多
-90s）；set_preview_device 只是通过 loop 下发 UI 事件，同样不碰 db；ask_user 也不碰 db，
+消费端共用同一把锁**，把所有碰 db 的操作串起来。check_build 会短暂读取文件快照后
+调用独立沙箱 Worker；set_preview_device 只是通过 loop 下发 UI 事件，不碰 db；ask_user
+也不碰 db，
 但等待方式不同——它用 LangGraph 的 interrupt() 把整个调用暂停 + 图状态存进
 checkpointer，直接结束这次请求，不占着一条长连接干等（详见 app.agents.loop 里
 thread_id / checkpointer 的说明），所以这三个工具都不纳入 db_lock。
@@ -26,6 +27,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Annotated, Literal
 
+from fastapi import HTTPException
 from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
 from langgraph.types import interrupt
@@ -33,9 +35,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import build_store
+from app.api.sandbox import SandboxBuildRequest, _submit_sandbox_build
 from app.models.file import File
-from app.preview_screenshots import build_screenshot_artifact
 
 
 class AskUserOption(BaseModel):
@@ -133,12 +134,14 @@ def normalize_ask_user_questions(value: object) -> object:
 class BuildCheckReuseState:
     """同一轮 Agent 内的构建幂等状态。
 
-    ``check_build`` 真正执行前，loop 已经要决定是否向浏览器发 ``preview_refresh``；
-    因此判定状态必须由 loop 与工具闭包共享，不能只在工具内部做结果缓存。
+    ``check_build`` 真正执行前，loop 已经要决定是否向浏览器发可选的
+    ``preview_refresh``，也要拦住 provider 偶发返回的同批重复检查；因此判定状态必须
+    由 loop 与工具闭包共享，不能只在工具内部做结果缓存。
     """
 
     _decisions: dict[str, str] = field(default_factory=dict)
     _cacheable_results: dict[str, bool | None] = field(default_factory=dict)
+    _file_overlays: dict[str, dict[str, str]] = field(default_factory=dict)
     _cached_fingerprint: str | None = None
     _cached_content: str | None = None
 
@@ -162,8 +165,22 @@ class BuildCheckReuseState:
     def should_reuse(self, check_id: str) -> bool:
         return self._decisions.get(check_id) == "reuse"
 
+    def mark_duplicate(self, check_id: str) -> None:
+        """同一批中的额外 check_build 不再占用单并发沙箱 Worker。"""
+        self._decisions[check_id] = "duplicate"
+
+    def is_duplicate(self, check_id: str) -> bool:
+        return self._decisions.get(check_id) == "duplicate"
+
     def has_decision(self, check_id: str) -> bool:
         return check_id in self._decisions
+
+    def set_file_overlay(self, check_id: str, path: str, content: str) -> None:
+        """记录与 check_build 同批写入的最终文件，避免并行工具读取旧数据库快照。"""
+        self._file_overlays.setdefault(check_id, {})[path] = content
+
+    def file_overlay(self, check_id: str) -> dict[str, str]:
+        return dict(self._file_overlays.get(check_id, {}))
 
     def restore(self, fingerprint: str, content: str) -> None:
         """从同一 LangGraph 轮的持久化工具记录恢复可靠缓存。"""
@@ -200,6 +217,7 @@ class BuildCheckReuseState:
     ) -> str:
         """在整批工具都完成后提交缓存，并返回持久化动作。"""
         decision = self._decisions.pop(check_id, None)
+        self._file_overlays.pop(check_id, None)
         cacheable = self._cacheable_results.pop(check_id, False)
         if decision == "reuse":
             return "reuse"
@@ -254,6 +272,7 @@ def build_tools(
     db_lock：agent_loop 传入的请求级 asyncio.Lock，与消费端共用，串行化所有 db 操作。
     """
     build_reuse_state = build_reuse_state or BuildCheckReuseState()
+    preview_device: Literal["desktop", "mobile"] = "desktop"
 
     @tool
     async def write_file(path: str, content: str) -> str:
@@ -341,10 +360,10 @@ def build_tools(
 
     @tool(response_format="content_and_artifact")
     async def check_build(runtime: ToolRuntime) -> tuple[str, dict | None]:
-        """把刚写的改动应用到预览、构建一次，并返回构建/运行报错。
+        """在服务端沙箱构建当前项目，并返回编译结果。
 
-        写完一组完整、能渲染的改动后调用它：前端会把暂存文件同步进容器、跑一次
-        `vite build`（也就是把这组改动「揭晓」给用户看），然后把构建结果回传回来。
+        写完一组完整、能渲染的改动后调用它：服务端会把当前项目文件交给独立沙箱运行
+        `vite build`。浏览器在线时仍会同步刷新预览，但它只负责展示，不参与构建判定。
         没有报错就说明构建通过、能正常跑。
 
         重要：write_file / edit_file 只是把文件「暂存」下来，并不会刷新预览 —— 这样
@@ -354,14 +373,6 @@ def build_tools(
         典型用法：write_file 写完所有相关文件 → check_build → 有报错就修、再 check_build。
         如果本轮上一次检查后文件没有变化，不要再次调用；工具层会跳过重复构建和截图。
         """
-        # 时序：本工具的 tool_call 一出现，agent_loop 就会先 build_store.arm() 架好会合点、
-        # 再推 preview_refresh 信号给前端（工具闭包里没法 yield 事件，所以放在 loop 里做，
-        # 见 app.agents.loop）。前端收到后同步文件 → vite build → iframe 重载渲染、收集运行时
-        # 报错 → 把「编译 + 运行」两类结果一并 POST 回 /build-result，那个端点调
-        # build_store.report 立旗唤醒下面这个 wait。
-        #
-        # 所以这里只需纯等一个结果：前端多快回、这里多快返回，不靠固定窗口猜。
-        # timeout=90 只是「前端彻底失联（构建卡死/断线）」的兜底，正常情况远用不到。
         check_id = runtime.tool_call_id
         if not check_id:
             return "构建检查内部错误：缺少 tool_call_id，请重新检查。", None
@@ -385,78 +396,58 @@ def build_tools(
 
         if build_reuse_state.should_reuse(check_id):
             return build_reuse_state.reused_content(), None
-
-        result = await build_store.wait(session_id, check_id, timeout=90.0)
-        if result is None:
+        if build_reuse_state.is_duplicate(check_id):
             build_reuse_state.note_fresh_result(check_id, cacheable=False)
             return (
-                "构建超时：预览迟迟没有回报结果，可能构建卡住或预览断开，"
-                "请提示用户检查预览。",
+                "同一批工具中已有一项构建检查正在执行，本次重复检查已安全跳过；"
+                "请以后每批只调用一次 check_build。",
                 None,
             )
 
-        # 截图是附加能力：文件读取失败时只打印诊断，构建文本结果仍照常回给 Agent。
-        artifact = None
-        screenshot_id = result.get("screenshot_id")
-        if screenshot_id:
-            try:
-                artifact = await build_screenshot_artifact(
-                    session_id,
-                    str(screenshot_id),
-                )
-            except Exception as exc:
-                print(
-                    "[check_build] 截图读取失败，本次仅返回构建结果: "
-                    f"{type(exc).__name__}: {exc}"
-                )
-
-        # 同一批里额外出现的 check_build 是 loop 合成的内部结果，不代表真实预览状态。
-        synthetic = bool(result.get("_synthetic"))
-        device_label = "H5" if result.get("device") == "mobile" else "桌面"
-        device_note = f"本次检查使用{device_label}画布；页面仍需兼容另一端。"
-        if result.get("ok"):
-            if artifact is not None:
-                build_reuse_state.note_fresh_result(
-                    check_id,
-                    cacheable=None if synthetic else True,
-                )
-                return (
-                    f"{device_note}编译与运行时检查通过；"
-                    "这不代表视觉截图已经合格，附带截图仍需由支持视觉的模型严格审查。",
-                    artifact,
-                )
+        async with db_lock:
+            rows = list(
+                (
+                    await db.execute(
+                        select(File.path, File.content).where(
+                            File.session_id == session_id
+                        )
+                    )
+                ).all()
+            )
+        files = dict(rows)
+        files.update(build_reuse_state.file_overlay(check_id))
+        try:
+            result = await _submit_sandbox_build(
+                session_id,
+                SandboxBuildRequest(
+                    files=files,
+                    device=preview_device,
+                ),
+            )
+        except HTTPException as exc:
             build_reuse_state.note_fresh_result(check_id, cacheable=False)
             return (
-                f"{device_note}编译与运行时检查通过，但本次没有取得可靠截图，"
-                "视觉效果尚未验证。",
+                f"服务端沙箱构建失败：{exc.detail}",
+                None,
+            )
+
+        device_label = "H5" if preview_device == "mobile" else "桌面"
+        device_note = f"本次检查使用{device_label}画布；页面仍需兼容另一端。"
+        if result.ok:
+            build_reuse_state.note_fresh_result(check_id, cacheable=True)
+            return (
+                f"{device_note}服务端编译检查通过。浏览器预览、运行时采集和截图是"
+                "非阻塞增强；即使用户切后台、刷新或关闭页面，本次任务也可继续完成。",
                 None,
             )
         build_reuse_state.note_fresh_result(
             check_id,
-            cacheable=(
-                None
-                if synthetic
-                else not bool(result.get("infrastructure"))
-            ),
+            cacheable=True,
         )
-        errors = str(result.get("errors") or "").strip() or "（无详细错误信息）"
-        if result.get("infrastructure"):
-            return (
-                f"{device_note}项目代码没有被判定为编译或运行失败，但预览基础设施"
-                f"未能完成验收：\n{errors}\n"
-                "这不是已确认的项目代码错误；不要据此修改或简化业务代码，也不要重复"
-                "调用 check_build 碰运气。请保留当前实现并向用户如实说明预览验收暂不可用。",
-                artifact,
-            )
-        if result.get("runtime"):
-            # 编译过了、但 iframe 渲染时崩（如 undefined is not a function）
-            return (
-                f"{device_note}构建通过，但预览运行时报错，请定位并修复：\n{errors}",
-                artifact,
-            )
+        errors = result.errors.strip() or "（无详细错误信息）"
         return (
             f"{device_note}预览构建失败（编译没通过），请定位并修复：\n{errors}",
-            artifact,
+            None,
         )
 
     @tool
@@ -475,6 +466,8 @@ def build_tools(
         不必为此追问，也不要反复设置；保留用户当前画布即可。无论观察哪种画布，
         生成代码都必须同时响应式兼容手机与桌面。
         """
+        nonlocal preview_device
+        preview_device = device
         label = "H5" if device == "mobile" else "桌面"
         suffix = f"（{reason.strip()}）" if reason.strip() else ""
         return f"已切换到{label}画布{suffix}；页面仍需同时兼容桌面与移动端。"

@@ -446,6 +446,8 @@ export async function listSessionMessages(sessionId: string): Promise<ApiMessage
  *  （有未跑完节点且不是 ask_user 暂停）。失败一律当「不可续」，不打断主流程。 */
 export async function getResumeState(sessionId: string): Promise<boolean> {
   try {
+    const active = await getGenerationState(sessionId)
+    if (active) return true
     const { data } = await http.get<{ resumable: boolean }>(
       `/api/sessions/${sessionId}/resume-state`,
     )
@@ -455,10 +457,48 @@ export async function getResumeState(sessionId: string): Promise<boolean> {
   }
 }
 
-// ── 回报构建结果（唤醒后端 check_build）──────────────────────
-// AI 每次调 check_build → 前端构建一次(vite build) + iframe 重载渲染收集运行时错误 →
-// 把「编译 + 运行」两类结果一并回报这里，唤醒正挂在 build_store 上等结果的 check_build。
-// 每次 check_build 都必须回报一次(成功也要报)，否则后端会干等到超时。
+/** 服务端 Agent 是否仍在后台运行。浏览器断开不等于任务停止。 */
+export async function getGenerationState(sessionId: string): Promise<boolean> {
+  try {
+    const { data } = await http.get<{ active: boolean }>(
+      `/api/sessions/${sessionId}/generation-state`,
+    )
+    return !!data.active
+  } catch {
+    return false
+  }
+}
+
+/** 重新订阅仍在服务端运行的任务，不会创建或续跑第二份 Agent。 */
+export async function* streamGeneration(
+  sessionId: string,
+  signal?: AbortSignal,
+): AsyncGenerator<SSEEvent> {
+  let response: Response
+  try {
+    response = await fetch(`/api/sessions/${sessionId}/generation-stream`, {
+      headers: authHeaders(),
+      signal,
+    })
+  } catch (error) {
+    if (signal?.aborted) return
+    throw error
+  }
+  if (!response.ok || !response.body) return
+  yield* consumeSSE(response, signal)
+}
+
+/** 只有用户明确点击停止时才终止服务端任务。 */
+export async function stopGeneration(sessionId: string): Promise<void> {
+  await fetch(`/api/sessions/${sessionId}/generation`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  })
+}
+
+// ── 回报浏览器预览结果（非阻塞增强）──────────────────────────
+// check_build 的编译结论已经由服务端直接调用 Worker 得出；浏览器在线时仍会重载 iframe、
+// 采集运行时错误和截图并回报，用于当前页面的预览体验，但失败或断线不会卡住 Agent。
 // 走原生 fetch 而非 axios：best-effort 旁路数据，失败要静默，不弹 toast 骚扰用户。
 export async function postBuildResult(
   sessionId: string,
@@ -479,7 +519,7 @@ export async function postBuildResult(
       body: JSON.stringify(result),
     })
   } catch {
-    // 回报失败就算了：后端 check_build 有超时兜底，不会永久卡住
+    // 回报失败只影响当前浏览器的增强信息，服务端任务照常推进
   }
 }
 

@@ -1389,6 +1389,11 @@ async def _consume(
                                             continue
                                         ev = await _early_file_write(db, db_lock, session_id, other)
                                         if ev is not None:
+                                            build_reuse_state.set_file_overlay(
+                                                tc["id"],
+                                                ev["path"],
+                                                ev["content"],
+                                            )
                                             wrote_files = True
                                             early_written.add(other["id"])
                                             yield sse(ev)
@@ -1425,16 +1430,11 @@ async def _consume(
                                         continue
 
                                     if tc["id"] != primary_check_id:
-                                        # 同一 AIMessage 里额外出现的 check_build 只回一条
-                                        # 合成 ToolMessage 给模型，不触发浏览器，也不生成第二张卡。
+                                        # 同一 AIMessage 里额外出现的 check_build 不占用单并发
+                                        # Worker，只让工具闭包返回一条合成结果给模型，也不生成
+                                        # 第二张用户可见工具卡。
                                         suppressed_check_ids.add(tc["id"])
-                                        build_store.arm(session_id, tc["id"])
-                                        armed_check_ids.add(tc["id"])
-                                        build_store.report(
-                                            session_id,
-                                            tc["id"],
-                                            _synthetic_duplicate_check_result(),
-                                        )
+                                        build_reuse_state.mark_duplicate(tc["id"])
                                         continue
 
                                     # check_build 在流式参数阶段被刻意延后到这里才亮卡；此时已
@@ -1448,6 +1448,8 @@ async def _consume(
                                             "id": tc["id"],
                                         }
                                     )
+                                    # 浏览器预览和截图仍是在线时的增强能力。这里 arm 只为允许
+                                    # 它回报结果，不再由 check_build 等待，也不影响后台任务推进。
                                     build_store.arm(session_id, tc["id"])
                                     armed_check_ids.add(tc["id"])
                                     yield sse(

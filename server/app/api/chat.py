@@ -18,6 +18,7 @@ from app.db import get_db
 from app.deps import get_current_user, get_owned_session
 from app.generation_control import cancel_session_generations, reserve_generation
 from app.generation_runtime import (
+    active_generation_ids,
     is_generation_active,
     start_generation,
     subscribe_generation,
@@ -133,6 +134,21 @@ async def generation_state(
 ) -> dict:
     """浏览器刷新后查询服务端任务是否仍在运行。"""
     return {"active": is_generation_active(session_id)}
+
+
+@router.get("/sessions/generation-states")
+async def generation_states(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """批量返回当前用户仍在后台运行的项目，避免项目菜单逐项发请求。"""
+    result = await db.execute(
+        select(Session.id).where(Session.user_id == current_user.id)
+    )
+    owned_ids = set(result.scalars().all())
+    return {
+        "active_session_ids": sorted(active_generation_ids(owned_ids)),
+    }
 
 
 @router.get("/sessions/{session_id}/generation-stream")

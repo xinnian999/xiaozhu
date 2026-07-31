@@ -265,7 +265,7 @@ export default function ChatSidebar({ conversationOnly = false }: {
   // 避免两份几乎一样的事件分发代码各写一遍、日后改协议还得改两处。
   // 返回值：这次流是否「正常收场」（收到 done / error / awaiting_answer 之一）。
   // 返回 false 说明 for-await 是因为连接中途断掉才结束的（网络抖动等）——调用方据此把
-  // 会话标记为可续跑，让用户点「继续生成」从断点接着跑，而不用从头重来。
+  // 会话标记为可续跑，交给下方 effect 自动重新订阅或从断点接着跑。
   const consumeStream = async (
     stream: AsyncGenerator<SSEEvent>,
     ownerSessionId: string,
@@ -338,9 +338,18 @@ export default function ChatSidebar({ conversationOnly = false }: {
       } else if (event.type === 'file_delete') {
         applyFileDelete(event.path)
       } else if (event.type === 'preview_refresh') {
-        // AI 调 check_build：这一组改动写完、可渲染了 —— 把暂存文件应用进预览并重新构建
-        // 请求显式带上流所属会话，切换后仍在完成的旧构建不会污染新项目。
-        requestPreviewApply(event.id, ownerSessionId)
+        // 后端已经完成 Worker 构建，直接把 capability URL 交给预览；不能再提交一次
+        // 相同构建，否则刷新重连时会与后台任务争抢单并发 Worker。
+        requestPreviewApply(
+          event.id,
+          ownerSessionId,
+          {
+            ok: event.ok,
+            previewUrl: event.preview_url,
+            logs: event.logs,
+            errors: event.errors,
+          },
+        )
         // 移动端不要在用户刚发送需求时就展示一个“空转”的预览加载页。等代码真正
         // 写完并进入 check_build，再切到工作区；生产实测真正构建到 iframe 首屏只需
         // 数秒，用户此前看到的几分钟转圈其实都发生在这条事件之前。
@@ -461,7 +470,7 @@ export default function ChatSidebar({ conversationOnly = false }: {
         thinkingForRequest !== false,
       )
       // 流没正常收场（既非 done/error，也非 ask_user 暂停）= 连接中途断了。
-      // 同会话内直接标记可续跑，用户点「继续生成」即可从断点接着跑，无需刷新页面。
+      // 同会话内直接标记可续跑，由自动恢复 effect 接着处理，无需用户操作。
       if (!settled) setResumable(targetSessionId, true)
     } finally {
       // 正常收场、用户停止、切项目都不应被后台自动拉起；只有无 abort reason 的意外断流
@@ -534,7 +543,7 @@ export default function ChatSidebar({ conversationOnly = false }: {
     }
   }
 
-  // 「继续生成」：从断点续跑被中断的那一轮（刷新 / 锁屏 / 断网导致 SSE 半途而废）。
+  // 自动恢复：从断点续跑被中断的那一轮（刷新 / 锁屏 / 断网导致 SSE 半途而废）。
   // 后端 checkpointer 留着断点，streamResume 用同一 thread 从断点接着跑，喂给和
   // handleSend 一样的 consumeStream 管线。跑法与 handleRetry 完全对称，「停止」按钮同样能中断。
   const handleResume = async () => {
@@ -708,7 +717,6 @@ export default function ChatSidebar({ conversationOnly = false }: {
         ) : (
           <MessageList
             onRetry={handleRetry}
-            onResume={handleResume}
             onAskUserAnswer={handleAskUserAnswer}
           />
         )}

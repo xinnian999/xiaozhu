@@ -187,8 +187,9 @@ async def _resume_stream(session_id: str, body: ResumeStart, db: AsyncSession, u
             build_reuse_state,
         )
         initial_pending = recovery.pending
-        # model 节点里的可见工具卡、提前文件同步以及 arm + preview_refresh 都不会在断点
-        # 续跑时重放；必须按 checkpoint 的原始批次补发，且文件同步严格先于预览构建。
+        # model 节点里的可见工具卡、提前文件同步以及回报归属不会在断点续跑时重放；
+        # 必须按 checkpoint 的原始批次补发。预览刷新则等续跑后的服务端构建完成，
+        # 由 _consume 携 capability URL 下发，不能在这里让浏览器重复提交构建。
         rearmed_check_ids: set[str] = set()
         initial_early_written: set[str] = set()
         try:
@@ -206,8 +207,8 @@ async def _resume_stream(session_id: str, body: ResumeStart, db: AsyncSession, u
             for event in recovery.replay_events:
                 yield sse(event)
 
-            # 断线前的画布 SSE 可能没有送达。先恢复目标设备，再重放任何
-            # preview_refresh，确保续跑的自检仍截取正确 viewport。
+            # 断线前的画布 SSE 可能没有送达。先恢复目标设备，确保续跑后的预览与截图
+            # 使用正确 viewport。
             for tc in [*recovery.completed_calls, *recovery.open_calls]:
                 device_event = preview_device_event(tc)
                 if device_event is not None:
@@ -239,10 +240,10 @@ async def _resume_stream(session_id: str, body: ResumeStart, db: AsyncSession, u
                 build_reuse_state.mark_duplicate(check_id)
 
             for check_id in recovery.primary_check_ids:
-                # 仅为在线浏览器的可选预览/截图回报保留会合点；服务端构建不等待它。
+                # 仅为服务端构建完成后的可选运行时/截图回报保留归属；不提前通知浏览器，
+                # 避免它在 Worker 忙碌时重复构建。
                 build_store.arm(session_id, check_id)
                 rearmed_check_ids.add(check_id)
-                yield sse({"type": "preview_refresh", "id": check_id})
 
             # 输入传 None：LangGraph 对「有检查点且 next 非空」的 thread 以 None 输入即从断点
             # 继续（区别于 ask_result 的 Command(resume=answer)）。收尾三件套（存最终文本 /

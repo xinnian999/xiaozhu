@@ -125,6 +125,37 @@ def preview_device_event(tool_call: dict) -> dict | None:
     }
 
 
+def sandbox_preview_event(check_id: str, artifact: object) -> dict | None:
+    """把 check_build 已完成的服务端构建结果翻译成前端预览事件。
+
+    前端拿到这个事件后直接加载 Worker 已产出的 capability URL，不能再次提交构建，
+    否则刷新后重连时会与后台任务争抢单并发 Worker 并收到 429。
+    """
+    if not isinstance(artifact, dict):
+        return None
+    preview = artifact.get("sandbox_preview")
+    if not isinstance(preview, dict) or not isinstance(preview.get("ok"), bool):
+        return None
+    device = preview.get("device")
+    if device not in {"desktop", "mobile"}:
+        device = "desktop"
+    return {
+        "type": "preview_refresh",
+        "id": check_id,
+        "ok": preview["ok"],
+        "preview_url": (
+            preview.get("preview_url")
+            if isinstance(preview.get("preview_url"), str)
+            else None
+        ),
+        "logs": preview.get("logs") if isinstance(preview.get("logs"), str) else "",
+        "errors": (
+            preview.get("errors") if isinstance(preview.get("errors"), str) else ""
+        ),
+        "device": device,
+    }
+
+
 # check_build 最多等 90s，生产环境的反代（Caddy）如果配了较短的 idle/read timeout，
 # 可能会把这条长时间「有连接但没数据」的 SSE 中途掐断。/api/chat 和 /ask-result（resume）
 # 都可能触发 check_build 这段长等待，所以两边共用这一层心跳包装。
@@ -503,13 +534,11 @@ async def _early_file_write(
     塞进同一批 tool_calls。LangGraph 的 tools 节点是**屏障**——它那一批的 ToolMessage
     要等批内所有工具（含会阻塞最长 90s 的 check_build）都跑完才一次性产出。也就是说，
     真正携带文件内容的 file_write 事件（在 tools 节点分支里发，见 _consume）会被 check_build
-    死死拖在后面；而 check_build 的 arm+preview_refresh 却在 model 节点就发了出去 ——
-    于是前端「先收到 preview_refresh 去构建、后才收到 file_write」，构建到的是改动前的旧
-    文件，误报「构建通过」。
+    死死拖在后面；服务端构建若直接读取数据库，也会拿到同批写入前的旧文件。
 
-    对策：一旦发现某批 tool_calls 里带 check_build，就在 arm+preview_refresh 之前，用各写
-    文件工具**自己的 args** 把 file_write 抢先折算出来发给前端，确保预览构建到的是这一批的
-    新内容。返回可直接 yield 的事件 dict；拿不到可靠内容（参数缺失 / edit 命中不唯一）时返回
+    对策：一旦发现某批 tool_calls 里带 check_build，就在工具执行前用各写文件工具
+    **自己的 args** 把 file_write 抢先折算出来发给前端，并把同批内容叠加进服务端构建
+    快照。返回可直接 yield 的事件 dict；拿不到可靠内容（参数缺失 / edit 命中不唯一）时返回
     None，那一个文件退回 tools 节点的原路径（这类「批量 + edit + check_build 同现」本就罕见）。
 
     仅在「同批含 check_build」时才调用。正常分轮调用（先 write 再单独 check_build）走不到
@@ -1079,9 +1108,8 @@ async def _consume(
     # 「同批含 check_build」时被抢先补发过 file_write 的 tool_call_id 集合 ——
     # tools 节点回收结果时据此跳过重发，避免同一文件的 file_write 发两遍（见 _early_file_write）。
     early_written: set[str] = set(initial_early_written or ())
-    # model 节点 arm 发生在 preview_refresh yield 之前；若客户端恰在该帧断开，
-    # ToolNode 可能还没启动、wait() 也就无从 finally 清理。函数级 finally 用此集合
-    # 撤销所有残留会合点（正常已由 wait 清掉的调用是 no-op）。
+    # model 节点会先登记浏览器增强回报归属，ToolNode 完成服务端构建后才发预览 URL。
+    # 客户端或任务中途断开时，用函数级 finally 撤销残留归属。
     armed_check_ids: set[str] = set()
     # 复用检查只在 LangGraph 内部回一条 ToolMessage 给模型，不落库、不发 SSE 工具卡；
     # 用户时间线继续保留上一次真实构建卡，避免看起来又自检了一遍。
@@ -1378,9 +1406,9 @@ async def _consume(
                                 if tc["name"] == "check_build":
                                     # ── 竞态防护：同批若还有 write_file/edit_file，它们真正的 file_write
                                     # 事件会被 tools 节点屏障拖到 check_build 之后才发（见 _early_file_write
-                                    # 的详细说明）。这里在 arm+preview_refresh 之前，用这些工具自己的 args
-                                    # 把 file_write 抢先补发出去，保证前端预览构建到的是这一批的新内容，
-                                    # 而不是改动前的旧文件（否则 check_build 会误报「构建通过」）。
+                                    # 的详细说明）。这里在服务端构建前用这些工具自己的 args
+                                    # 把 file_write 抢先补发出去并登记 overlay，保证前后端都对应
+                                    # 这一批的新内容，而不是改动前的旧文件。
                                     # early_written 记下已抢发过的 tool_call_id，tools 节点分支据此跳过重发。
                                     for other in m.tool_calls:
                                         if other["id"] == tc["id"] or other["id"] in early_written:
@@ -1448,16 +1476,11 @@ async def _consume(
                                             "id": tc["id"],
                                         }
                                     )
-                                    # 浏览器预览和截图仍是在线时的增强能力。这里 arm 只为允许
-                                    # 它回报结果，不再由 check_build 等待，也不影响后台任务推进。
+                                    # 浏览器预览和截图仍是在线时的增强能力。先登记回报归属，
+                                    # 但必须等服务端构建完成后再下发 capability URL；此处不能
+                                    # 让浏览器提前发起第二次构建去争抢单并发 Worker。
                                     build_store.arm(session_id, tc["id"])
                                     armed_check_ids.add(tc["id"])
-                                    yield sse(
-                                        {
-                                            "type": "preview_refresh",
-                                            "id": tc["id"],
-                                        }
-                                    )
                                 else:
                                     yield sse(
                                         {
@@ -1586,6 +1609,14 @@ async def _consume(
                         if screenshot_ref is not None:
                             result_event["screenshot"] = screenshot_ref
                         yield sse(result_event)
+
+                        if name == "check_build":
+                            preview_event = sandbox_preview_event(
+                                tm.tool_call_id,
+                                tm.artifact,
+                            )
+                            if preview_event is not None:
+                                yield sse(preview_event)
 
                         if name == "check_build":
                             print(f"[check_build] {tool_result}")

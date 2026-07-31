@@ -29,6 +29,14 @@ _PASS_CONTENT = (
     "这不代表视觉截图已经合格，附带截图仍需由支持视觉的模型严格审查。"
 )
 _ARTIFACT = {
+    "sandbox_preview": {
+        "ok": True,
+        "build_id": "build-1",
+        "preview_url": "/api/sandbox-preview/capability/",
+        "logs": "构建完成",
+        "errors": "",
+        "device": "desktop",
+    },
     "screenshot": {
         "id": "shot-1",
         "ref": {
@@ -39,6 +47,16 @@ _ARTIFACT = {
             "path": "/",
             "mime": "image/webp",
         },
+    }
+}
+_FAILED_PREVIEW_ARTIFACT = {
+    "sandbox_preview": {
+        "ok": False,
+        "build_id": None,
+        "preview_url": None,
+        "logs": "",
+        "errors": "构建失败",
+        "device": "desktop",
     }
 }
 
@@ -356,6 +374,10 @@ class CheckBuildIdempotencyTests(IsolatedAsyncioTestCase):
             and event["id"].startswith("check-")
         ]
         self.assertEqual([event["id"] for event in refreshes], ["check-1"])
+        self.assertEqual(
+            refreshes[0]["preview_url"],
+            "/api/sandbox-preview/capability/",
+        )
         self.assertEqual([event["id"] for event in check_cards], ["check-1"])
         self.assertEqual([event["id"] for event in check_results], ["check-1"])
         # 第二项由工具共享状态直接标记为重复，不再建立浏览器会合点或占用 Worker。
@@ -419,7 +441,7 @@ class CheckBuildIdempotencyTests(IsolatedAsyncioTestCase):
             _TwoChecksAgent(
                 state,
                 first_content="预览构建失败（编译没通过）：语法错误",
-                first_artifact=None,
+                first_artifact=_FAILED_PREVIEW_ARTIFACT,
                 first_cacheable=True,
             ),
             state,
@@ -440,7 +462,7 @@ class CheckBuildIdempotencyTests(IsolatedAsyncioTestCase):
                     _TwoChecksAgent(
                         state,
                         first_content=first_content,
-                        first_artifact=None,
+                        first_artifact=_FAILED_PREVIEW_ARTIFACT,
                         first_cacheable=False,
                     ),
                     state,
@@ -535,11 +557,15 @@ class CheckBuildIdempotencyTests(IsolatedAsyncioTestCase):
                     "app.agents.tools._submit_sandbox_build",
                     new=AsyncMock(return_value=result),
                 ) as submit:
-                    content, _ = await check_build.coroutine(
+                    content, artifact = await check_build.coroutine(
                         SimpleNamespace(tool_call_id="check-1")
                     )
 
                 submit.assert_awaited_once()
+                self.assertEqual(
+                    artifact and artifact.get("sandbox_preview", {}).get("ok"),
+                    result.ok,
+                )
                 state.finish_check("check-1", "same-files", content)
                 self.assertEqual(
                     state.prepare_check("check-2", "same-files"),
@@ -889,7 +915,7 @@ class ResumeBuildCheckTests(IsolatedAsyncioTestCase):
         self.assertTrue(_claim_resume_thread(thread_id))
         _release_resume_thread(thread_id)
 
-    async def test_disconnect_after_rearm_disarms_pending_check(self):
+    async def test_disconnect_before_server_build_does_not_arm_preview(self):
         graph_state = SimpleNamespace(
             next=("tools",),
             interrupts=(),
@@ -949,18 +975,14 @@ class ResumeBuildCheckTests(IsolatedAsyncioTestCase):
                     "id": "check-1",
                 },
             )
-            first = _event(await anext(stream))
-            self.assertEqual(
-                first,
-                {"type": "preview_refresh", "id": "check-1"},
-            )
-            # 模拟客户端刚收到刷新信号就再次断线；生成器关闭也必须清理会合点。
+            # 服务端构建完成前不再发 preview_refresh；此时断线也不应提前建立浏览器
+            # 回报归属，避免留下永远不会被消费的会合点。
             await stream.aclose()
 
-        arm.assert_called_once_with("session-1", "check-1")
-        disarm.assert_called_once_with("session-1", "check-1")
+        arm.assert_not_called()
+        disarm.assert_not_called()
 
-    async def test_resume_applies_write_before_preview_and_hides_secondary(self):
+    async def test_resume_applies_write_before_server_build_and_hides_secondary(self):
         graph_state = SimpleNamespace(
             next=("tools",),
             interrupts=(),
@@ -1029,28 +1051,18 @@ class ResumeBuildCheckTests(IsolatedAsyncioTestCase):
                 db,  # type: ignore[arg-type]
                 "user-1",
             )
-            events = [_event(await anext(stream)) for _ in range(4)]
+            events = [_event(await anext(stream)) for _ in range(3)]
             await stream.aclose()
 
         self.assertEqual(
             [event["id"] for event in events if event["type"] == "tool_call"],
             ["write-1", "check-1"],
         )
-        event_types = [event["type"] for event in events]
-        self.assertLess(
-            event_types.index("file_write"),
-            event_types.index("preview_refresh"),
-        )
-        self.assertEqual(events[-1]["id"], "check-1")
-        self.assertEqual(
-            [call.args for call in arm.call_args_list],
-            [("session-1", "check-1")],
-        )
+        self.assertEqual(events[-1]["type"], "file_write")
+        self.assertFalse(any(event["type"] == "preview_refresh" for event in events))
+        arm.assert_not_called()
         report.assert_not_called()
-        self.assertEqual(
-            {call.args for call in disarm.call_args_list},
-            {("session-1", "check-1")},
-        )
+        disarm.assert_not_called()
 
     async def test_resume_replays_completed_result_without_new_preview(self):
         graph_state = SimpleNamespace(

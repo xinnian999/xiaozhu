@@ -48,6 +48,12 @@ def is_generation_active(session_id: str) -> bool:
         return session_id in _active
 
 
+def active_generation_ids(session_ids: set[str]) -> set[str]:
+    """批量返回给定会话中仍在运行的任务，供项目菜单展示后台状态。"""
+    with _lock:
+        return session_ids.intersection(_active)
+
+
 def start_generation(
     session_id: str,
     lease: GenerationLease,

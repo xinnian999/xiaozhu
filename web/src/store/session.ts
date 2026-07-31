@@ -41,9 +41,8 @@ export type ChatSession = {
   // 和 isStreaming 是两个独立的锁：迁移到 interrupt() 后这段等待期间没有任何请求挂着，
   // 但发送框依然要保持禁用，直到 resume 流真正推来 done/error。
   awaitingAnswer: boolean
-  // 「最新一轮生成被中断、可从断点续跑」标记。断连（刷新 / 锁屏 / 停止 / 断网）会让
-  // 那一轮 SSE 半途而废，但后端 checkpointer 留着断点。为 true 时对话流末尾显示
-  // 「继续生成」按钮，点它调 resume 从断点接着跑。切会话拉数据时探测、同会话内断连兜底置位。
+  // 「最新一轮生成被中断、可从断点续跑」内部标记。断连（刷新 / 锁屏 / 断网）后，
+  // 前端据此自动重新订阅后台任务或从 checkpoint 续跑，不再展示需要手动点击的按钮。
   resumable: boolean
   // 当前 session 的文件快照：path -> content（已保存/已生成的内容）
   files: Record<string, string>
@@ -53,6 +52,9 @@ export type ChatSession = {
   drafts: Record<string, string>
   // 文件快照版本号，每次 files 变更 +1
   versionId: number
+  // 当前项目是否曾经进入过可预览阶段。它与聊天时间线解耦：重新生成会截掉旧工具卡和
+  // 版本卡，但上一版稳定预览仍应保留，直到新 check_build 成功后无缝替换。
+  previewRevealed: boolean
 }
 
 type SessionState = {
@@ -179,6 +181,7 @@ function fromApi(api: ApiSession): ChatSession {
     files: {},
     drafts: {},
     versionId: 0,
+    previewRevealed: false,
   }
 }
 
@@ -562,6 +565,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     ])
     const messages = apiMessages.map(fromApiMessage)
     const awaitingAnswer = hasPendingAskUser(messages)
+    const hasPreviewHistory = messages.some((message) => (
+      message.kind === 'version'
+      || (message.kind === 'tool' && message.toolName === 'check_build')
+    ))
     set((s) => ({
       sessions: s.sessions.map((sess) =>
         sess.id === id
@@ -571,6 +578,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               messages,
               awaitingAnswer,
               versionId: sess.versionId + 1,
+              previewRevealed: sess.previewRevealed || hasPreviewHistory,
             }
           : sess,
       ),
@@ -744,6 +752,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           }
         }
         if (lastUserIdx === -1) return sess
+        const previewRevealed = sess.previewRevealed || sess.messages.some((message) => (
+          message.kind === 'version'
+          || (message.kind === 'tool' && message.toolName === 'check_build')
+        ))
         const messages = sess.messages.slice(0, lastUserIdx + 1)
         // 重新生成是一轮新的执行，耗时应从点击按钮重新开始计算，而不是沿用用户
         // 最初发送这条需求的时间。消息内容和后端主键不变，只更新当前页面的计时锚点。
@@ -751,7 +763,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           ...messages[lastUserIdx],
           createdAt: Date.now(),
         }
-        return { ...sess, messages }
+        return { ...sess, messages, previewRevealed }
       }),
     }))
   },

@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { AlertTriangle, Braces, LoaderCircle } from 'lucide-react'
-import { buildServerPreview, postBuildResult, uploadPreviewScreenshot } from '@/lib/api'
+import {
+  buildServerPreview,
+  getGenerationState,
+  postBuildResult,
+  uploadPreviewScreenshot,
+} from '@/lib/api'
 import { useSessionStore } from '@/store/session'
-import { useUIStore, type PreviewDevice } from '@/store/ui'
+import { useUIStore, type PreviewDevice, type ServerPreviewBuild } from '@/store/ui'
 import styles from '../PreviewPane/index.module.scss'
 
 const RUNTIME_COLLECT_MS = 1500
@@ -94,6 +99,9 @@ export default function ServerPreviewPane() {
   // key 对应当前会话 epoch。StrictMode 会重放 effect：旧 epoch 的排队任务不能阻止
   // 新 epoch 补发构建，同时旧任务结束时也不能误删新任务的标记。
   const queuedBuildEpochRef = useRef(new Map<string, number>())
+  // 页面刷新后的首屏构建先探测后台任务。探测本身也要去重，避免多个 effect 同时查询后
+  // 都提交构建，与后台 check_build 争抢单并发 Worker。
+  const initialBuildProbeEpochRef = useRef(new Map<string, number>())
   const pendingCheckRef = useRef<PendingCheck | null>(null)
   const collectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const readyFallbackRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -373,6 +381,7 @@ export default function ServerPreviewPane() {
     files: Record<string, string>,
     checkId: string | null,
     epoch: number,
+    serverBuild: ServerPreviewBuild | null,
   ) => {
     if (activeEpochRef.current !== epoch) return
     clearIframeReadyTimer()
@@ -383,9 +392,17 @@ export default function ServerPreviewPane() {
     }
     setPreviewStatus('building')
     setPreviewError(null)
-    setPreviewLog('正在提交后端沙箱构建…')
+    setPreviewLog(serverBuild ? '正在加载服务端构建结果…' : '正在提交后端沙箱构建…')
     try {
-      const result = await buildServerPreview(sessionId, files, device)
+      const result = serverBuild
+        ? {
+            ok: serverBuild.ok,
+            build_id: null,
+            preview_url: serverBuild.previewUrl,
+            logs: serverBuild.logs,
+            errors: serverBuild.errors,
+          }
+        : await buildServerPreview(sessionId, files, device)
       if (activeEpochRef.current !== epoch) return
       if (result.logs) setPreviewLog(result.logs.split('\n').filter(Boolean).at(-1) ?? '')
       if (!result.ok || !result.preview_url) {
@@ -393,7 +410,7 @@ export default function ServerPreviewPane() {
         setPreviewError(message)
         setPreviewStatus(previewUrl ? 'ready' : 'error')
         pushPreviewLog({ level: 'error', text: message })
-        if (checkId) {
+        if (checkId && !serverBuild) {
           await postBuildResult(sessionId, {
             check_id: checkId,
             ok: false,
@@ -406,7 +423,7 @@ export default function ServerPreviewPane() {
       }
 
       builtVersionRef.current = versionId
-      if (checkId) {
+      if (checkId && !serverBuild) {
         pendingCheckRef.current = {
           checkId,
           sessionId,
@@ -462,13 +479,21 @@ export default function ServerPreviewPane() {
     versionId: string,
     files: Record<string, string>,
     checkId: string | null,
+    serverBuild: ServerPreviewBuild | null = null,
   ) => {
     const epoch = activeEpochRef.current
     const queueKey = buildQueueKey(sessionId, versionId)
     queuedBuildEpochRef.current.set(queueKey, epoch)
     buildQueueRef.current = buildQueueRef.current
       .catch(() => {})
-      .then(() => executeBuild(sessionId, versionId, files, checkId, epoch))
+      .then(() => executeBuild(
+        sessionId,
+        versionId,
+        files,
+        checkId,
+        epoch,
+        serverBuild,
+      ))
       .finally(() => {
         if (queuedBuildEpochRef.current.get(queueKey) === epoch) {
           queuedBuildEpochRef.current.delete(queueKey)
@@ -509,9 +534,16 @@ export default function ServerPreviewPane() {
       applyRequest.seq !== handledApplySeqRef.current
       && applyRequest.sessionId === activeId
       && Boolean(applyRequest.checkId)
+      && applyRequest.serverBuild !== null
     ) {
       handledApplySeqRef.current = applyRequest.seq
-      enqueueBuild(activeId, currentVersion.id, currentVersion.files, applyRequest.checkId)
+      enqueueBuild(
+        activeId,
+        currentVersion.id,
+        currentVersion.files,
+        applyRequest.checkId,
+        applyRequest.serverBuild,
+      )
       return
     }
     // 生成途中只在 check_build 时揭晓；初始加载、回滚和手动保存则直接构建。
@@ -523,12 +555,33 @@ export default function ServerPreviewPane() {
         !== activeEpochRef.current
       )
     ) {
-      enqueueBuild(activeId, currentVersion.id, currentVersion.files, null)
+      const sessionId = activeId
+      const versionId = currentVersion.id
+      const files = currentVersion.files
+      const epoch = activeEpochRef.current
+      const queueKey = buildQueueKey(sessionId, versionId)
+      if (initialBuildProbeEpochRef.current.get(queueKey) === epoch) return
+      initialBuildProbeEpochRef.current.set(queueKey, epoch)
+      void getGenerationState(sessionId).then((active) => {
+        if (initialBuildProbeEpochRef.current.get(queueKey) === epoch) {
+          initialBuildProbeEpochRef.current.delete(queueKey)
+        }
+        if (
+          active
+          || activeEpochRef.current !== epoch
+          || builtVersionRef.current === versionId
+          || queuedBuildEpochRef.current.get(queueKey) === epoch
+        ) {
+          return
+        }
+        enqueueBuild(sessionId, versionId, files, null)
+      })
     }
   }, [
     activeId,
     applyRequest.checkId,
     applyRequest.seq,
+    applyRequest.serverBuild,
     applyRequest.sessionId,
     currentVersion.files,
     currentVersion.id,

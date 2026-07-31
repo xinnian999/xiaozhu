@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from app.generation_control import GenerationLease
 from app.generation_runtime import (
+    active_generation_ids,
     is_generation_active,
     start_generation,
     subscribe_generation,
@@ -42,6 +43,10 @@ class GenerationRuntimeTests(IsolatedAsyncioTestCase):
             await first_subscription.aclose()
 
             self.assertTrue(is_generation_active(session_id))
+            self.assertEqual(
+                active_generation_ids({session_id, "other-session"}),
+                {session_id},
+            )
             second_subscription = subscribe_generation(session_id)
             assert second_subscription is not None
             gate.set()
@@ -54,3 +59,4 @@ class GenerationRuntimeTests(IsolatedAsyncioTestCase):
                 break
             await asyncio.sleep(0)
         self.assertFalse(is_generation_active(session_id))
+        self.assertEqual(active_generation_ids({session_id}), set())

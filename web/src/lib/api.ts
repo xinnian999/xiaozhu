@@ -101,8 +101,16 @@ export type SSEEvent =
   | { type: 'reasoning_discard'; id: string }
   | { type: 'file_write'; path: string; content: string }
   | { type: 'file_delete'; path: string }
-  // AI 调 check_build 时推这个：id 是 tool_call_id，用它把构建、截图和工具卡串成同一次检查
-  | { type: 'preview_refresh'; id: string }
+  // check_build 已由服务端完成构建，前端只加载结果 URL，不再重复提交构建。
+  | {
+      type: 'preview_refresh'
+      id: string
+      ok: boolean
+      preview_url: string | null
+      logs: string
+      errors: string
+      device: 'desktop' | 'mobile'
+    }
   // AI 根据需求切换预览 iframe 的真实 viewport；页面代码仍必须同时响应式兼容两端
   | { type: 'preview_device'; device: 'desktop' | 'mobile'; id: string }
   | { type: 'plan_update'; todos: unknown[] }
@@ -467,6 +475,14 @@ export async function getGenerationState(sessionId: string): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+/** 批量查询当前用户仍在后台运行的项目，供项目菜单展示生成状态。 */
+export async function getActiveGenerationIds(): Promise<string[]> {
+  const { data } = await http.get<{ active_session_ids: string[] }>(
+    '/api/sessions/generation-states',
+  )
+  return Array.isArray(data.active_session_ids) ? data.active_session_ids : []
 }
 
 /** 重新订阅仍在服务端运行的任务，不会创建或续跑第二份 Agent。 */

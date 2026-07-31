@@ -35,7 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.sandbox import SandboxBuildRequest, _submit_sandbox_build
+from app.api.sandbox import SandboxBuildRead, SandboxBuildRequest, _submit_sandbox_build
 from app.models.file import File
 
 
@@ -130,13 +130,35 @@ def normalize_ask_user_questions(value: object) -> object:
     return questions
 
 
+def sandbox_preview_artifact(
+    result: SandboxBuildRead,
+    device: Literal["desktop", "mobile"],
+) -> dict:
+    """把服务端构建结果附在 ToolMessage 上，供 SSE 消费端直接刷新预览。
+
+    这里不能让浏览器再提交一次相同构建：Worker 是单并发的，页面刷新后重新订阅时，
+    重复请求会与后台 check_build 撞车并收到 429。artifact 不进入模型文本，只在服务端
+    图事件与前端预览协议之间传递。
+    """
+    return {
+        "sandbox_preview": {
+            "ok": result.ok,
+            "build_id": result.build_id,
+            "preview_url": result.preview_url,
+            "logs": result.logs,
+            "errors": result.errors,
+            "device": device,
+        }
+    }
+
+
 @dataclass
 class BuildCheckReuseState:
     """同一轮 Agent 内的构建幂等状态。
 
-    ``check_build`` 真正执行前，loop 已经要决定是否向浏览器发可选的
-    ``preview_refresh``，也要拦住 provider 偶发返回的同批重复检查；因此判定状态必须
-    由 loop 与工具闭包共享，不能只在工具内部做结果缓存。
+    ``check_build`` 真正执行前，loop 已经要决定是否展示工具卡、登记可选预览回报，
+    也要拦住 provider 偶发返回的同批重复检查；因此判定状态必须由 loop 与工具闭包
+    共享，不能只在工具内部做结果缓存。
     """
 
     _decisions: dict[str, str] = field(default_factory=dict)
@@ -428,7 +450,10 @@ def build_tools(
             build_reuse_state.note_fresh_result(check_id, cacheable=False)
             return (
                 f"服务端沙箱构建失败：{exc.detail}",
-                None,
+                sandbox_preview_artifact(
+                    SandboxBuildRead(ok=False, errors=str(exc.detail)),
+                    preview_device,
+                ),
             )
 
         device_label = "H5" if preview_device == "mobile" else "桌面"
@@ -438,7 +463,7 @@ def build_tools(
             return (
                 f"{device_note}服务端编译检查通过。浏览器预览、运行时采集和截图是"
                 "非阻塞增强；即使用户切后台、刷新或关闭页面，本次任务也可继续完成。",
-                None,
+                sandbox_preview_artifact(result, preview_device),
             )
         build_reuse_state.note_fresh_result(
             check_id,
@@ -447,7 +472,7 @@ def build_tools(
         errors = result.errors.strip() or "（无详细错误信息）"
         return (
             f"{device_note}预览构建失败（编译没通过），请定位并修复：\n{errors}",
-            None,
+            sandbox_preview_artifact(result, preview_device),
         )
 
     @tool

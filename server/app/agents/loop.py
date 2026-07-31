@@ -1042,6 +1042,10 @@ async def _consume(
     reasoning_seq = 0
     active_reasoning_id: str | None = None
     active_reasoning_text = ""
+    # 模型常在同一条 AIMessage 里先说一句“我来处理”，随后开始生成工具参数。
+    # write_file 的 content 可能很长，不能等整条消息结束才把这句开场展示出来。
+    active_visible_text = ""
+    emitted_tool_intro = ""
     wrote_files = initial_wrote_files
     truncated = False
     build_reuse_state = build_reuse_state or BuildCheckReuseState()
@@ -1095,6 +1099,29 @@ async def _consume(
         active_reasoning_text += delta
         return delta
 
+    def visible_text_delta(raw: str) -> str:
+        """缓存模型可见正文，兼容真正增量与累计文本两种流形态。
+
+        此时尚不知道无工具候选会不会被 NoBluffMiddleware 打回，因此不能立即展示；
+        等首个工具调用 chunk 出现后，工具调用本身即可证明这条消息不是嘴炮。
+        """
+        nonlocal active_visible_text
+        if not raw:
+            return ""
+        if raw.startswith(active_visible_text):
+            delta = raw[len(active_visible_text) :]
+        elif active_visible_text.endswith(raw):
+            delta = ""
+        else:
+            delta = raw
+        active_visible_text += delta
+        return delta
+
+    def reset_active_visible_text() -> None:
+        nonlocal active_visible_text, emitted_tool_intro
+        active_visible_text = ""
+        emitted_tool_intro = ""
+
     try:
         # 同时开 updates(节点边界,做副作用)+ messages(token 流)。
         #
@@ -1106,11 +1133,9 @@ async def _consume(
         # 工具,用户看到的就是"AI 先吹了一遍牛、又开始干活"（工具卡出现在嘴炮文字
         # 之后）——即便后端从没把这段嘴炮文字存过库,呈现层已经把假象喂给用户了。
         #
-        # 现在改成:文字只在下面 updates 模式里、确认这条消息"不会再被打回"的两个
-        # 时机才整段一次性下发 ——①这条消息带了 tool_calls（tool_calls 存在本身就是
-        # NoBluffMiddleware 判定"不算嘴炮"的充分条件，见 middleware.aafter_model 的
-        # 第一行判断，可以立刻放行）；②真正跑到收尾阶段（本轮不会再回 model 节点了）。
-        # 普通回答正文继续等待节点确认后再发；推理字段则用 reasoning_delta 实时下发。
+        # 现在改成：正文 token 先缓存，首个工具调用 chunk 出现时即可确认这条消息不会
+        # 被打回，于是先释放工具前开场，再亮工具卡；没有工具的普通回答仍等 updates
+        # 确认或图自然收尾后才整段下发。推理字段则用 reasoning_delta 实时下发。
         # 若 NoBluffMiddleware 把这次候选打回，下一次 model 流开始时会发
         # reasoning_discard 删除旧临时卡，避免把被否决候选的思路留在时间线上。
         async for mode, chunk in agent.astream(
@@ -1142,6 +1167,10 @@ async def _consume(
                                 }
                             )
 
+                    # 先缓存可见正文；只有下面真正收到工具调用 chunk 后才允许展示，
+                    # 从而同时满足“开工前先回应”和“不展示被打回的嘴炮”。
+                    visible_text_delta(extract_text(msg))
+
                     for tcc in getattr(msg, "tool_call_chunks", None) or []:
                         idx = tcc.get("index") or 0
                         cid = tcc.get("id")
@@ -1157,6 +1186,21 @@ async def _consume(
                             continue
                         name = tool_chunk_name.get(cid, "")
                         if name and cid not in announced_tools:
+                            if active_visible_text and not emitted_tool_intro:
+                                emitted_tool_intro = active_visible_text
+                                yield sse(
+                                    {
+                                        "type": "message_delta",
+                                        "text": emitted_tool_intro,
+                                    }
+                                )
+                                await _save_message(
+                                    db,
+                                    db_lock,
+                                    session_id,
+                                    "assistant",
+                                    emitted_tool_intro,
+                                )
                             # check_build 要等完整 model update 才能知道是否命中同轮幂等缓存；
                             # 先不亮卡，避免随后判定为复用时留下一张空的重复自检卡。
                             if name == "check_build":
@@ -1212,6 +1256,7 @@ async def _consume(
                                 )
                                 reset_active_reasoning()
                             final_reasoning_payload = None
+                            reset_active_visible_text()
                             truncated = True
                             break
 
@@ -1250,8 +1295,17 @@ async def _consume(
                                 print(f"[response] content={text} (同轮调用了工具)")
                                 # 带 tool_calls 的消息不可能被 NoBluffMiddleware 判定为嘴炮
                                 # （见 middleware.aafter_model 第一行判断),此刻就能放心下发。
-                                yield sse({"type": "message_delta", "text": text})
-                                await _save_message(db, db_lock, session_id, "assistant", text)
+                                # 流式阶段若已经在首个工具 chunk 前释放过开场文字，这里
+                                # 不得重复展示或落库；未提供流式正文的厂商仍走原有整段下发。
+                                if not emitted_tool_intro:
+                                    yield sse({"type": "message_delta", "text": text})
+                                    await _save_message(
+                                        db,
+                                        db_lock,
+                                        session_id,
+                                        "assistant",
+                                        text,
+                                    )
                             # 极少数 provider 会无视 parallel_tool_calls=False。若同一批给出
                             # 多个 check_build 共用单并发 Worker，不能并发构建；
                             # 只执行第一项，后续项仍 arm 后立即回一条可读错误，避免它们各等
@@ -1392,6 +1446,7 @@ async def _consume(
                             final_reasoning_payload = reasoning_payload
                             reset_active_reasoning()
                             print(f"[最终回复候选] content={text}")
+                        reset_active_visible_text()
                     if truncated:
                         break
 

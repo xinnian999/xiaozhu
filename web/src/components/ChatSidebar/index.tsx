@@ -26,6 +26,7 @@ import {
   streamChat,
   streamAskResult,
   streamResume,
+  GenerationAlreadyActiveError,
   type SSEEvent,
 } from '@/lib/api'
 import { registerSessionStream } from '@/lib/sessionStream'
@@ -141,6 +142,9 @@ export default function ChatSidebar({ conversationOnly = false }: {
   // 本轮流式的中断控制器：点"停止"时 abort()，streamChat 内部据此静默收尾
   const abortRef = useRef<AbortController | null>(null)
   const autoResumeInFlightRef = useRef(false)
+  // 自动恢复流本身也可能在移动端锁屏、网络切换时再次断开。ref 解锁不会触发渲染，
+  // 因此用这个递增值显式唤醒协调 effect，继续接回仍在服务端运行的任务。
+  const [autoResumeRevision, setAutoResumeRevision] = useState(0)
   const handleResumeRef = useRef<() => Promise<void>>(async () => {})
   const [pageVisible, setPageVisible] = useState(
     () => typeof document === 'undefined' || document.visibilityState !== 'hidden',
@@ -472,6 +476,24 @@ export default function ChatSidebar({ conversationOnly = false }: {
       // 流没正常收场（既非 done/error，也非 ask_user 暂停）= 连接中途断了。
       // 同会话内直接标记可续跑，由自动恢复 effect 接着处理，无需用户操作。
       if (!settled) setResumable(targetSessionId, true)
+    } catch (error) {
+      if (!(error instanceof GenerationAlreadyActiveError)) throw error
+
+      // 页面恢复协调尚未完成时，用户可能抢先点了发送。后端 409 说明新消息并未入库：
+      // 先用数据库真相覆盖本地乐观消息，再标记为可恢复，随后接回原来的后台任务。
+      setResumable(targetSessionId, true)
+      setAutoResumeIntent(targetSessionId, true)
+      // 普通发送的内容还没有被服务端接受，放回输入框，避免用户输入随本地乐观消息一起丢失。
+      // overrideText 来自 ask_user 的降级路径，不属于输入框草稿，不在这里回填。
+      if (!useOverride) {
+        setDraft(text)
+        setAttachments(images)
+      }
+      try {
+        await refreshSessionContent(targetSessionId)
+      } catch (refreshError) {
+        console.error('恢复已有后台任务前同步会话失败', refreshError)
+      }
     } finally {
       // 正常收场、用户停止、切项目都不应被后台自动拉起；只有无 abort reason 的意外断流
       // 保留 intent，交给下面的可见性恢复 effect 自动从 checkpoint 续跑。
@@ -532,6 +554,17 @@ export default function ChatSidebar({ conversationOnly = false }: {
         thinkingForRequest !== false,
       )
       if (!settled) setResumable(session.id, true)
+    } catch (error) {
+      if (!(error instanceof GenerationAlreadyActiveError)) throw error
+
+      // 防住恢复窗口里误点“重新生成”：旧任务仍在运行，不能把 409 当成新一轮失败。
+      setResumable(session.id, true)
+      setAutoResumeIntent(session.id, true)
+      try {
+        await refreshSessionContent(session.id)
+      } catch (refreshError) {
+        console.error('恢复已有后台任务前同步会话失败', refreshError)
+      }
     } finally {
       if (settled || controller.signal.aborted) {
         setAutoResumeIntent(session.id, false)
@@ -629,6 +662,9 @@ export default function ChatSidebar({ conversationOnly = false }: {
         }
       } finally {
         autoResumeInFlightRef.current = false
+        // handleResume 结束时 resumable 可能刚被重新置为 true，但那次渲染发生在
+        // inFlight=true 期间，effect 已经跳过。解锁后主动触发一次重新协调。
+        setAutoResumeRevision((revision) => revision + 1)
       }
     }, 800)
 
@@ -636,7 +672,14 @@ export default function ChatSidebar({ conversationOnly = false }: {
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [activeId, awaitingAnswer, isStreaming, pageVisible, session?.resumable])
+  }, [
+    activeId,
+    autoResumeRevision,
+    awaitingAnswer,
+    isStreaming,
+    pageVisible,
+    session?.resumable,
+  ])
 
   // ask_user 交互卡片答完（单个问题，或多问题 Tab 全部答完）后的回调：answer 是
   // AskUserChip 内部已经汇总格式化好的一份文本，这里不关心它背后是单选/多选/自定义输入、

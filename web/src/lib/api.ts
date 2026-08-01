@@ -30,6 +30,19 @@ export class ApiRequestError extends Error {
   }
 }
 
+/**
+ * 当前项目已有后台生成任务。
+ *
+ * 这是“当前页面丢了订阅、但服务端仍在继续”的可恢复状态，不应被渲染成普通错误卡。
+ * 调用方收到后会撤销本地乐观消息，并重新接回已有任务。
+ */
+export class GenerationAlreadyActiveError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'GenerationAlreadyActiveError'
+  }
+}
+
 /** 带上 Authorization 头（给原生 fetch 用：streamChat / postBuildResult 不走 axios）。 */
 function authHeaders(): Record<string, string> {
   const token = getToken()
@@ -757,6 +770,11 @@ export async function* streamChat(
       if (data?.detail) detail = data.detail
     } catch {
       // 不是 JSON（如网关错误页）就用状态码兜底
+    }
+    // 后端任务仍在运行时，不把 409 转成 error + done。页面可能刚从锁屏、刷新或
+    // 断网中恢复，此时正确动作是重新订阅原任务，而不是留下“已有任务”的假错误卡。
+    if (res.status === 409 && detail === '这个项目已有生成任务正在运行') {
+      throw new GenerationAlreadyActiveError(detail)
     }
     // 402 = 今日额度用完，是「业务结果」不是「发送失败」，文案不带“发送失败”前缀，
     // 直接把后端的「今日额度已用完，明天恢复或升级套餐」原样提示。

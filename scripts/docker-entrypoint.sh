@@ -34,7 +34,8 @@ sandbox_run_uid=10001
 sandbox_run_gid=10001
 storage_repair_flag=""
 
-# 容器 root 只保留 CHOWN/SETUID/SETGID 三项启动能力，不具备 DAC 权限。目录缺少权限时，
+# 容器 root 只保留 CHOWN/SETUID/SETGID/KILL 四项能力，不具备 DAC 权限；KILL 仅用于
+# 监管已经降到 UID 10001 的 Worker 子进程。目录缺少权限时，
 # SQLite 可能仍能读取旧数据，却会在创建会话时才暴露 readonly database。
 # 在启动前直接失败，避免出现“健康检查正常、业务写请求 500”的半失效状态。
 if [ ! -w /app/data ] || [ ! -x /app/data ]; then

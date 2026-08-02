@@ -61,6 +61,9 @@ Worker 不生成浏览器 URL，也不提供静态预览接口，因此不需要
 在这里共享产物；数据库卷根目录继续保持 `0700 root`，UID 10001 无需也不能穿越它。
 主服务只通过 `127.0.0.1:8010` 发起构建。
 Compose 不发布 8010，公网入口只连接主应用的 8000。
+容器先 `cap_drop: ALL`，再只保留 `CHOWN/SETGID/SETUID/KILL`：前三项用于交接
+沙箱目录并降权，`KILL` 只让 root 入口监管不同 UID 的 Worker 子进程；生产不得启用
+host PID namespace。
 
 从旧版 root Worker 过渡时，可在新镜像首次稳定运行前临时设置
 `SANDBOX_FORCE_STORAGE_REPAIR=1`。它会忽略权限 marker，完整复核旧 Worker

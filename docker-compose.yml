@@ -62,11 +62,13 @@ services:
       - /tmp:size=192m,mode=1777
     cap_drop:
       - ALL
-    # 入口仅用这三项完成沙箱目录授权和 Worker 降权；Chromium 启动前已切到 UID 10001。
+    # 入口用前三项完成沙箱目录授权和 Worker 降权；Worker 切到 UID 10001 后，
+    # root 监管进程还需要 KILL 才能探测并在退出时终止这个不同 UID 的子进程。
     cap_add:
       - CHOWN
       - SETGID
       - SETUID
+      - KILL
     security_opt:
       - no-new-privileges:true
     healthcheck:

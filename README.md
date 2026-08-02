@@ -8,18 +8,18 @@
 ```text
 浏览器（React + Monaco）
   ├─ SSE 对话 / 文件编辑
-  ├─ POST 当前文件快照到主 API
   └─ iframe 加载 preview origin 下的 /api/sandbox-preview/{capability}/...
                          │ 主 API 直接读取共享静态产物
 FastAPI 主服务（鉴权、Agent、SQLite、预览 capability、静态预览）
-                         │ 容器 loopback + Bearer Token（只发构建请求）
-sandbox-worker（固定依赖、单并发 Vite build）
+                         │ 容器 loopback + Bearer Token（构建 + 截图请求）
+sandbox-worker（固定依赖、单并发 Vite build → Playwright）
                          │ 写入共享预览目录
 ```
 
 浏览器不运行 Node，不下载运行时或依赖快照。主服务也不持有 Docker Socket；
 它把已鉴权的文件快照转发给 Worker。Worker 按源码内容缓存构建，相同版本直接复用
-已有产物；新版本构建一次并把静态产物写入共享目录，
+已有产物；新版本构建一次并把静态产物写入共享目录。构建进程退出后，Worker 才启动
+Playwright 对固定 PC/H5 画布做真实截图，完成后立即关闭 Chromium；
 主服务通过带不可猜 capability 的路径直接返回产物。生产环境中 API 与 Worker 是
 同一容器内的两个进程，Worker 只监听 `127.0.0.1:8010`；浏览器和容器外部都不能
 直接连接 Worker。
@@ -107,7 +107,8 @@ pnpm run build:admin
 pnpm run build:worker
 uv run --directory server ruff check app tests
 uv run --directory server python -m unittest discover -s tests
-SANDBOX_WORKER_TOKEN=config-check-placeholder docker compose config --no-env-resolution
+XIAOZHU_IMAGE_TAG=config-check SANDBOX_WORKER_TOKEN=config-check-placeholder \
+  docker compose config --no-env-resolution
 ```
 
 ## 部署
@@ -133,8 +134,8 @@ SANDBOX_FRAME_ANCESTORS=https://xiaozhu.elin521.cn
 当前实现不会把客户端可伪造的 `X-Forwarded-Host` 当成隔离依据。
 `SANDBOX_CAPABILITY_SECRET` 不得注入 Worker。
 
-独立预览 Origin 是隔离边界。浏览器截图仍应由 iframe 内的受控 bridge 生成后通过
-`postMessage` 回传，或由服务端浏览器完成；父页面不直接读取预览 DOM。
+独立预览 Origin 是交互 iframe 的隔离边界；模型自检截图由同容器 Worker 内的
+Playwright 在 Vite 构建结束后单并发生成，不依赖用户标签页。父页面不直接读取预览 DOM。
 
 ## 目录
 
@@ -143,6 +144,6 @@ web/                    主前端
 web-admin/              管理后台
 server/app/             FastAPI、Agent、数据模型
 server/templates/       Worker 使用的可信项目模板
-sandbox-worker/         容器内独立构建 Worker 进程
+sandbox-worker/         容器内独立构建 + Playwright 截图 Worker 进程
 server/alembic/         数据库迁移
 ```

@@ -4,7 +4,6 @@ import {
   buildServerPreview,
   getGenerationState,
   postBuildResult,
-  uploadPreviewScreenshot,
 } from '@/lib/api'
 import { useSessionStore } from '@/store/session'
 import { useUIStore, type PreviewDevice, type ServerPreviewBuild } from '@/store/ui'
@@ -20,10 +19,6 @@ const IFRAME_READY_RETRY_MAX_MS = 10000
 const IFRAME_READY_REBUILD_AFTER = 2
 const IFRAME_READY_DEV_PAGE_RELOAD_AFTER = 3
 const DEV_PAGE_RELOAD_COOLDOWN_MS = 30_000
-const CAPTURE_TIMEOUT_MS = 10000
-const MAX_SCREENSHOT_BYTES = 2 * 1024 * 1024
-const MAX_SCREENSHOT_SIDE = 1280
-const SCREENSHOT_MIMES = new Set(['image/webp', 'image/png', 'image/jpeg'])
 const MOBILE_CANVAS_WIDTH = 390
 const MOBILE_CANVAS_HEIGHT = 844
 const buildQueueKey = (sessionId: string, versionId: string) => `${sessionId}\u0000${versionId}`
@@ -39,30 +34,7 @@ type PendingCheck = {
   done: boolean
 }
 
-type CaptureDocument = {
-  id: string
-  width: number
-  height: number
-}
-
-type CapturedScreenshot = {
-  blob: Blob
-  width: number
-  height: number
-  path: string
-  mime: string
-  device: PreviewDevice
-}
-
-type PendingCapture = {
-  documentId: string
-  device: PreviewDevice
-  resolve: (screenshot: CapturedScreenshot) => void
-  reject: (error: Error) => void
-  timer: ReturnType<typeof setTimeout>
-}
-
-/** 后端沙箱预览面板。Worker 构建；可信 iframe bridge 回传运行时错误与受限截图。 */
+/** 后端沙箱预览面板。Worker 构建并截图；iframe bridge 只负责交互预览与运行时诊断。 */
 export default function ServerPreviewPane() {
   const currentVersion = useSessionStore((s) => s.currentVersion())
   const activeId = useSessionStore((s) => s.activeId)
@@ -108,9 +80,8 @@ export default function ServerPreviewPane() {
   const iframeReadyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const iframeReadyAttemptsRef = useRef(0)
   const iframeRecoveryBuildAttemptedRef = useRef(false)
-  const pendingCaptureRef = useRef(new Map<string, PendingCapture>())
-  const captureDocumentRef = useRef<CaptureDocument | null>(null)
-  const lastCaptureViewportRef = useRef<{ width: number; height: number } | null>(null)
+  // 用文档 ID 隔离 iframe 重载前后的诊断消息，避免旧页面的错误污染新一轮验收。
+  const activeDocumentIdRef = useRef<string | null>(null)
 
   useLayoutEffect(() => {
     const root = rootRef.current
@@ -153,132 +124,6 @@ export default function ServerPreviewPane() {
     iframeReadyTimerRef.current = null
   }, [])
 
-  const cancelPendingCaptures = useCallback((reason: string) => {
-    for (const pending of pendingCaptureRef.current.values()) {
-      clearTimeout(pending.timer)
-      pending.reject(new Error(reason))
-    }
-    pendingCaptureRef.current.clear()
-  }, [])
-
-  /** 预览可能因为代码 tab 或移动端聊天视图而隐藏；截图时短暂移到屏幕外布局。 */
-  const prepareCaptureLayout = useCallback(() => {
-    const iframe = iframeRef.current
-    if (!iframe || (iframe.clientWidth > 1 && iframe.clientHeight > 1)) return () => {}
-
-    const saved = new Map<HTMLElement, string>()
-    const remember = (element: HTMLElement | null) => {
-      if (element && !saved.has(element)) saved.set(element, element.style.cssText)
-    }
-    const previewRoot = iframe.closest(`.${styles.preview}`) as HTMLElement | null
-    const pane = previewRoot?.parentElement ?? null
-    const work = pane?.closest('section') as HTMLElement | null
-    const previousViewport = lastCaptureViewportRef.current
-    const targetWidth = Math.max(
-      320,
-      previousViewport?.width || work?.clientWidth || window.innerWidth,
-    )
-    const targetHeight = Math.max(
-      480,
-      previousViewport?.height || work?.clientHeight || window.innerHeight,
-    )
-
-    if (work && getComputedStyle(work).display === 'none') {
-      remember(work)
-      work.style.setProperty('display', 'flex', 'important')
-      work.style.setProperty('position', 'fixed', 'important')
-      work.style.setProperty('left', '-200vw', 'important')
-      work.style.setProperty('top', '0', 'important')
-      work.style.setProperty('width', `${targetWidth}px`, 'important')
-      work.style.setProperty('height', `${targetHeight}px`, 'important')
-      work.style.setProperty('pointer-events', 'none', 'important')
-    }
-    if (pane && getComputedStyle(pane).display === 'none') {
-      remember(pane)
-      pane.style.setProperty('display', 'block', 'important')
-      pane.style.setProperty('position', 'fixed', 'important')
-      pane.style.setProperty('left', '-200vw', 'important')
-      pane.style.setProperty('top', '0', 'important')
-      pane.style.setProperty('width', `${targetWidth}px`, 'important')
-      pane.style.setProperty('height', `${targetHeight}px`, 'important')
-      pane.style.setProperty('pointer-events', 'none', 'important')
-    }
-
-    return () => {
-      for (const [element, cssText] of saved) element.style.cssText = cssText
-    }
-  }, [])
-
-  const captureIframeScreenshot = useCallback(async (
-    expectedDocumentId: string,
-    device: PreviewDevice,
-  ): Promise<CapturedScreenshot> => {
-    const iframe = iframeRef.current
-    const win = iframe?.contentWindow
-    if (!iframe || !win) throw new Error('预览 iframe 尚未就绪')
-    if (captureDocumentRef.current?.id !== expectedDocumentId) {
-      throw new Error('预览文档已经变化，取消过期截图')
-    }
-
-    const restoreLayout = prepareCaptureLayout()
-    try {
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
-      if (
-        iframeRef.current !== iframe
-        || iframe.clientWidth <= 1
-        || iframe.clientHeight <= 1
-      ) {
-        throw new Error('预览面板当前没有可截图尺寸')
-      }
-      if (captureDocumentRef.current?.id !== expectedDocumentId) {
-        throw new Error('预览文档尚未稳定')
-      }
-      lastCaptureViewportRef.current = {
-        width: iframe.clientWidth,
-        height: iframe.clientHeight,
-      }
-
-      const requestId = `capture-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
-      let targetOrigin: string
-      try {
-        const frameOrigin = new URL(iframe.src, window.location.href).origin
-        // 同源回退 iframe 没有 allow-same-origin，实际是 opaque origin，只能以 * 投递。
-        targetOrigin = frameOrigin === window.location.origin ? '*' : frameOrigin
-      } catch {
-        throw new Error('预览地址无效')
-      }
-
-      return await new Promise<CapturedScreenshot>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          pendingCaptureRef.current.delete(requestId)
-          reject(new Error('预览截图超时'))
-        }, CAPTURE_TIMEOUT_MS)
-        pendingCaptureRef.current.set(requestId, {
-          documentId: expectedDocumentId,
-          device,
-          resolve,
-          reject,
-          timer,
-        })
-        try {
-          win.postMessage({
-            type: 'xiaozhu-capture-request',
-            id: requestId,
-            documentId: expectedDocumentId,
-            background: getComputedStyle(iframe).backgroundColor || '#ffffff',
-          }, targetOrigin)
-        } catch (error) {
-          clearTimeout(timer)
-          pendingCaptureRef.current.delete(requestId)
-          reject(error instanceof Error ? error : new Error(String(error)))
-        }
-      })
-    } finally {
-      restoreLayout()
-    }
-  }, [prepareCaptureLayout])
-
   const finishPendingCheck = useCallback((
     terminalError?: string,
     terminalInfrastructure = false,
@@ -306,57 +151,13 @@ export default function ServerPreviewPane() {
       infrastructure,
     }
 
-    void (async () => {
-      let screenshotId: string | undefined
-      if (!terminalError && pending.documentId) {
-        try {
-          const captured = await captureIframeScreenshot(pending.documentId, pending.device)
-          useSessionStore.getState().setToolScreenshot(
-            pending.checkId,
-            {
-              id: `local-${pending.checkId}`,
-              url: URL.createObjectURL(captured.blob),
-              width: captured.width,
-              height: captured.height,
-              path: captured.path,
-              mime: captured.mime,
-              device: captured.device,
-              local: true,
-            },
-            pending.sessionId,
-          )
-          const uploaded = await uploadPreviewScreenshot(
-            pending.sessionId,
-            pending.checkId,
-            captured.blob,
-            {
-              width: captured.width,
-              height: captured.height,
-              path: captured.path,
-              device: captured.device,
-            },
-          )
-          if (uploaded) {
-            useSessionStore.getState().setToolScreenshot(
-              pending.checkId,
-              uploaded,
-              pending.sessionId,
-            )
-          }
-          screenshotId = uploaded?.id
-        } catch (error) {
-          console.warn('预览截图失败', error)
-        }
-      }
-
-      await postBuildResult(pending.sessionId, {
-        check_id: pending.checkId,
-        ...result,
-        device: pending.device,
-        ...(screenshotId ? { screenshot_id: screenshotId } : {}),
-      })
-    })()
-  }, [captureIframeScreenshot, clearCheckTimers])
+    // 服务端已经完成真实浏览器截图；前端只补充当前交互 iframe 的运行时诊断。
+    void postBuildResult(pending.sessionId, {
+      check_id: pending.checkId,
+      ...result,
+      device: pending.device,
+    })
+  }, [clearCheckTimers])
 
   const armPendingCheckTimeout = useCallback((message: string, timeoutMs: number) => {
     if (readyFallbackRef.current) clearTimeout(readyFallbackRef.current)
@@ -387,7 +188,6 @@ export default function ServerPreviewPane() {
     clearIframeReadyTimer()
     const device = useUIStore.getState().previewDevice
     if (checkId) {
-      cancelPendingCaptures('预览检查已被新的构建取代')
       finishPendingCheck('上一轮预览检查已被新的构建取代', true)
     }
     setPreviewStatus('building')
@@ -429,7 +229,7 @@ export default function ServerPreviewPane() {
           sessionId,
           device,
           runtimeErrors: [],
-          previousDocumentId: captureDocumentRef.current?.id ?? null,
+          previousDocumentId: activeDocumentIdRef.current,
           diagnosticDocumentId: null,
           documentId: null,
           done: false,
@@ -461,7 +261,6 @@ export default function ServerPreviewPane() {
       }
     }
   }, [
-    cancelPendingCaptures,
     armPendingCheckTimeout,
     clearIframeReadyTimer,
     finishPendingCheck,
@@ -510,9 +309,7 @@ export default function ServerPreviewPane() {
     clearIframeReadyTimer()
     iframeReadyAttemptsRef.current = 0
     iframeRecoveryBuildAttemptedRef.current = false
-    cancelPendingCaptures('预览会话已切换')
-    captureDocumentRef.current = null
-    lastCaptureViewportRef.current = null
+    activeDocumentIdRef.current = null
     // 运行时配置异步读取期间，SSE 可能已经送来当前会话的 preview_refresh。
     // 当前请求属于即将挂载的会话时不能当成“旧请求”吞掉；其它会话残留则直接记为已处理。
     handledApplySeqRef.current = (
@@ -609,48 +406,6 @@ export default function ServerPreviewPane() {
       const data = event.data as Record<string, unknown> | null
       if (!data || typeof data.type !== 'string') return
 
-      if (data.type === 'xiaozhu-capture-result') {
-        const requestId = typeof data.id === 'string' ? data.id : ''
-        const pending = pendingCaptureRef.current.get(requestId)
-        if (!pending) return
-        clearTimeout(pending.timer)
-        pendingCaptureRef.current.delete(requestId)
-        if (
-          data.documentId === pending.documentId
-          && captureDocumentRef.current?.id === pending.documentId
-          && data.ok === true
-          && data.bytes instanceof ArrayBuffer
-          && data.bytes.byteLength > 0
-          && data.bytes.byteLength <= MAX_SCREENSHOT_BYTES
-          && typeof data.mime === 'string'
-          && SCREENSHOT_MIMES.has(data.mime)
-          && typeof data.width === 'number'
-          && Number.isInteger(data.width)
-          && data.width > 0
-          && data.width <= MAX_SCREENSHOT_SIDE
-          && typeof data.height === 'number'
-          && Number.isInteger(data.height)
-          && data.height > 0
-          && data.height <= MAX_SCREENSHOT_SIDE
-        ) {
-          pending.resolve({
-            blob: new Blob([data.bytes], { type: data.mime }),
-            width: data.width,
-            height: data.height,
-            path: typeof data.path === 'string' ? data.path.slice(0, 2048) : '/',
-            mime: data.mime,
-            device: pending.device,
-          })
-        } else {
-          pending.reject(new Error(
-            typeof data.error === 'string'
-              ? data.error.slice(0, 500)
-              : 'iframe 返回了无效截图',
-          ))
-        }
-        return
-      }
-
       const documentId = (
         typeof data.documentId === 'string' && data.documentId.length <= 160
           ? data.documentId
@@ -719,15 +474,7 @@ export default function ServerPreviewPane() {
         }
         const pending = pendingCheckRef.current
         if (pending && !pending.done && documentId === pending.previousDocumentId) return
-        captureDocumentRef.current = {
-          id: documentId,
-          width: Math.round(width),
-          height: Math.round(height),
-        }
-        lastCaptureViewportRef.current = {
-          width: Math.round(width),
-          height: Math.round(height),
-        }
+        activeDocumentIdRef.current = documentId
         if (!pending || pending.done) return
         if (pending.diagnosticDocumentId !== documentId) {
           pending.diagnosticDocumentId = documentId
@@ -862,9 +609,8 @@ export default function ServerPreviewPane() {
     pendingCheckRef.current = null
     clearCheckTimers()
     clearIframeReadyTimer()
-    cancelPendingCaptures('预览面板已卸载')
-    captureDocumentRef.current = null
-  }, [cancelPendingCaptures, clearCheckTimers, clearIframeReadyTimer])
+    activeDocumentIdRef.current = null
+  }, [clearCheckTimers, clearIframeReadyTimer])
 
   // Chrome 会按 URL 缓存 iframe 的 ERR_CONNECTION_REFUSED/CSP 错误文档；只改 React key
   // 仍可能继续显示旧错误页。每次重挂都附带新的无语义查询参数，强制一次真实网络导航。

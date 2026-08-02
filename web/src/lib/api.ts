@@ -112,6 +112,14 @@ export type SSEEvent =
       truncated: boolean
     }
   | { type: 'reasoning_discard'; id: string }
+  // 模型上游流中断，但 LangGraph 仍安全停在 model 节点；前端先丢弃未落库草稿，
+  // 后端随后会从同一 checkpoint 自动恢复，不会重放已完成工具。
+  | {
+      type: 'generation_retry'
+      attempt: number
+      max_attempts: number
+      discard_tool_ids: string[]
+    }
   | { type: 'file_write'; path: string; content: string }
   | { type: 'file_delete'; path: string }
   // check_build 已由服务端完成构建，前端只加载结果 URL，不再重复提交构建。
@@ -138,7 +146,12 @@ export type SSEEvent =
       name?: string | null
       project_name?: string | null
     }
-  | { type: 'error'; message: string }
+  | {
+      type: 'error'
+      message: string
+      reset_draft?: boolean
+      discard_tool_ids?: string[]
+    }
   | { type: 'done' }
   // ask_user 触发 interrupt() 暂停本轮：这次 SSE 流到此正常结束（不是真的跑完），
   // 前端要据此进入「等待回答」态，见 app.agents.loop 的 __interrupt__ 分支
@@ -525,9 +538,9 @@ export async function stopGeneration(sessionId: string): Promise<void> {
   })
 }
 
-// ── 回报浏览器预览结果（非阻塞增强）──────────────────────────
+// ── 回报浏览器运行时诊断（非阻塞增强）───────────────────────
 // check_build 的编译结论已经由服务端直接调用 Worker 得出；浏览器在线时仍会重载 iframe、
-// 采集运行时错误和截图并回报，用于当前页面的预览体验，但失败或断线不会卡住 Agent。
+// 采集运行时错误并回报。截图由 Worker 的无头浏览器完成，不再依赖用户浏览器。
 // 走原生 fetch 而非 axios：best-effort 旁路数据，失败要静默，不弹 toast 骚扰用户。
 export async function postBuildResult(
   sessionId: string,
@@ -606,49 +619,6 @@ export async function buildServerPreview(
   }
 }
 
-/** 把 iframe 返回的原始截图上传并换取可持久化引用。
- *  上传是 check_build 的旁路增强：超时/失败返回 null，不能拖死构建结果回报。 */
-export async function uploadPreviewScreenshot(
-  sessionId: string,
-  checkId: string,
-  blob: Blob,
-  meta: {
-    width: number
-    height: number
-    path: string
-    device: 'desktop' | 'mobile'
-  },
-): Promise<PreviewScreenshot | null> {
-  const controller = new AbortController()
-  const timer = window.setTimeout(() => controller.abort(), 8000)
-  try {
-    const response = await fetch(`/api/sessions/${sessionId}/preview-screenshots`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': blob.type || 'image/webp',
-        'X-Screenshot-Width': String(meta.width),
-        'X-Screenshot-Height': String(meta.height),
-        'X-Screenshot-Device': meta.device,
-        // 后端据此校验这张图属于当前已 arm 的 check_build，且同一轮只能上传一张。
-        'X-Check-Id': checkId,
-        // Header 只接受 Latin-1；路由里可能有中文，统一编码后交给后端解码。
-        'X-Screenshot-Path': encodeURIComponent(meta.path),
-        ...authHeaders(),
-      },
-      body: blob,
-      signal: controller.signal,
-    })
-    if (!response.ok) return null
-    const data: unknown = await response.json()
-    if (!isPreviewScreenshot(data)) return null
-    return data
-  } catch {
-    return null
-  } finally {
-    window.clearTimeout(timer)
-  }
-}
-
 /** 私有截图地址不能直接交给 <img>（它不会带 JWT），先鉴权拉成 Blob。 */
 export async function fetchAuthenticatedImage(url: string, signal?: AbortSignal): Promise<Blob> {
   const response = await fetch(url, {
@@ -657,24 +627,6 @@ export async function fetchAuthenticatedImage(url: string, signal?: AbortSignal)
   })
   if (!response.ok) throw new Error(`截图加载失败 (${response.status})`)
   return response.blob()
-}
-
-function isPreviewScreenshot(value: unknown): value is PreviewScreenshot {
-  if (typeof value !== 'object' || value === null) return false
-  const item = value as Record<string, unknown>
-  return (
-    typeof item.id === 'string' &&
-    typeof item.url === 'string' &&
-    typeof item.width === 'number' &&
-    typeof item.height === 'number' &&
-    typeof item.path === 'string' &&
-    typeof item.mime === 'string' &&
-    (
-      item.device === undefined ||
-      item.device === 'desktop' ||
-      item.device === 'mobile'
-    )
-  )
 }
 
 // ── SSE 流式对话 ────────────────────────────────────────────────

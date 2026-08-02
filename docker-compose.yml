@@ -37,6 +37,8 @@ services:
       - SANDBOX_PREVIEW_DIR=/app/data/sandbox-worker/previews
       - SANDBOX_DATA_DIR=/app/data/sandbox-worker
       - SANDBOX_TEMPLATE_DIR=/app/templates/vite-react
+      # 覆盖旧部署 .env 可能遗留的 75 秒，闭合 60 秒构建 + 12 秒截图 + 清理预算。
+      - SANDBOX_BUILD_TIMEOUT_S=100
 
     # 把宿主机数据目录挂到容器 /app/data，让 SQLite 数据库文件持久化。
     # 生产环境必须把 XIAOZHU_DATA_DIR 配到面板内部目录之外，避免面板维护
@@ -49,11 +51,20 @@ services:
     memswap_limit: 2800m
     cpus: 2.0
     pids_limit: 256
+    # Chromium 只开一个实例；独立共享内存避免默认 64MiB /dev/shm 在截图时崩溃。
+    shm_size: 128m
+    # 用 Docker init 回收 Chromium 子进程，避免异常退出后留下僵尸进程。
+    init: true
     read_only: true
     tmpfs:
-      - /tmp:size=64m,mode=1777
+      - /tmp:size=192m,mode=1777
     cap_drop:
       - ALL
+    # 入口仅用这三项完成沙箱目录授权和 Worker 降权；Chromium 启动前已切到 UID 10001。
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
     security_opt:
       - no-new-privileges:true
     healthcheck:

@@ -102,7 +102,7 @@ type SessionState = {
     truncated: boolean,
   ) => void
   /** 候选回复被中间件否决时，移除已经流出的临时思考卡。 */
-  discardReasoning: (streamId: string) => void
+  discardReasoning: (streamId: string, sessionId?: string) => void
   /** 重试前的截断：移除「最新一轮用户消息」之后的所有消息（旧回复 / 工具卡 / 版本卡），
    *  让对话看起来像把这条消息重新发了一遍。版本快照在后端保留，可在「版本历史」回滚。 */
   truncateAfterLastUserMessage: () => void
@@ -122,6 +122,8 @@ type SessionState = {
    *  再用完整参数（含 write_file 的 content）按 toolCallId 补全同一张卡，展开即可看到全部参数。
    *  无 path、没提前发的工具（list_files / check_build）则由完整参数这一发直接新建。 */
   upsertToolCall: (toolCallId: string, name: string, args: Record<string, unknown>) => void
+  /** 模型流中断时，按后端给出的未完成 call id 精确移除虚线草稿卡。 */
+  discardToolCalls: (toolCallIds: string[], sessionId?: string) => void
   setStreamingText: (text: string) => void
   /** 开始一轮流式：立刻把 isStreaming 置 true（不等首个 token），让发送按钮即时变成"停止" */
   beginStreaming: () => void
@@ -707,8 +709,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }))
   },
 
-  discardReasoning: (streamId) => {
-    const id = get().activeId
+  discardReasoning: (streamId, sessionId) => {
+    const id = sessionId ?? get().activeId
     if (!id) return
     set((s) => ({
       sessions: s.sessions.map((sess) => {
@@ -880,6 +882,28 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           ],
         }
       }),
+    }))
+  },
+
+  discardToolCalls: (toolCallIds, sessionId) => {
+    const id = sessionId ?? get().activeId
+    if (!id || toolCallIds.length === 0) return
+    const discardIds = new Set(toolCallIds)
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === id
+          ? {
+              ...sess,
+              messages: sess.messages.filter(
+                (message) => !(
+                  message.kind === 'tool'
+                  && message.toolCallId
+                  && discardIds.has(message.toolCallId)
+                ),
+              ),
+            }
+          : sess,
+      ),
     }))
   },
 

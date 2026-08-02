@@ -37,6 +37,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.sandbox import SandboxBuildRead, SandboxBuildRequest, _submit_sandbox_build
 from app.models.file import File
+from app.preview_screenshots import (
+    build_screenshot_artifact,
+    remove_screenshot,
+    save_screenshot,
+)
 
 
 class AskUserOption(BaseModel):
@@ -150,6 +155,57 @@ def sandbox_preview_artifact(
             "device": device,
         }
     }
+
+
+async def _persist_sandbox_screenshot(
+    session_id: str,
+    result: SandboxBuildRead,
+) -> tuple[dict | None, str]:
+    """保存 Worker 截图并生成轻量 artifact；落盘异常只降级本次视觉增强。"""
+    screenshot = result.screenshot
+    if screenshot is None:
+        return None, result.capture_error or "服务端未返回截图"
+
+    record = None
+    try:
+        record = await save_screenshot(
+            session_id,
+            screenshot.decoded_bytes(),
+            screenshot.mime,
+            screenshot.width,
+            screenshot.height,
+            screenshot.path,
+            screenshot.device,
+        )
+        artifact = await build_screenshot_artifact(session_id, record.id)
+        if artifact is None:
+            raise RuntimeError("截图落盘后无法读取")
+        return artifact, result.capture_error
+    except Exception as exc:
+        # 截图不是编译真相源。磁盘暂满、sidecar 读取失败等问题不能把 Vite 成功
+        # 改写成项目代码错误，也不能把未经持久化验证的内联图片塞进 checkpoint。
+        print(
+            "[check_build] 服务端截图保存失败，已降级为无截图结果: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        if record is not None:
+            try:
+                await remove_screenshot(record)
+            except Exception as cleanup_exc:
+                print(
+                    "[check_build] 清理未绑定截图失败: "
+                    f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                )
+        return None, "服务端截图保存失败"
+
+
+def _runtime_error_details(errors: list[str]) -> str:
+    """给模型保留可定位的运行时错误，同时限制单次工具回包体积。"""
+    details = "\n".join(f"- {error}" for error in errors)
+    limit = 3500
+    if len(details) > limit:
+        return details[:limit] + "\n…（运行时错误过长，已截断）"
+    return details
 
 
 @dataclass
@@ -382,11 +438,11 @@ def build_tools(
 
     @tool(response_format="content_and_artifact")
     async def check_build(runtime: ToolRuntime) -> tuple[str, dict | None]:
-        """在服务端沙箱构建当前项目，并返回编译结果。
+        """在服务端沙箱构建并用无头浏览器验收当前项目。
 
         写完一组完整、能渲染的改动后调用它：服务端会把当前项目文件交给独立沙箱运行
-        `vite build`。浏览器在线时仍会同步刷新预览，但它只负责展示，不参与构建判定。
-        没有报错就说明构建通过、能正常跑。
+        `vite build`，再由同一 Worker 的 Playwright 打开产物、采集运行时错误与截图。
+        用户浏览器只负责展示预览，不参与验收判定；刷新或关闭页面不会影响本工具。
 
         重要：write_file / edit_file 只是把文件「暂存」下来，并不会刷新预览 —— 这样
         用户才不会看到「组件写好了、配套样式还没写」的半成品。所以一组改动写完后，
@@ -445,6 +501,7 @@ def build_tools(
                     files=files,
                     device=preview_device,
                 ),
+                capture=True,
             )
         except HTTPException as exc:
             build_reuse_state.note_fresh_result(check_id, cacheable=False)
@@ -458,21 +515,58 @@ def build_tools(
 
         device_label = "H5" if preview_device == "mobile" else "桌面"
         device_note = f"本次检查使用{device_label}画布；页面仍需兼容另一端。"
+        artifact = sandbox_preview_artifact(result, preview_device)
         if result.ok:
-            build_reuse_state.note_fresh_result(check_id, cacheable=True)
-            return (
-                f"{device_note}服务端编译检查通过。浏览器预览、运行时采集和截图是"
-                "非阻塞增强；即使用户切后台、刷新或关闭页面，本次任务也可继续完成。",
-                sandbox_preview_artifact(result, preview_device),
+            screenshot_artifact, screenshot_error = (
+                await _persist_sandbox_screenshot(session_id, result)
             )
-        build_reuse_state.note_fresh_result(
-            check_id,
-            cacheable=True,
-        )
+            if screenshot_artifact is not None:
+                artifact.update(screenshot_artifact)
+
+            # 只有编译结论可靠、截图也已持久化且 Worker 没报告采集异常，才可按文件
+            # 指纹复用。否则下一次 check_build 必须重新走 Playwright，不能长期缓存缺图。
+            screenshot_reliable = bool(
+                screenshot_artifact is not None
+                and not result.capture_error
+                and not screenshot_error
+            )
+            build_reuse_state.note_fresh_result(
+                check_id,
+                cacheable=screenshot_reliable,
+            )
+
+            if result.runtime_errors:
+                content = (
+                    f"{device_note}Vite 编译通过，但服务端无头浏览器发现运行时代码错误，"
+                    "请定位并修复：\n"
+                    f"{_runtime_error_details(result.runtime_errors)}"
+                )
+            else:
+                content = (
+                    f"{device_note}编译与运行时检查通过；这不代表视觉截图已经合格，"
+                    "附带截图仍需由支持视觉的模型严格审查。"
+                )
+
+            if screenshot_artifact is not None:
+                screenshot = result.screenshot
+                if screenshot is not None:
+                    content += (
+                        f"\n已由服务端生成 {screenshot.width}×{screenshot.height} "
+                        f"{device_label}截图。"
+                    )
+            if screenshot_error:
+                content += (
+                    "\n服务端截图采集未完成（非致命，不影响上述编译/运行时结论）："
+                    f"{screenshot_error}。不要把它当成项目代码错误。"
+                )
+            return content, artifact
+
+        # 编译失败没有可渲染页面和可靠截图，不缓存缺图结果，修复后重新验收。
+        build_reuse_state.note_fresh_result(check_id, cacheable=False)
         errors = result.errors.strip() or "（无详细错误信息）"
         return (
             f"{device_note}预览构建失败（编译没通过），请定位并修复：\n{errors}",
-            sandbox_preview_artifact(result, preview_device),
+            artifact,
         )
 
     @tool

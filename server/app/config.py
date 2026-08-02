@@ -117,7 +117,9 @@ class Settings(BaseSettings):
     sandbox_preview_origin: str = ""
     sandbox_frame_ancestors: str = "'self'"
     sandbox_build_timeout_s: float = Field(
-        default=75.0,
+        # Worker 最坏 60 秒构建 + 12 秒完整截图生命周期 + 有界清理；
+        # 主 API 需留出响应传输和截图落盘余量，避免先 504 后 Worker 仍占用单并发。
+        default=100.0,
         gt=0,
         le=180,
         allow_inf_nan=False,

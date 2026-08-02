@@ -1,6 +1,7 @@
 #!/bin/sh
 # 生产单容器入口：迁移数据库后，同时监管 FastAPI 与 Node Worker 两个进程。
 set -eu
+umask 077
 
 worker_pid=""
 api_pid=""
@@ -28,16 +29,41 @@ trap 'stop_children; exit 0' TERM INT
 SANDBOX_PORT="${SANDBOX_PORT:-8010}"
 SANDBOX_DATA_DIR="${SANDBOX_DATA_DIR:-/app/data/sandbox-worker}"
 SANDBOX_TEMPLATE_DIR="${SANDBOX_TEMPLATE_DIR:-/app/templates/vite-react}"
+PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/ms-playwright}"
+sandbox_run_uid=10001
+sandbox_run_gid=10001
 
-# 容器以去除全部 capabilities 的 root 身份运行。目录缺少执行或写权限时，
+# 容器 root 只保留 CHOWN/SETUID/SETGID 三项启动能力，不具备 DAC 权限。目录缺少权限时，
 # SQLite 可能仍能读取旧数据，却会在创建会话时才暴露 readonly database。
 # 在启动前直接失败，避免出现“健康检查正常、业务写请求 500”的半失效状态。
 if [ ! -w /app/data ] || [ ! -x /app/data ]; then
   echo "[entrypoint] 数据目录 /app/data 不可写或不可进入，请检查宿主机挂载目录权限" >&2
   exit 1
 fi
+case "$SANDBOX_DATA_DIR" in
+  /app/data/sandbox-worker | /app/data/sandbox-worker/*) ;;
+  *)
+    echo "[entrypoint] SANDBOX_DATA_DIR 必须位于 /app/data/sandbox-worker 内" >&2
+    exit 1
+    ;;
+esac
 
-mkdir -p "$SANDBOX_DATA_DIR/jobs" "$SANDBOX_DATA_DIR/previews"
+# API 仍由容器 root 管理数据库；Worker 与 Chromium 降为固定无特权 UID，只拥有沙箱目录。
+# 即使浏览器进程异常，也不能直接读取 SQLite、模型配置或主服务运行态。
+#
+# root 没有 DAC/FOWNER，旧版或中断迁移不能靠普通 chown -R 自愈。辅助脚本用 CAP_CHOWN
+# 逐层接管后再后序交权，并仅在完整成功后写 marker；正常重启只校正三个顶层 inode。
+/app/.venv/bin/python /app/scripts/prepare_sandbox_storage.py \
+  "$SANDBOX_DATA_DIR" "$sandbox_run_uid" "$sandbox_run_gid"
+for database_file in \
+  /app/data/xiaozhu.db \
+  /app/data/xiaozhu.db-shm \
+  /app/data/xiaozhu.db-wal
+do
+  if [ -e "$database_file" ]; then
+    chmod 600 "$database_file"
+  fi
+done
 
 echo "[entrypoint] 应用数据库迁移"
 /app/.venv/bin/alembic upgrade head
@@ -55,6 +81,11 @@ env -i \
   SANDBOX_DATA_DIR="$SANDBOX_DATA_DIR" \
   SANDBOX_TEMPLATE_DIR="$SANDBOX_TEMPLATE_DIR" \
   SANDBOX_WORKER_TOKEN="$SANDBOX_WORKER_TOKEN" \
+  SANDBOX_BUILD_TIMEOUT_MS="60000" \
+  SANDBOX_CAPTURE_TIMEOUT_MS="12000" \
+  SANDBOX_RUN_UID="$sandbox_run_uid" \
+  SANDBOX_RUN_GID="$sandbox_run_gid" \
+  PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
   /usr/local/bin/node /app/sandbox-worker/index.js &
 worker_pid=$!
 

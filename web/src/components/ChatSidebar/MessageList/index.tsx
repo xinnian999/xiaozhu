@@ -335,7 +335,7 @@ export default function MessageList({ onRetry, onAskUserAnswer }: Props) {
               type="button"
               className={styles.retryBtn}
               onClick={onRetry}
-              title="用当前项目状态重新生成这一轮（会追加一个新版本）"
+              title="恢复到本轮开始前并重新生成（历史版本仍保留）"
             >
               <RotateCcw size={13} className={styles.retryIcon} />
               <span>重新生成</span>

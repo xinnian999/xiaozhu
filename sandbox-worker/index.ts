@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
+  chmod,
   mkdir,
   readdir,
   readFile,
@@ -14,7 +15,38 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import path from 'node:path'
 import type { Readable } from 'node:stream'
 
+import {
+  capturePreview,
+  makePreviewTreeReadable,
+  type PreviewScreenshot,
+} from './capture.ts'
 import { PREVIEW_CAPABILITY_PATH_PATTERN_SOURCE } from './preview-path.ts'
+
+function positiveRunId(value: string | undefined): number | null {
+  if (!value || !/^[1-9]\d*$/.test(value)) return null
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && parsed <= 0x7fffffff ? parsed : null
+}
+
+function dropWorkerPrivileges(): void {
+  if (
+    typeof process.getuid !== 'function'
+    || typeof process.setgid !== 'function'
+    || typeof process.setuid !== 'function'
+    || process.getuid() !== 0
+  ) return
+  const uid = positiveRunId(process.env.SANDBOX_RUN_UID)
+  const gid = positiveRunId(process.env.SANDBOX_RUN_GID)
+  // 必须成对配置，避免只降 UID 却意外保留 root 主组；生产入口会同时传入两者。
+  if (uid === null || gid === null) return
+  // Docker 初始进程带有 root 补充组；只改主 GID 不会自动清空，必须在降权前显式移除。
+  if (typeof process.setgroups === 'function') process.setgroups([])
+  process.setgid(gid)
+  process.setuid(uid)
+}
+
+// 降权必须早于创建目录、监听端口和启动 Chromium；本地未配置时保持原行为。
+dropWorkerPrivileges()
 
 const port = Number.parseInt(process.env.SANDBOX_PORT || '8010', 10)
 const hostname = process.env.SANDBOX_HOST || '0.0.0.0'
@@ -23,6 +55,10 @@ const workerToken = process.env.SANDBOX_WORKER_TOKEN || ''
 const buildTimeoutMs = Math.max(
   5_000,
   Math.min(Number.parseInt(process.env.SANDBOX_BUILD_TIMEOUT_MS || '60000', 10), 120_000),
+)
+const captureTimeoutMs = Math.max(
+  5_000,
+  Math.min(Number.parseInt(process.env.SANDBOX_CAPTURE_TIMEOUT_MS || '12000', 10), 30_000),
 )
 
 // 容器内固定为 /opt/template；允许测试环境覆盖，便于不启动 Docker 也能做真实构建验证。
@@ -36,7 +72,7 @@ const MAX_WIRE_BYTES = 32 * 1024 * 1024
 const MAX_LOG_BYTES = 100 * 1024
 const MAX_PREVIEWS_PER_SESSION = 3
 // 修改可信模板、构建器或运行时 bridge 后递增，避免复用旧格式产物。
-const BUILD_CACHE_VERSION = '3'
+const BUILD_CACHE_VERSION = '4'
 
 const protectedFiles = [
   '.npmrc',
@@ -84,6 +120,7 @@ type BuildPayload = {
   session_id: string
   files: Record<string, string>
   device?: 'desktop' | 'mobile'
+  capture: boolean
 }
 
 type BuildResult = {
@@ -91,6 +128,9 @@ type BuildResult = {
   build_id?: string
   logs: string
   errors: string
+  screenshot?: PreviewScreenshot
+  capture_error?: string
+  runtime_errors?: string[]
 }
 
 let building = false
@@ -267,6 +307,9 @@ function validatePayload(value: unknown): BuildPayload {
   if (typeof body.files !== 'object' || body.files === null || Array.isArray(body.files)) {
     throw new Error('files 必须是文件映射')
   }
+  if (body.capture !== undefined && typeof body.capture !== 'boolean') {
+    throw new Error('capture 必须是布尔值')
+  }
 
   const entries = Object.entries(body.files as Record<string, unknown>)
   if (entries.length === 0 || entries.length > MAX_FILES) {
@@ -289,6 +332,7 @@ function validatePayload(value: unknown): BuildPayload {
     session_id: body.session_id,
     files,
     device: body.device === 'mobile' ? 'mobile' : 'desktop',
+    capture: body.capture === true,
   }
 }
 
@@ -375,95 +419,6 @@ function runtimeBridge(): string {
   window.addEventListener('hashchange', reportPath);
   window.addEventListener('popstate', reportPath);
 
-  const waitAtMost = (value, timeout) => new Promise((resolve) => {
-    const timer = setTimeout(resolve, timeout);
-    Promise.resolve(value).then(() => {
-      clearTimeout(timer);
-      resolve();
-    }, () => {
-      clearTimeout(timer);
-      resolve();
-    });
-  });
-  const waitForStylesheets = () => Promise.all(
-    Array.from(document.querySelectorAll('link[rel="stylesheet"]')).map((link) => {
-      if (link.sheet) return Promise.resolve();
-      return new Promise((resolve) => {
-        const done = () => resolve();
-        link.addEventListener('load', done, { once: true });
-        link.addEventListener('error', done, { once: true });
-        setTimeout(done, 1500);
-      });
-    }),
-  );
-  const waitForImages = async () => {
-    await Promise.all(Array.from(document.images || []).map(async (image) => {
-      try {
-        if (!image.complete) {
-          await new Promise((resolve) => {
-            const done = () => resolve();
-            image.addEventListener('load', done, { once: true });
-            image.addEventListener('error', done, { once: true });
-            setTimeout(done, 1200);
-          });
-        }
-        if (typeof image.decode === 'function') await waitAtMost(image.decode(), 1200);
-      } catch {}
-    }));
-  };
-  const waitForFonts = async () => {
-    try {
-      if (document.fonts && document.fonts.ready) {
-        await waitAtMost(document.fonts.ready, 1500);
-      }
-    } catch {}
-  };
-  const waitForDomQuiet = () => new Promise((resolve) => {
-    let settled = false;
-    let quietTimer = 0;
-    let mutationObserver = null;
-    let resizeObserver = null;
-    const maxTimer = setTimeout(finish, 1800);
-    function finish() {
-      if (settled) return;
-      settled = true;
-      clearTimeout(quietTimer);
-      clearTimeout(maxTimer);
-      if (mutationObserver) mutationObserver.disconnect();
-      if (resizeObserver) resizeObserver.disconnect();
-      resolve();
-    }
-    const bump = () => {
-      clearTimeout(quietTimer);
-      quietTimer = setTimeout(finish, 320);
-    };
-    if (typeof MutationObserver === 'function') {
-      mutationObserver = new MutationObserver(bump);
-      mutationObserver.observe(document.documentElement, {
-        attributes: true,
-        childList: true,
-        characterData: true,
-        subtree: true,
-      });
-    }
-    if (typeof ResizeObserver === 'function') {
-      resizeObserver = new ResizeObserver(bump);
-      resizeObserver.observe(document.documentElement);
-      if (document.body) resizeObserver.observe(document.body);
-    }
-    bump();
-  });
-  const waitForAssets = async () => {
-    await waitForStylesheets();
-    await waitForFonts();
-    await waitForImages();
-    await waitForDomQuiet();
-    // quiet 期间应用可能刚插入新资源；再扫描一次，避免 ready/capture 抢跑。
-    await waitForStylesheets();
-    await waitForFonts();
-    await waitForImages();
-    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-  };
   const waitForAppMounted = () => new Promise((resolve) => {
     const startedAt = Date.now();
     const check = () => {
@@ -480,116 +435,6 @@ function runtimeBridge(): string {
     requestAnimationFrame(check);
   });
 
-  const safeBackground = (value) => {
-    if (
-      typeof value === 'string'
-      && value.length <= 64
-      && typeof CSS !== 'undefined'
-      && CSS.supports('color', value)
-    ) return value;
-    return '#ffffff';
-  };
-  const toWebp = (canvas) => new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (blob && blob.type === 'image/webp') resolve(blob);
-      else reject(new Error('浏览器未能编码 WebP 截图'));
-    }, 'image/webp', 0.75);
-  });
-  let html2canvasPromise = null;
-  const loadHtml2canvas = () => {
-    if (!html2canvasPromise) {
-      // 截图依赖体积较大，不能阻塞 bridge 启动和 ready 握手；只在真正截图时加载。
-      html2canvasPromise = import('html2canvas').then((module) => module.default);
-    }
-    return html2canvasPromise;
-  };
-  const capture = async (background) => {
-    const html2canvas = await loadHtml2canvas();
-    // 字体或第三方图片可能长时间不结束；截图尽量等稳定，但不能被它们无限拖住。
-    await waitAtMost(waitForAssets(), 4000);
-    const viewportWidth = Math.max(
-      1,
-      innerWidth || document.documentElement.clientWidth || 0,
-    );
-    const viewportHeight = Math.max(
-      1,
-      innerHeight || document.documentElement.clientHeight || 0,
-    );
-    const canvas = await html2canvas(document.documentElement, {
-      x: 0,
-      y: 0,
-      width: viewportWidth,
-      height: viewportHeight,
-      windowWidth: viewportWidth,
-      windowHeight: viewportHeight,
-      scrollX: 0,
-      scrollY: 0,
-      useCORS: true,
-      allowTaint: false,
-      foreignObjectRendering: true,
-      scale: 1,
-      logging: false,
-      backgroundColor: safeBackground(background),
-      onclone: (clonedDocument) => {
-        const freeze = clonedDocument.createElement('style');
-        freeze.textContent = '*,*::before,*::after{'
-          + 'animation:none!important;transition:none!important;'
-          + 'caret-color:transparent!important;}';
-        clonedDocument.head.appendChild(freeze);
-      },
-    });
-    const scale = Math.min(1, 1280 / Math.max(canvas.width, canvas.height));
-    const width = Math.max(1, Math.round(canvas.width * scale));
-    const height = Math.max(1, Math.round(canvas.height * scale));
-    let output = canvas;
-    if (scale < 1) {
-      output = document.createElement('canvas');
-      output.width = width;
-      output.height = height;
-      const context = output.getContext('2d');
-      if (!context) throw new Error('浏览器未能创建截图画布');
-      context.drawImage(canvas, 0, 0, width, height);
-    }
-    return {
-      blob: await toWebp(output),
-      width,
-      height,
-      path: logicalPreviewPath(),
-    };
-  };
-  const captureClones = () => Array.from(
-    document.querySelectorAll('iframe.html2canvas-container'),
-  );
-  const captureWithTimeout = (background) => {
-    const existingClones = captureClones();
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      const cleanupNewClones = () => {
-        for (const clone of captureClones()) {
-          if (!existingClones.includes(clone)) clone.remove();
-        }
-      };
-      const finish = (callback, value) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        callback(value);
-      };
-      const timer = setTimeout(() => {
-        cleanupNewClones();
-        finish(reject, new Error('预览截图渲染超时'));
-      }, 8000);
-      capture(background).then(
-        (shot) => finish(resolve, shot),
-        (error) => {
-          cleanupNewClones();
-          finish(reject, error);
-        },
-      );
-    });
-  };
-
-  let captureInFlight = false;
   window.addEventListener('message', (event) => {
     const data = event.data;
     if (!data || event.source !== window.parent) return;
@@ -602,40 +447,7 @@ function runtimeBridge(): string {
       if (data.action === 'back') history.back();
       else if (data.action === 'forward') history.forward();
       else if (data.action === 'reload') location.reload();
-      return;
     }
-    if (data.type !== 'xiaozhu-capture-request') return;
-    const id = typeof data.id === 'string' && data.id.length <= 160 ? data.id : '';
-    if (!id || data.documentId !== documentId) return;
-    if (captureInFlight) {
-      post('xiaozhu-capture-result', {
-        id,
-        ok: false,
-        error: '已有截图请求正在执行',
-      }, event.origin);
-      return;
-    }
-    captureInFlight = true;
-    captureWithTimeout(data.background).then(async (shot) => {
-      const bytes = await shot.blob.arrayBuffer();
-      post('xiaozhu-capture-result', {
-        id,
-        ok: true,
-        bytes,
-        mime: 'image/webp',
-        width: shot.width,
-        height: shot.height,
-        path: shot.path,
-      }, event.origin, [bytes]);
-    }).catch((error) => {
-      post('xiaozhu-capture-result', {
-        id,
-        ok: false,
-        error: describe(error).slice(0, 500),
-      }, event.origin);
-    }).finally(() => {
-      captureInFlight = false;
-    });
   });
 
   const announceReady = async () => {
@@ -780,16 +592,22 @@ async function cachedBuildId(payload: BuildPayload): Promise<string> {
 async function build(payload: BuildPayload): Promise<BuildResult> {
   const buildId = await cachedBuildId(payload)
   const jobDir = path.join(jobsDir, buildId)
-  const previewDir = path.join(previewsDir, payload.session_id, buildId)
+  const sessionPreviewDir = path.join(previewsDir, payload.session_id)
+  const previewDir = path.join(sessionPreviewDir, buildId)
   const markerPath = path.join(previewDir, '.xiaozhu-build.json')
   try {
     const marker = JSON.parse(await readFile(markerPath, 'utf8')) as Record<string, unknown>
     if (marker.sessionId === payload.session_id && marker.buildId === buildId) {
+      await makePreviewTreeReadable(previewDir)
+      const capture = payload.capture
+        ? await capturePreview(previewDir, payload.device || 'desktop', captureTimeoutMs)
+        : {}
       return {
         ok: true,
         build_id: buildId,
         logs: '源码未变化，复用已有构建产物',
         errors: '',
+        ...capture,
       }
     }
   } catch {
@@ -809,7 +627,9 @@ async function build(payload: BuildPayload): Promise<BuildResult> {
         errors: result.output || `vite build 失败 (exit ${result.code})`,
       }
     }
-    await mkdir(path.dirname(previewDir), { recursive: true })
+    await mkdir(sessionPreviewDir, { recursive: true })
+    // 父目录也必须可遍历，否则 API 即使能读 build 内文件仍会得到 EACCES。
+    await chmod(sessionPreviewDir, 0o755)
     await rm(previewDir, { recursive: true, force: true })
     await writeFile(
       path.join(jobDir, 'dist', '.xiaozhu-build.json'),
@@ -817,12 +637,17 @@ async function build(payload: BuildPayload): Promise<BuildResult> {
       'utf8',
     )
     await rename(path.join(jobDir, 'dist'), previewDir)
+    await makePreviewTreeReadable(previewDir)
     await pruneSessionPreviews(payload.session_id)
+    const capture = payload.capture
+      ? await capturePreview(previewDir, payload.device || 'desktop', captureTimeoutMs)
+      : {}
     return {
       ok: true,
       build_id: buildId,
       logs: result.output,
       errors: '',
+      ...capture,
     }
   } finally {
     await rm(jobDir, { recursive: true, force: true })
@@ -831,6 +656,8 @@ async function build(payload: BuildPayload): Promise<BuildResult> {
 
 await mkdir(jobsDir, { recursive: true })
 await mkdir(previewsDir, { recursive: true })
+// 生产入口通过版本 marker 只迁移一次旧权限；这里不能在每次重启时无界扫描所有会话。
+// 新产物发布时仍会逐棵规范为 0755/0644，本地开发则由同一宿主用户直接读取。
 
 const server = createServer(async (request, response) => {
   try {

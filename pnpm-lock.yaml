@@ -13,6 +13,10 @@ importers:
         version: 9.2.4
 
   sandbox-worker:
+    dependencies:
+      playwright:
+        specifier: ^1.50.0
+        version: 1.62.0
     devDependencies:
       '@types/node':
         specifier: ^22.15.0
@@ -93,9 +97,6 @@ importers:
       globals:
         specifier: ^17.6.0
         version: 17.7.0
-      playwright:
-        specifier: ^1.50.0
-        version: 1.62.0
       sass:
         specifier: ^1.100.0
         version: 1.102.0

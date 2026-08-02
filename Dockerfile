@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 #
 # 小筑生产镜像：一个部署容器内运行 FastAPI 与 Node 沙箱 Worker 两个进程。
-# 前端、管理后台、Worker 和固定预览模板都在镜像构建期完成安装/编译；线上任务
-# 只运行 Vite build，不会在 2G 服务器上临时安装依赖。
+# 前端、管理后台、Worker、Chromium 和固定预览模板都在镜像构建期完成安装；线上任务
+# 只运行 Vite build 与单并发无头截图，不会在 2G 服务器上临时下载依赖。
 
 # ─────────────────────────────────────────────────────────────
 # Node 22 + pnpm 公共构建基础
@@ -72,14 +72,44 @@ COPY server/templates/vite-react/ ./
 # ─────────────────────────────────────────────────────────────
 FROM crpi-a7p27yxlrmekg1a3.cn-beijing.personal.cr.aliyuncs.com/elin-common/python:3.12-slim AS runtime
 
-# uv 负责 Python 依赖；Node 只负责运行已编译 Worker 与固定 Vite 构建。
+# uv 负责 Python 依赖；Node 负责运行已编译 Worker、固定 Vite 构建与 Playwright。
 COPY --from=crpi-a7p27yxlrmekg1a3.cn-beijing.personal.cr.aliyuncs.com/elin-common/uv:latest /uv /uvx /bin/
 COPY --from=node-base /usr/local/bin/node /usr/local/bin/node
 
+# Playwright 版本由 Worker 的锁文件依赖固定；浏览器与 Linux 系统库在构建期安装，
+# 线上只读取 /ms-playwright，不在只读运行容器里下载任何内容。
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ARG PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright
+
 WORKDIR /app
 
+# pnpm workspace 的包链接指向根虚拟存储，因此同时保留两层 node_modules 的相对结构。
+# 先单独安装浏览器，让普通 Python/Worker 源码变化可以继续命中这层大体积缓存。
+COPY --from=worker-builder /app/node_modules ./node_modules
+COPY --from=worker-builder /app/sandbox-worker/node_modules ./sandbox-worker/node_modules
+# 生产构建节点与主机都在阿里云北京；使用同地域 Debian 镜像，避免官方源大索引
+# 跨境传输被截断后让浏览器系统依赖安装随机失败。
+RUN sed -i \
+      -e 's|http://deb.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g' \
+      -e 's|http://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g' \
+      /etc/apt/sources.list.d/debian.sources \
+    && PLAYWRIGHT_DOWNLOAD_HOST="$PLAYWRIGHT_DOWNLOAD_HOST" \
+      /usr/local/bin/node ./sandbox-worker/node_modules/playwright/cli.js \
+      install --with-deps --only-shell chromium \
+    && chmod -R a+rX /ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY server/pyproject.toml server/uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
+# uv.lock 内含 PyPI 的绝对制品 URL；先导出精确版本与哈希，安装时才可真正切换镜像，
+# 同时保持原来 frozen/no-dev/no-install-project 的依赖范围。
+ARG UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple
+RUN uv export --quiet --frozen --no-dev --no-emit-project \
+      --format requirements-txt --output-file /tmp/requirements.txt \
+    && uv venv .venv \
+    && UV_DEFAULT_INDEX="$UV_DEFAULT_INDEX" UV_HTTP_RETRIES=8 UV_HTTP_TIMEOUT=120 \
+      uv pip install --python .venv/bin/python --require-hashes --no-cache \
+      --requirements /tmp/requirements.txt \
+    && rm -f /tmp/requirements.txt
 
 COPY server/app ./app
 COPY --from=sandbox-builder /opt/template ./templates/vite-react

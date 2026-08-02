@@ -13,22 +13,23 @@ web/                用户前端
 web-admin/          管理后台
 server/app/         FastAPI、Agent 与模型
 server/templates/   可信 React/Vite/Tailwind 模板
-sandbox-worker/     单并发构建 Worker 进程
+sandbox-worker/     单并发构建 + Playwright 截图 Worker 进程
 ```
 
 ## 一轮生成
 
 1. `POST /api/chat` 建立 SSE。
 2. Agent 通过文件工具修改当前工作副本。
-3. `check_build` 先在 `build_store` 建立会合点，再发送 `preview_refresh`。
-4. 前端提交完整文件快照到主 API，主 API 转发给 Worker。
-5. Worker 用固定配置执行 `vite build`，返回 `build_id`。
-6. 主 API 签发 `/api/sandbox-preview/...` capability URL，并从共享目录直接读取产物。
-7. iframe 在独立预览 Origin（未配置时为 opaque origin）中运行并回传运行时错误和
-   受限截图；前端调用 `build-result`，Agent 被唤醒后根据真实报错与截图决定结束或修复。
+3. `check_build` 从数据库与同批文件 overlay 组成完整快照，直接提交给 Worker。
+4. Worker 用固定配置串行执行 `vite build`；成功后才启动 Playwright Chromium，加载本次
+   静态产物并采集运行时错误和当前画布截图，截图完成后立即关闭浏览器。
+5. 主 API 校验并保存 Worker 截图，为 `build_id` 签发 `/api/sandbox-preview/...`
+   capability URL，再把编译、运行时和截图结果一并交给 Agent。
+6. 前端收到 `preview_refresh` 后只加载交互 iframe；用户刷新、切后台或关闭页面都不会
+   中断服务端构建与截图。iframe 回传的运行时信息只作为在线预览补充诊断。
 
-不要把 `check_build` 改成固定 sleep 或日志轮询；会合点必须先 `arm()` 再发事件，
-否则快速返回会丢结果。
+不要把 `check_build` 改回依赖前端 `build-result` 的等待流程，也不要让 Vite 与 Chromium
+并行；2C2G 的资源边界依赖 Worker 的整段单并发。
 
 ## 沙箱硬约束
 
@@ -40,10 +41,14 @@ sandbox-worker/     单并发构建 Worker 进程
   字节代理读取预览。
 - 只有当 `SANDBOX_PREVIEW_ORIGIN` 与主站 Origin 确实不同时，预览 iframe 才能授予
   `allow-same-origin`；同源回退模式必须保持 opaque origin。
-- Worker 保持单并发、文件/体积/时间/内存/PID 限额。
+- Worker 保持单并发，Vite 退出后才能启动 Chromium；截图结束必须关闭 Browser，继续遵守
+  文件、体积、时间、内存与 PID 限额。
+- Playwright 只允许访问本次 Worker loopback 静态预览以及 `data:`/`blob:` 资源，禁止让
+  生成页面借服务端浏览器访问主 API、容器内网或任意公网地址。
 
 不要把字节代理改成 302 到 Worker：重定向会重新暴露 Worker 地址。无论使用独立或
-opaque origin，父页面都不直接读 iframe DOM；截图走 iframe bridge 或服务端浏览器。
+opaque origin，父页面都不直接读 iframe DOM；模型截图统一由 Worker 内的 Playwright
+完成，交互 iframe 不参与截图。
 当前 Worker 只面向可信个人演示，不是恶意多租户 VM；若对公网开放任意用户生成，
 必须再增加每任务独立容器/微 VM 与网络、UID、cgroup 隔离。
 
@@ -75,7 +80,8 @@ uv run --directory server alembic upgrade head
 uv run --directory server ruff check app tests
 uv run --directory server python -m unittest discover -s tests
 docker compose up -d --build
-SANDBOX_WORKER_TOKEN=config-check-placeholder docker compose config --no-env-resolution
+XIAOZHU_IMAGE_TAG=config-check SANDBOX_WORKER_TOKEN=config-check-placeholder \
+  docker compose config --no-env-resolution
 ```
 
 本地要求 Node.js 22，并通过 Corepack 使用仓库锁定的 pnpm 版本。

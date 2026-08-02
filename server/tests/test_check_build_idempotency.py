@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
@@ -15,7 +16,7 @@ from app.agents.loop import (
     sse,
 )
 from app.agents.tools import BuildCheckReuseState, build_tools
-from app.api.sandbox import SandboxBuildRead
+from app.api.sandbox import SandboxBuildRead, SandboxScreenshotRead
 from app.api.resume import (
     ResumeStart,
     _claim_resume_thread,
@@ -59,6 +60,36 @@ _FAILED_PREVIEW_ARTIFACT = {
         "device": "desktop",
     }
 }
+
+
+def _jpeg_bytes(width: int = 1280, height: int = 720) -> bytes:
+    sof_data = (
+        b"\x08"
+        + height.to_bytes(2, "big")
+        + width.to_bytes(2, "big")
+        + b"\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00"
+    )
+    sos_data = b"\x03\x01\x00\x02\x00\x03\x00\x00\x3f\x00"
+    return (
+        b"\xff\xd8\xff\xc0"
+        + (len(sof_data) + 2).to_bytes(2, "big")
+        + sof_data
+        + b"\xff\xda"
+        + (len(sos_data) + 2).to_bytes(2, "big")
+        + sos_data
+        + b"\x00\xff\xd9"
+    )
+
+
+def _server_screenshot() -> SandboxScreenshotRead:
+    return SandboxScreenshotRead(
+        data_base64=base64.b64encode(_jpeg_bytes()).decode(),
+        mime="image/jpeg",
+        width=1280,
+        height=720,
+        path="/",
+        device="desktop",
+    )
 
 
 def _event(frame: str) -> dict:
@@ -523,15 +554,20 @@ class CheckBuildIdempotencyTests(IsolatedAsyncioTestCase):
         self.assertIn("已跳过重复构建和截图", content)
         self.assertIsNone(artifact)
 
-    async def test_tool_runs_server_build_without_browser_result(self):
+    async def test_tool_runs_server_build_and_only_caches_persisted_screenshot(self):
         cases = [
             (
-                SandboxBuildRead(ok=True, build_id="build-1", preview_url="/preview"),
+                SandboxBuildRead(
+                    ok=True,
+                    build_id="build-1",
+                    preview_url="/preview",
+                    screenshot=_server_screenshot(),
+                ),
                 True,
             ),
             (
                 SandboxBuildRead(ok=False, errors="语法错误"),
-                True,
+                False,
             ),
         ]
         for result, expected_reuse in cases:
@@ -557,12 +593,26 @@ class CheckBuildIdempotencyTests(IsolatedAsyncioTestCase):
                 with patch(
                     "app.agents.tools._submit_sandbox_build",
                     new=AsyncMock(return_value=result),
-                ) as submit:
+                ) as submit, patch(
+                    "app.agents.tools._persist_sandbox_screenshot",
+                    new=AsyncMock(
+                        return_value=(
+                            {"screenshot": _ARTIFACT["screenshot"]},
+                            "",
+                        )
+                    ),
+                ) as persist:
                     content, artifact = await check_build.coroutine(
                         SimpleNamespace(tool_call_id="check-1")
                     )
 
                 submit.assert_awaited_once()
+                self.assertIs(submit.await_args.kwargs.get("capture"), True)
+                if result.ok:
+                    persist.assert_awaited_once()
+                    self.assertIn("screenshot", artifact or {})
+                else:
+                    persist.assert_not_awaited()
                 self.assertEqual(
                     artifact and artifact.get("sandbox_preview", {}).get("ok"),
                     result.ok,
@@ -572,6 +622,181 @@ class CheckBuildIdempotencyTests(IsolatedAsyncioTestCase):
                     state.prepare_check("check-2", "same-files"),
                     expected_reuse,
                 )
+
+    async def test_tool_persists_worker_screenshot_into_tool_artifact(self):
+        state = BuildCheckReuseState()
+        state.prepare_check("check-1", "same-files")
+        db = SimpleNamespace(
+            execute=AsyncMock(
+                return_value=SimpleNamespace(
+                    all=lambda: [("src/App.tsx", "export default 1")]
+                )
+            )
+        )
+        check_build = next(
+            tool
+            for tool in build_tools(
+                db,  # type: ignore[arg-type]
+                "session-1",
+                asyncio.Lock(),
+                build_reuse_state=state,
+            )
+            if tool.name == "check_build"
+        )
+        result = SandboxBuildRead(
+            ok=True,
+            build_id="build-1",
+            preview_url="/preview",
+            screenshot=_server_screenshot(),
+        )
+        record = SimpleNamespace(id="shot-1")
+        expected_screenshot_artifact = {"screenshot": _ARTIFACT["screenshot"]}
+        with (
+            patch(
+                "app.agents.tools._submit_sandbox_build",
+                new=AsyncMock(return_value=result),
+            ),
+            patch(
+                "app.agents.tools.save_screenshot",
+                new=AsyncMock(return_value=record),
+            ) as save,
+            patch(
+                "app.agents.tools.build_screenshot_artifact",
+                new=AsyncMock(return_value=expected_screenshot_artifact),
+            ) as build_artifact,
+        ):
+            content, artifact = await check_build.coroutine(
+                SimpleNamespace(tool_call_id="check-1")
+            )
+
+        save.assert_awaited_once_with(
+            "session-1",
+            _jpeg_bytes(),
+            "image/jpeg",
+            1280,
+            720,
+            "/",
+            "desktop",
+        )
+        build_artifact.assert_awaited_once_with("session-1", "shot-1")
+        self.assertEqual(artifact and artifact.get("screenshot"), _ARTIFACT["screenshot"])
+        self.assertIn("已由服务端生成 1280×720 桌面截图", content)
+        state.finish_check("check-1", "same-files", content)
+        self.assertTrue(state.prepare_check("check-2", "same-files"))
+
+    async def test_capture_or_storage_failure_is_nonfatal_and_not_cached(self):
+        cases = (
+            (
+                SandboxBuildRead(
+                    ok=True,
+                    build_id="build-1",
+                    preview_url="/preview",
+                    capture_error="Playwright 截图超时",
+                ),
+                None,
+            ),
+            (
+                SandboxBuildRead(
+                    ok=True,
+                    build_id="build-1",
+                    preview_url="/preview",
+                    screenshot=_server_screenshot(),
+                ),
+                OSError("disk full"),
+            ),
+        )
+        for result, save_error in cases:
+            with self.subTest(capture_error=result.capture_error):
+                state = BuildCheckReuseState()
+                state.prepare_check("check-1", "same-files")
+                db = SimpleNamespace(
+                    execute=AsyncMock(
+                        return_value=SimpleNamespace(
+                            all=lambda: [("src/App.tsx", "export default 1")]
+                        )
+                    )
+                )
+                check_build = next(
+                    tool
+                    for tool in build_tools(
+                        db,  # type: ignore[arg-type]
+                        "session-1",
+                        asyncio.Lock(),
+                        build_reuse_state=state,
+                    )
+                    if tool.name == "check_build"
+                )
+                save = AsyncMock(side_effect=save_error) if save_error else AsyncMock()
+                with (
+                    patch(
+                        "app.agents.tools._submit_sandbox_build",
+                        new=AsyncMock(return_value=result),
+                    ),
+                    patch("app.agents.tools.save_screenshot", new=save),
+                ):
+                    content, artifact = await check_build.coroutine(
+                        SimpleNamespace(tool_call_id="check-1")
+                    )
+
+                self.assertIn("非致命", content)
+                self.assertIn("不要把它当成项目代码错误", content)
+                self.assertNotIn("screenshot", artifact or {})
+                if result.screenshot is None:
+                    save.assert_not_awaited()
+                else:
+                    save.assert_awaited_once()
+                state.finish_check("check-1", "same-files", content)
+                self.assertFalse(state.prepare_check("check-2", "same-files"))
+
+    async def test_runtime_errors_keep_preview_and_screenshot_for_model(self):
+        state = BuildCheckReuseState()
+        state.prepare_check("check-1", "same-files")
+        db = SimpleNamespace(
+            execute=AsyncMock(
+                return_value=SimpleNamespace(
+                    all=lambda: [("src/App.tsx", "export default 1")]
+                )
+            )
+        )
+        check_build = next(
+            tool
+            for tool in build_tools(
+                db,  # type: ignore[arg-type]
+                "session-1",
+                asyncio.Lock(),
+                build_reuse_state=state,
+            )
+            if tool.name == "check_build"
+        )
+        result = SandboxBuildRead(
+            ok=True,
+            build_id="build-1",
+            preview_url="/preview",
+            screenshot=_server_screenshot(),
+            runtime_errors=["ReferenceError: missing is not defined"],
+        )
+        with (
+            patch(
+                "app.agents.tools._submit_sandbox_build",
+                new=AsyncMock(return_value=result),
+            ),
+            patch(
+                "app.agents.tools._persist_sandbox_screenshot",
+                new=AsyncMock(
+                    return_value=({"screenshot": _ARTIFACT["screenshot"]}, "")
+                ),
+            ),
+        ):
+            content, artifact = await check_build.coroutine(
+                SimpleNamespace(tool_call_id="check-1")
+            )
+
+        self.assertIn("Vite 编译通过", content)
+        self.assertIn("服务端无头浏览器发现运行时代码错误", content)
+        self.assertIn("ReferenceError: missing is not defined", content)
+        self.assertEqual(artifact and artifact.get("screenshot"), _ARTIFACT["screenshot"])
+        state.finish_check("check-1", "same-files", content)
+        self.assertTrue(state.prepare_check("check-2", "same-files"))
 
 class BuildCheckRestoreTests(IsolatedAsyncioTestCase):
     @staticmethod

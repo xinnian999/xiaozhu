@@ -16,6 +16,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from datetime import date
 
+import httpx
 from fastapi import HTTPException
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -108,6 +109,123 @@ def successful_file_tool_path(
 
 def sse(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+# 上游已经返回响应头、却在流式 body 中途断开时，OpenAI SDK 自带的 max_retries
+# 不会再接管。这里只允许从 LangGraph 明确停在 model 节点的 checkpoint 恢复一次；
+# tools 节点绝不自动重放，避免 edit_file/check_build 产生二次副作用。
+MODEL_STREAM_RECOVERY_LIMIT = 1
+MODEL_STREAM_RECOVERY_BACKOFF_S = 1.0
+
+
+def _exception_chain(exc: BaseException):
+    """遍历异常包装链，并防住第三方 SDK 形成循环引用。"""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def _is_retryable_model_stream_error(exc: BaseException) -> bool:
+    """只识别模型响应体读取阶段的瞬时传输错误。
+
+    HTTP 4xx/5xx、参数校验、JSON 解析和业务异常都不能误重试。OpenAI/Anthropic
+    SDK 常把底层 httpx 异常包进 APIConnectionError，因此需要沿 cause/context 查找。
+    """
+    disconnect_markers = (
+        "peer closed connection without sending complete message body",
+        "incomplete chunked read",
+        "server disconnected",
+    )
+    for current in _exception_chain(exc):
+        if isinstance(current, httpx.TransportError):
+            return True
+        # langchain-openai 的相邻分片超时类型是私有类，不直接依赖其导入路径；
+        # 只按精确类名识别，避免把任意 TimeoutError 当成模型网络故障。
+        if type(current).__name__ in {
+            "StreamChunkTimeoutError",
+            "APIConnectionError",
+            "APITimeoutError",
+        }:
+            return True
+        message = str(current).lower()
+        if any(marker in message for marker in disconnect_markers):
+            return True
+    return False
+
+
+async def _model_checkpoint_can_resume(agent, config: dict) -> bool:
+    """确认失败点只剩 model 节点待跑，拒绝跨工具边界自动恢复。"""
+    try:
+        state = await agent.aget_state(config)
+    except Exception as exc:
+        print(
+            "[模型流恢复] 读取 checkpoint 失败，放弃自动恢复: "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return False
+    tasks = tuple(getattr(state, "tasks", ()) or ())
+    return (
+        tuple(getattr(state, "next", ()) or ()) == ("model",)
+        and not (getattr(state, "interrupts", ()) or ())
+        and len(tasks) == 1
+        and getattr(tasks[0], "name", None) == "model"
+        and bool(getattr(tasks[0], "error", None))
+    )
+
+
+async def _astream_with_model_recovery(
+    agent,
+    graph_input,
+    *,
+    config: dict,
+):
+    """消费图事件；模型传输中断时从安全 checkpoint 有限恢复。
+
+    yield 的 ``generation_retry`` 是本文件内部哨兵，由 ``_consume`` 转成 SSE。
+    重试输入必须是 None，表示沿同一 thread 的 pending model 节点继续，不能再次注入
+    用户消息。模型节点未完整返回前 LangGraph 不会进入 tools，所以已流出的工具参数
+    只是 UI 草稿，还没有执行文件操作。
+    """
+    next_input = graph_input
+    recoveries = 0
+    while True:
+        try:
+            async for item in agent.astream(
+                next_input,
+                stream_mode=["updates", "messages"],
+                config=config,
+            ):
+                yield item
+            return
+        except Exception as exc:
+            can_retry = (
+                recoveries < MODEL_STREAM_RECOVERY_LIMIT
+                and _is_retryable_model_stream_error(exc)
+                and await _model_checkpoint_can_resume(agent, config)
+            )
+            if not can_retry:
+                raise
+
+            recoveries += 1
+            print(
+                "[模型流恢复] 上游流中断，从 model checkpoint 自动恢复 "
+                f"{recoveries}/{MODEL_STREAM_RECOVERY_LIMIT}: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            yield (
+                "generation_retry",
+                {
+                    "attempt": recoveries,
+                    "max_attempts": MODEL_STREAM_RECOVERY_LIMIT,
+                },
+            )
+            await asyncio.sleep(MODEL_STREAM_RECOVERY_BACKOFF_S)
+            next_input = None
 
 
 def preview_device_event(tool_call: dict) -> dict | None:
@@ -1109,6 +1227,9 @@ async def _consume(
     # write_file 的 content 可能很长，不能等整条消息结束才把这句开场展示出来。
     active_visible_text = ""
     emitted_tool_intro = ""
+    # 模型流中断前若已经展示并落库过开场白，恢复后的同一个 model 节点不能再发一遍。
+    # 该标记只约束恢复后的第一次模型调用，完整 model update 到达后立即复位。
+    suppress_current_tool_intro = False
     # 提示词不能保证所有模型都在首个工具前输出正文。服务端只为整轮首个真实操作
     # 补一次简短确认，后续工具仍完全按模型原始叙述展示，避免每写一个文件都刷一句。
     has_emitted_round_intro = False
@@ -1128,6 +1249,9 @@ async def _consume(
 
     # ── 工具卡「流式提前亮」用的累积状态 ──
     announced_tools: set[str] = set()
+    # 只有 messages 流里提前亮、但尚未等到完整 model update 的卡属于可丢弃草稿。
+    # 已完成 model/tools 节点的卡绝不能放进这里，否则恢复时会误删真实执行记录。
+    draft_tool_ids: set[str] = set()
     path_sent: set[str] = set()
     tool_chunk_args: dict[str, str] = {}
     tool_chunk_idx: dict[int, str] = {}
@@ -1213,11 +1337,43 @@ async def _consume(
         # 确认或图自然收尾后才整段下发。推理字段则用 reasoning_delta 实时下发。
         # 若 NoBluffMiddleware 把这次候选打回，下一次 model 流开始时会发
         # reasoning_discard 删除旧临时卡，避免把被否决候选的思路留在时间线上。
-        async for mode, chunk in agent.astream(
+        async for mode, chunk in _astream_with_model_recovery(
+            agent,
             graph_input,
-            stream_mode=["updates", "messages"],
             config=config,
         ):
+            if mode == "generation_retry":
+                # 当前 model 没有完整 update，流式工具参数只是未执行草稿。精确通知前端
+                # 删除这些 id，不能在活跃 SSE 中全量刷新 DB（会与恢复后的新事件竞态）。
+                unfinished_id = active_reasoning_id or (
+                    final_reasoning_payload.get("id")
+                    if final_reasoning_payload
+                    else None
+                )
+                if unfinished_id:
+                    yield sse({"type": "reasoning_discard", "id": unfinished_id})
+                discard_tool_ids = sorted(draft_tool_ids)
+                final_assistant_text = ""
+                final_reasoning_payload = None
+                reset_active_reasoning()
+                reset_active_visible_text()
+                suppress_current_tool_intro = has_emitted_round_intro
+                draft_tool_ids.clear()
+                announced_tools.clear()
+                path_sent.clear()
+                tool_chunk_args.clear()
+                tool_chunk_idx.clear()
+                tool_chunk_name.clear()
+                yield sse(
+                    {
+                        "type": "generation_retry",
+                        "attempt": chunk["attempt"],
+                        "max_attempts": chunk["max_attempts"],
+                        "discard_tool_ids": discard_tool_ids,
+                    }
+                )
+                continue
+
             # ── messages 模式：推理正文 + 工具参数都按 token 尽早下发 ──
             if mode == "messages":
                 msg, meta = chunk
@@ -1261,7 +1417,10 @@ async def _consume(
                             continue
                         name = tool_chunk_name.get(cid, "")
                         if name and cid not in announced_tools:
-                            if not emitted_tool_intro:
+                            if (
+                                not emitted_tool_intro
+                                and not suppress_current_tool_intro
+                            ):
                                 intro = active_visible_text
                                 if not intro and not has_emitted_round_intro:
                                     intro = fallback_tool_intro(name)
@@ -1286,6 +1445,7 @@ async def _consume(
                             if name == "check_build":
                                 continue
                             announced_tools.add(cid)
+                            draft_tool_ids.add(cid)
                             print(f"[tool_call·流式提前·出卡] name={name}")
                             yield sse({"type": "tool_call", "name": name, "args": {}, "id": cid})
                         if cid in announced_tools and cid not in path_sent:
@@ -1377,7 +1537,10 @@ async def _consume(
                                 # （见 middleware.aafter_model 第一行判断),此刻就能放心下发。
                                 # 流式阶段若已经在首个工具 chunk 前释放过开场文字，这里
                                 # 不得重复展示或落库；未提供流式正文的厂商仍走原有整段下发。
-                                if not emitted_tool_intro:
+                                if (
+                                    not emitted_tool_intro
+                                    and not suppress_current_tool_intro
+                                ):
                                     yield sse({"type": "message_delta", "text": text})
                                     await _save_message(
                                         db,
@@ -1524,6 +1687,10 @@ async def _consume(
                             reset_active_reasoning()
                             print(f"[最终回复候选] content={text}")
                         reset_active_visible_text()
+                        # 完整 model update 已进入 checkpoint；这些调用不再是流式草稿，
+                        # 后续即使别的节点报错也必须保留工具卡。
+                        draft_tool_ids.clear()
+                        suppress_current_tool_intro = False
                     if truncated:
                         break
 
@@ -1743,12 +1910,37 @@ async def _consume(
         await _cleanup_thread(thread_id)
         yield sse({"type": "done"})
     except Exception as e:
+        print(
+            f"[生成失败] {type(e).__name__}: {e}",
+            flush=True,
+        )
         unfinished_id = active_reasoning_id or (
             final_reasoning_payload.get("id") if final_reasoning_payload else None
         )
         if unfinished_id:
             yield sse({"type": "reasoning_discard", "id": unfinished_id})
-        yield sse({"type": "error", "message": str(e)})
+        is_model_stream_error = _is_retryable_model_stream_error(e)
+        message = (
+            "模型上游连接中断，自动恢复后仍未成功。请点击“重新生成”再试。"
+            if is_model_stream_error
+            else str(e)
+        )
+        yield sse(
+            {
+                "type": "error",
+                "message": message,
+                # 第二次中断前也可能已流出一张未执行的工具草稿；前端精确删除对应 id
+                # 再画错误卡，不能把虚线 loading 永久留在时间线上。
+                **(
+                    {
+                        "reset_draft": True,
+                        "discard_tool_ids": sorted(draft_tool_ids),
+                    }
+                    if is_model_stream_error
+                    else {}
+                ),
+            }
+        )
         await _cleanup_thread(thread_id)
         yield sse({"type": "done"})
     finally:

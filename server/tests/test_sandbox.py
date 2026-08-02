@@ -1,6 +1,8 @@
+import base64
 import hashlib
 import hmac
 import json
+import zlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import IsolatedAsyncioTestCase
@@ -18,6 +20,64 @@ WORKER_TOKEN = "worker-secret"
 CAPABILITY_SECRET = "capability-secret"
 JWT_SECRET = "jwt-secret"
 NOW = 1_700_000_000
+
+
+def _jpeg_bytes(width: int, height: int) -> bytes:
+    """构造包含合法 SOF/SOS 边界的极小 JPEG，供协议校验单测使用。"""
+    sof_data = (
+        b"\x08"
+        + height.to_bytes(2, "big")
+        + width.to_bytes(2, "big")
+        + b"\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00"
+    )
+    sos_data = b"\x03\x01\x00\x02\x00\x03\x00\x00\x3f\x00"
+    return (
+        b"\xff\xd8"
+        + b"\xff\xc0"
+        + (len(sof_data) + 2).to_bytes(2, "big")
+        + sof_data
+        + b"\xff\xda"
+        + (len(sos_data) + 2).to_bytes(2, "big")
+        + sos_data
+        + b"\x00\xff\xd9"
+    )
+
+
+def _worker_screenshot(device: str = "desktop") -> dict[str, object]:
+    width, height = sandbox._SCREENSHOT_VIEWPORTS[device]
+    return {
+        "data_base64": base64.b64encode(_jpeg_bytes(width, height)).decode(),
+        "mime": "image/jpeg",
+        "width": width,
+        "height": height,
+        "path": "/",
+        "device": device,
+    }
+
+
+def _png_bytes(width: int, height: int) -> bytes:
+    def chunk(chunk_type: bytes, data: bytes) -> bytes:
+        checksum = zlib.crc32(chunk_type)
+        checksum = zlib.crc32(data, checksum) & 0xFFFFFFFF
+        return (
+            len(data).to_bytes(4, "big")
+            + chunk_type
+            + data
+            + checksum.to_bytes(4, "big")
+        )
+
+    ihdr = (
+        width.to_bytes(4, "big")
+        + height.to_bytes(4, "big")
+        + b"\x08\x02\x00\x00\x00"
+    )
+    scanline = b"\x00" + b"\x00\x00\x00" * width
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(scanline * height))
+        + chunk(b"IEND", b"")
+    )
 
 
 class _FakeResponse:
@@ -244,6 +304,7 @@ class SandboxBuildTests(CapabilitySecretTestCase):
             {"Authorization": f"Bearer {WORKER_TOKEN}"},
         )
         self.assertEqual(kwargs["json"]["device"], "mobile")
+        self.assertNotIn("capture", kwargs["json"])
 
     async def test_configured_preview_origin_is_used(self):
         client = _FakeClient(post_response=_successful_build_response())
@@ -266,6 +327,121 @@ class SandboxBuildTests(CapabilitySecretTestCase):
                 "https://preview.example/api/sandbox-preview/"
             )
         )
+
+    async def test_valid_worker_screenshot_and_runtime_errors_are_kept_internal(self):
+        worker_body = _successful_build_response().json()
+        assert isinstance(worker_body, dict)
+        worker_body["screenshot"] = _worker_screenshot("mobile")
+        worker_body["runtime_errors"] = ["ReferenceError: missing is not defined"]
+        client = _FakeClient(post_response=_FakeResponse(json_data=worker_body))
+        with (
+            patch.object(sandbox.settings, "sandbox_worker_token", WORKER_TOKEN),
+            patch.object(sandbox.settings, "sandbox_preview_origin", ""),
+            patch.object(sandbox.time, "time", return_value=NOW),
+            patch.object(sandbox.httpx, "AsyncClient", return_value=client),
+        ):
+            result = await sandbox._submit_sandbox_build(
+                SESSION_ID,
+                sandbox.SandboxBuildRequest(
+                    files={"src/App.tsx": "export default 1"},
+                    device="mobile",
+                ),
+                capture=True,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertIsNotNone(result.screenshot)
+        assert result.screenshot is not None
+        self.assertEqual(result.screenshot.device, "mobile")
+        self.assertEqual(
+            result.screenshot.decoded_bytes(),
+            _jpeg_bytes(390, 844),
+        )
+        self.assertEqual(
+            result.runtime_errors,
+            ["ReferenceError: missing is not defined"],
+        )
+        self.assertEqual(client.requests[0][2]["json"]["capture"], True)
+        # FastAPI 使用 model_dump 序列化公共响应；原图及 Worker 诊断不能下发给浏览器。
+        public = result.model_dump()
+        self.assertNotIn("screenshot", public)
+        self.assertNotIn("capture_error", public)
+        self.assertNotIn("runtime_errors", public)
+
+    async def test_png_screenshot_signature_crc_and_dimensions_are_validated(self):
+        raw = _png_bytes(1280, 720)
+        worker_body = _successful_build_response().json()
+        assert isinstance(worker_body, dict)
+        worker_body["screenshot"] = {
+            "data_base64": base64.b64encode(raw).decode(),
+            "mime": "image/png",
+            "width": 1280,
+            "height": 720,
+            "path": "/",
+            "device": "desktop",
+        }
+
+        result = sandbox._parse_worker_build_response(worker_body, "desktop")
+
+        self.assertIsNotNone(result.screenshot)
+        assert result.screenshot is not None
+        self.assertEqual(result.screenshot.decoded_bytes(), raw)
+
+        corrupted = bytearray(raw)
+        corrupted[-1] ^= 0x01
+        worker_body["screenshot"] = {
+            **worker_body["screenshot"],
+            "data_base64": base64.b64encode(corrupted).decode(),
+        }
+        invalid = sandbox._parse_worker_build_response(worker_body, "desktop")
+        self.assertIsNone(invalid.screenshot)
+        self.assertIn("截图返回无效", invalid.capture_error)
+
+    async def test_invalid_screenshot_does_not_change_successful_build(self):
+        invalid_cases = {
+            "invalid-base64": {
+                **_worker_screenshot(),
+                "data_base64": "%%%not-base64%%%",
+            },
+            "wrong-signature": {
+                **_worker_screenshot(),
+                "data_base64": base64.b64encode(b"<svg/>").decode(),
+            },
+            "declared-dimensions": {
+                **_worker_screenshot(),
+                "width": 1279,
+            },
+            "wrong-device": _worker_screenshot("mobile"),
+        }
+        for name, screenshot_payload in invalid_cases.items():
+            with self.subTest(name=name):
+                worker_body = _successful_build_response().json()
+                assert isinstance(worker_body, dict)
+                worker_body["screenshot"] = screenshot_payload
+                result = sandbox._parse_worker_build_response(
+                    worker_body,
+                    "desktop",
+                )
+
+                self.assertTrue(result.ok)
+                self.assertIsNone(result.screenshot)
+                self.assertIn("截图返回无效", result.capture_error)
+
+    async def test_oversized_screenshot_is_rejected_nonfatally(self):
+        worker_body = _successful_build_response().json()
+        assert isinstance(worker_body, dict)
+        worker_body["screenshot"] = {
+            **_worker_screenshot(),
+            "data_base64": base64.b64encode(
+                b"\xff\xd8\xff" + b"x" * sandbox.MAX_SCREENSHOT_BYTES
+            ).decode(),
+        }
+
+        result = sandbox._parse_worker_build_response(worker_body, "desktop")
+
+        self.assertTrue(result.ok)
+        self.assertIsNone(result.screenshot)
+        self.assertIn("截图返回无效", result.capture_error)
 
     async def test_request_body_limit_is_checked_before_json_parsing(self):
         self.assertEqual(sandbox._MAX_BUILD_BODY_BYTES, 32 * 1024 * 1024)

@@ -112,6 +112,7 @@ export default function ChatSidebar({ conversationOnly = false }: {
   const truncateAfterLastUserMessage = useSessionStore((s) => s.truncateAfterLastUserMessage)
   const setToolResult = useSessionStore((s) => s.setToolResult)
   const upsertToolCall = useSessionStore((s) => s.upsertToolCall)
+  const discardToolCalls = useSessionStore((s) => s.discardToolCalls)
   const setStreamingText = useSessionStore((s) => s.setStreamingText)
   const beginStreaming = useSessionStore((s) => s.beginStreaming)
   const commitStreaming = useSessionStore((s) => s.commitStreaming)
@@ -297,7 +298,7 @@ export default function ChatSidebar({ conversationOnly = false }: {
         // 兼容旧后端或中转只返回 token / 空区块的情况：没有真实推理正文就不展示卡片。
         // 若之前收到过增量帧，discard 同时清掉那张尚未完成的临时卡。
         if (event.fallback || !event.text.trim()) {
-          discardReasoning(event.id)
+          discardReasoning(event.id, ownerSessionId)
           continue
         }
         // 思考过程是独立的时间线卡片。若前一轮模型已输出过场文字，先固化正文，
@@ -316,7 +317,15 @@ export default function ChatSidebar({ conversationOnly = false }: {
       } else if (event.type === 'reasoning_discard') {
         if (!showReasoning) continue
         // NoBluffMiddleware 否决了一次候选回复：它的临时推理流也随候选一起撤回。
-        discardReasoning(event.id)
+        discardReasoning(event.id, ownerSessionId)
+      } else if (event.type === 'generation_retry') {
+        // 当前 model 没有完整结束：工具卡、推理增量和正文缓冲都只是未执行草稿。
+        // 后端只给出未完成 model 节点的 call id；本地精确删除，不在活跃流里全量刷新，
+        // 避免 REST 快照和恢复后的 SSE 新事件交错后产生重复消息 / 版本卡。
+        accumulated = ''
+        setStreamingText('')
+        discardToolCalls(event.discard_tool_ids, ownerSessionId)
+        toast(`模型连接中断，正在自动恢复（${event.attempt}/${event.max_attempts}）`)
       } else if (event.type === 'tool_call') {
         // 工具调用前，先把本轮已累积的叙述（模型在调工具前说的话，
         // 如「好的，我先看看结构」）固化成一条独立气泡，再插工具卡。
@@ -382,6 +391,11 @@ export default function ChatSidebar({ conversationOnly = false }: {
           makeVersionCard(event.version_id, event.seq, event.name ?? undefined),
         )
       } else if (event.type === 'error') {
+        if (event.reset_draft) {
+          accumulated = ''
+          setStreamingText('')
+          discardToolCalls(event.discard_tool_ids ?? [], ownerSessionId)
+        }
         // 先把本轮已累积的叙述固化成气泡（别丢了 AI 报错前说的话），
         // 再在对话流里就地插一张错误卡 —— 比一闪而过的 toast 更醒目、可回看。
         if (accumulated) {
@@ -513,9 +527,8 @@ export default function ChatSidebar({ conversationOnly = false }: {
     }
   }
 
-  // 重试最新一轮：用「当前项目状态」重新跑最后一条用户消息，结尾追加一个新版本
-  // （比如最后一轮生成的是 v3，期间手动改到了 v7，重试就在 v7 之上生成 v8，不动 v3）。
-  // 不新增用户气泡 —— prompt 由后端复用最后一条用户消息，旧回复 / 旧版本都保留。
+  // 重试最新一轮：先把文件恢复到本轮开始前，再重跑最后一条用户消息；历史版本仍保留，
+  // 成功后追加一个新版本。不新增用户气泡，prompt 由后端复用最后一条用户消息。
   const handleRetry = async () => {
     if (!session || isStreaming || creating) return
 

@@ -89,7 +89,7 @@ iframe sandbox 仍然保留。该配置只作用于 loopback dev，生产环境�
 
 ```dotenv
 SANDBOX_WORKER_URL=http://127.0.0.1:8010
-SANDBOX_PREVIEW_DIR=/app/data/sandbox-worker/previews
+SANDBOX_PREVIEW_DIR=/app/sandbox-data/previews
 SANDBOX_CAPABILITY_SECRET=只注入主应用的随机长密钥
 SANDBOX_PREVIEW_ORIGIN=http://preview.localhost:8000
 SANDBOX_FRAME_ANCESTORS=http://localhost:8000
@@ -122,7 +122,7 @@ XIAOZHU_IMAGE_TAG=config-check SANDBOX_WORKER_TOKEN=config-check-placeholder \
 
 ```dotenv
 SANDBOX_WORKER_URL=http://127.0.0.1:8010
-SANDBOX_PREVIEW_DIR=/app/data/sandbox-worker/previews
+SANDBOX_PREVIEW_DIR=/app/sandbox-data/previews
 SANDBOX_WORKER_TOKEN=随机长密钥
 SANDBOX_CAPABILITY_SECRET=另一个仅主应用持有的随机长密钥
 SANDBOX_PREVIEW_ORIGIN=https://preview.xiaozhu.elin521.cn

@@ -34,17 +34,19 @@ services:
     environment:
       - DATABASE_URL=sqlite+aiosqlite:////app/data/xiaozhu.db
       - SANDBOX_WORKER_URL=http://127.0.0.1:8010
-      - SANDBOX_PREVIEW_DIR=/app/data/sandbox-worker/previews
-      - SANDBOX_DATA_DIR=/app/data/sandbox-worker
+      - SANDBOX_PREVIEW_DIR=/app/sandbox-data/previews
+      - SANDBOX_DATA_DIR=/app/sandbox-data
       - SANDBOX_TEMPLATE_DIR=/app/templates/vite-react
       # 覆盖旧部署 .env 可能遗留的 75 秒，闭合 60 秒构建 + 12 秒截图 + 清理预算。
       - SANDBOX_BUILD_TIMEOUT_S=100
 
-    # 把宿主机数据目录挂到容器 /app/data，让 SQLite 数据库文件持久化。
+    # SQLite 根目录保持 0700 root；沙箱子目录额外单独挂载，让 UID 10001 无需穿越
+    # 数据库目录即可读写自己的 jobs/previews。两项仍落在同一个宿主持久化目录。
     # 生产环境必须把 XIAOZHU_DATA_DIR 配到面板内部目录之外，避免面板维护
     # 自身数据时递归修改权限；本地未配置时仍默认使用当前目录的 ./data。
     volumes:
       - ${XIAOZHU_DATA_DIR:-./data}:/app/data
+      - ${XIAOZHU_DATA_DIR:-./data}/sandbox-worker:/app/sandbox-data
 
     # 单容器的资源上限覆盖 API 与 Worker；Worker 自身仍保持单并发和构建超时。
     mem_limit: 1800m

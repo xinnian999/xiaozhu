@@ -27,11 +27,12 @@ trap 'stop_children; exit 0' TERM INT
 : "${SANDBOX_WORKER_TOKEN:?必须配置 SANDBOX_WORKER_TOKEN}"
 
 SANDBOX_PORT="${SANDBOX_PORT:-8010}"
-SANDBOX_DATA_DIR="${SANDBOX_DATA_DIR:-/app/data/sandbox-worker}"
+SANDBOX_DATA_DIR="${SANDBOX_DATA_DIR:-/app/sandbox-data}"
 SANDBOX_TEMPLATE_DIR="${SANDBOX_TEMPLATE_DIR:-/app/templates/vite-react}"
 PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/ms-playwright}"
 sandbox_run_uid=10001
 sandbox_run_gid=10001
+storage_repair_flag=""
 
 # 容器 root 只保留 CHOWN/SETUID/SETGID 三项启动能力，不具备 DAC 权限。目录缺少权限时，
 # SQLite 可能仍能读取旧数据，却会在创建会话时才暴露 readonly database。
@@ -41,9 +42,32 @@ if [ ! -w /app/data ] || [ ! -x /app/data ]; then
   exit 1
 fi
 case "$SANDBOX_DATA_DIR" in
-  /app/data/sandbox-worker | /app/data/sandbox-worker/*) ;;
+  /app/sandbox-data | /app/sandbox-data/*) ;;
+  /app/data/sandbox-worker | /app/data/sandbox-worker/*)
+    # 兼容只切镜像标签的旧部署：Compose 可暂时保留旧环境变量，同时把同一个
+    # 宿主子目录额外挂到 /app/sandbox-data。新 Worker 必须从独立挂载点进入，
+    # 否则 UID 10001 会被数据库卷根目录的 0700 权限拦住。
+    sandbox_relative_path="${SANDBOX_DATA_DIR#/app/data/sandbox-worker}"
+    SANDBOX_DATA_DIR="/app/sandbox-data${sandbox_relative_path}"
+    export SANDBOX_DATA_DIR
+    echo "[entrypoint] 将旧沙箱路径映射到独立挂载点 ${SANDBOX_DATA_DIR}"
+    ;;
   *)
-    echo "[entrypoint] SANDBOX_DATA_DIR 必须位于 /app/data/sandbox-worker 内" >&2
+    echo "[entrypoint] SANDBOX_DATA_DIR 必须位于 /app/sandbox-data 或兼容路径 /app/data/sandbox-worker 内" >&2
+    exit 1
+    ;;
+esac
+
+case "${SANDBOX_FORCE_STORAGE_REPAIR:-0}" in
+  0 | "") ;;
+  1)
+    # 从旧 root Worker 回滚后，marker 仍可能存在，但旧进程会新增 root 所有的深层产物。
+    # 过渡部署强制重扫一次，避免下次前进部署只校正顶层 inode 而留下不可访问缓存。
+    storage_repair_flag="--force"
+    echo "[entrypoint] 强制复核沙箱存储权限"
+    ;;
+  *)
+    echo "[entrypoint] SANDBOX_FORCE_STORAGE_REPAIR 只能为 0 或 1" >&2
     exit 1
     ;;
 esac
@@ -54,7 +78,7 @@ esac
 # root 没有 DAC/FOWNER，旧版或中断迁移不能靠普通 chown -R 自愈。辅助脚本用 CAP_CHOWN
 # 逐层接管后再后序交权，并仅在完整成功后写 marker；正常重启只校正三个顶层 inode。
 /app/.venv/bin/python /app/scripts/prepare_sandbox_storage.py \
-  "$SANDBOX_DATA_DIR" "$sandbox_run_uid" "$sandbox_run_gid"
+  "$SANDBOX_DATA_DIR" "$sandbox_run_uid" "$sandbox_run_gid" $storage_repair_flag
 for database_file in \
   /app/data/xiaozhu.db \
   /app/data/xiaozhu.db-shm \

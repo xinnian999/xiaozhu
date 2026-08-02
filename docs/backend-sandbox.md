@@ -37,7 +37,7 @@ capability 是临时 Bearer 凭证。iframe 导航和静态资源请求不会携
 SANDBOX_WORKER_URL=http://127.0.0.1:8010
 SANDBOX_WORKER_TOKEN=随机长密钥
 SANDBOX_CAPABILITY_SECRET=另一个仅主 API 持有的随机长密钥
-SANDBOX_PREVIEW_DIR=/app/data/sandbox-worker/previews
+SANDBOX_PREVIEW_DIR=/app/sandbox-data/previews
 SANDBOX_BUILD_TIMEOUT_S=100
 SANDBOX_PREVIEW_ORIGIN=https://preview.example.com
 SANDBOX_FRAME_ANCESTORS=https://app.example.com
@@ -48,7 +48,7 @@ SANDBOX_FRAME_ANCESTORS=https://app.example.com
 ```dotenv
 SANDBOX_PORT=8010
 SANDBOX_HOST=127.0.0.1
-SANDBOX_DATA_DIR=/app/data/sandbox-worker
+SANDBOX_DATA_DIR=/app/sandbox-data
 SANDBOX_TEMPLATE_DIR=/app/templates/vite-react
 SANDBOX_WORKER_TOKEN=与主服务一致
 SANDBOX_BUILD_TIMEOUT_MS=60000
@@ -57,8 +57,14 @@ SANDBOX_CAPTURE_TIMEOUT_MS=12000
 
 Worker 不生成浏览器 URL，也不提供静态预览接口，因此不需要
 `SANDBOX_PUBLIC_BASE_URL`。生产入口脚本在同一个容器内启动 FastAPI 和 Node Worker；
-两者直接读写 `/app/data/sandbox-worker`，主服务只通过 `127.0.0.1:8010` 发起构建。
+宿主的 `sandbox-worker` 子目录独立挂载到 `/app/sandbox-data`，主服务与 Worker
+在这里共享产物；数据库卷根目录继续保持 `0700 root`，UID 10001 无需也不能穿越它。
+主服务只通过 `127.0.0.1:8010` 发起构建。
 Compose 不发布 8010，公网入口只连接主应用的 8000。
+
+从旧版 root Worker 过渡时，可在新镜像首次稳定运行前临时设置
+`SANDBOX_FORCE_STORAGE_REPAIR=1`。它会忽略权限 marker，完整复核旧 Worker
+可能新增的深层缓存；当 UID 10001 版本已成为回滚基线后应移除，恢复快速启动。
 
 `SANDBOX_WORKER_TOKEN` 只负责主 API → Worker 的内部鉴权；
 `SANDBOX_CAPABILITY_SECRET` 只负责浏览器预览 capability 的签名，绝不能把后者注入

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat as stat_module
 import sys
 from pathlib import Path
 
@@ -18,39 +19,45 @@ def _normalize_tree(
     directory_mode: int,
     file_mode: int,
 ) -> None:
-    """先逐层取回所有权再后序交给 Worker，可从中断的迁移继续。"""
+    """迭代取回所有权再后序交给 Worker，可处理超过递归上限的深目录。"""
     # 容器 root 没有 DAC/FOWNER，不能直接遍历或 chmod 10001:10001 的 0700 目录。
     # CAP_CHOWN 仍允许按已知路径先接管当前 inode；父目录变为 root 可读后再进入下一层。
-    os.chown(root, 0, 0)
-    os.chmod(root, directory_mode)
-    with os.scandir(root) as scanner:
-        entries = list(scanner)
+    stack = [(root, False)]
+    while stack:
+        current_root, exiting = stack.pop()
+        if exiting:
+            # 目录最后交权；中断后下次仍从 marker 失效状态完整恢复。
+            os.chown(current_root, worker_uid, worker_gid)
+            continue
 
-    for entry in entries:
-        target = Path(entry.path)
-        if entry.is_symlink():
-            # 崩溃遗留的 jobs 可能含可信 node_modules 符号链接，绝不能跟随到模板目录。
-            os.lchown(target, worker_uid, worker_gid)
-        elif entry.is_dir(follow_symlinks=False):
-            _normalize_tree(
-                target,
-                worker_uid=worker_uid,
-                worker_gid=worker_gid,
-                directory_mode=directory_mode,
-                file_mode=file_mode,
-            )
-        elif entry.is_file(follow_symlinks=False):
-            os.chown(target, 0, 0)
-            os.chmod(target, file_mode)
-            os.chown(target, worker_uid, worker_gid)
-        else:
-            raise RuntimeError(f"沙箱目录存在不支持的特殊文件: {target}")
-
-    # 目录最后交权；即使此处之前被 SIGKILL，下次仍能按相同的 top-down 流程恢复。
-    os.chown(root, worker_uid, worker_gid)
+        os.chown(current_root, 0, 0)
+        os.chmod(current_root, directory_mode)
+        stack.append((current_root, True))
+        with os.scandir(current_root) as scanner:
+            for entry in scanner:
+                target = Path(entry.path)
+                if entry.is_symlink():
+                    # jobs 可能残留可信 node_modules 链接，绝不能跟随到模板目录。
+                    os.lchown(target, worker_uid, worker_gid)
+                elif entry.is_dir(follow_symlinks=False):
+                    stack.append((target, False))
+                elif entry.is_file(follow_symlinks=False):
+                    if entry.stat(follow_symlinks=False).st_nlink != 1:
+                        raise RuntimeError(f"沙箱文件不能是硬链接: {target}")
+                    os.chown(target, 0, 0)
+                    os.chmod(target, file_mode)
+                    os.chown(target, worker_uid, worker_gid)
+                else:
+                    raise RuntimeError(f"沙箱目录存在不支持的特殊文件: {target}")
 
 
-def prepare_storage(data_dir: Path, worker_uid: int, worker_gid: int) -> None:
+def prepare_storage(
+    data_dir: Path,
+    worker_uid: int,
+    worker_gid: int,
+    *,
+    force: bool = False,
+) -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
     if data_dir.is_symlink():
         raise RuntimeError(f"沙箱数据目录不能是符号链接: {data_dir}")
@@ -66,11 +73,31 @@ def prepare_storage(data_dir: Path, worker_uid: int, worker_gid: int) -> None:
         raise RuntimeError("jobs/previews 目录不能是符号链接")
 
     marker = data_dir / MARKER_NAME
+    marker_tmp = data_dir / f"{MARKER_NAME}.tmp"
     expected_marker = f"{worker_uid}:{worker_gid}\n"
     try:
-        marker_matches = marker.read_text(encoding="ascii") == expected_marker
-    except (FileNotFoundError, OSError, UnicodeError):
+        marker_info = marker.lstat()
+        if not stat_module.S_ISREG(marker_info.st_mode) or marker_info.st_nlink != 1:
+            raise RuntimeError(f"权限 marker 必须是单链接普通文件: {marker}")
+        marker_matches = (
+            not force and marker.read_text(encoding="ascii") == expected_marker
+        )
+    except (OSError, UnicodeError):
         marker_matches = False
+
+    def unlink_marker(path: Path) -> None:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return
+        if not stat_module.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise RuntimeError(f"权限 marker 必须是单链接普通文件: {path}")
+        path.unlink()
+
+    # 所有完整迁移都先让旧 marker 失效；中途被杀后，下次启动绝不能误走快速路径。
+    if not marker_matches:
+        unlink_marker(marker)
+    unlink_marker(marker_tmp)
 
     if not marker_matches:
         # 旧镜像产物或中断迁移必须完整走一次；版本 marker 只在两棵树都成功后原子发布。
@@ -88,7 +115,6 @@ def prepare_storage(data_dir: Path, worker_uid: int, worker_gid: int) -> None:
             directory_mode=0o755,
             file_mode=0o644,
         )
-        marker_tmp = data_dir / f"{MARKER_NAME}.tmp"
         marker_tmp.write_text(expected_marker, encoding="ascii")
         os.chmod(marker_tmp, 0o600)
         os.replace(marker_tmp, marker)
@@ -104,14 +130,23 @@ def prepare_storage(data_dir: Path, worker_uid: int, worker_gid: int) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) != 4:
-        raise SystemExit("用法: prepare_sandbox_storage.py DATA_DIR WORKER_UID WORKER_GID")
+    if len(sys.argv) not in (4, 5) or (
+        len(sys.argv) == 5 and sys.argv[4] != "--force"
+    ):
+        raise SystemExit(
+            "用法: prepare_sandbox_storage.py DATA_DIR WORKER_UID WORKER_GID [--force]"
+        )
     data_dir = Path(sys.argv[1])
     worker_uid = int(sys.argv[2])
     worker_gid = int(sys.argv[3])
     if not data_dir.is_absolute() or worker_uid <= 0 or worker_gid <= 0:
         raise SystemExit("DATA_DIR 必须是绝对路径，Worker UID/GID 必须为正整数")
-    prepare_storage(data_dir, worker_uid, worker_gid)
+    prepare_storage(
+        data_dir,
+        worker_uid,
+        worker_gid,
+        force=len(sys.argv) == 5,
+    )
 
 
 if __name__ == "__main__":

@@ -121,7 +121,11 @@ COPY server/scripts ./scripts
 # Worker 是 ESM 多文件产物；入口会继续 import 同目录模块，必须整体复制 dist。
 COPY --from=worker-builder /app/sandbox-worker/dist/ ./sandbox-worker/
 COPY scripts/docker-entrypoint.sh ./docker-entrypoint.sh
-RUN chmod +x ./docker-entrypoint.sh
+# 固定沙箱挂载点随镜像创建；生产把宿主 sandbox-worker 子目录单独挂到这里，
+# 避免 UID 10001 为了访问自己的文件而获得数据库卷根目录的穿越权限。
+RUN mkdir -p /app/sandbox-data \
+    && chmod 711 /app/sandbox-data \
+    && chmod +x ./docker-entrypoint.sh
 
 COPY --from=ui-builder /app/web/dist ./static
 COPY --from=ui-builder /app/web-admin/dist ./static-admin

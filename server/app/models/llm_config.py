@@ -74,7 +74,12 @@ class LlmModel(Base):
 
 from typing import Literal  # noqa: E402
 
-from pydantic import BaseModel, Field, model_validator  # noqa: E402
+from pydantic import (  # noqa: E402
+    BaseModel,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 class LlmModelAdminRead(BaseModel):
@@ -117,6 +122,8 @@ class LlmModelAdminUpdate(BaseModel):
 
     model_config = {"extra": "forbid"}
 
+    # 路径里的 model_id 始终表示待编辑的旧 ID；body.id 是可选的新 ID。
+    id: str | None = None
     provider: str | None = None
     base_url: str | None = None
     api_key: str | None = None
@@ -125,10 +132,22 @@ class LlmModelAdminUpdate(BaseModel):
     enabled: bool | None = None
     sort_order: int | None = None
 
+    @field_validator("id")
+    @classmethod
+    def normalize_id(cls, value: str | None) -> str | None:
+        """去掉误输入的首尾空白，并拒绝只有空白的模型 ID。"""
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("模型 ID 不能为空")
+        return normalized
+
     @model_validator(mode="after")
     def reject_null_for_required_columns(self):
         """字段可省略以支持 PATCH，但数据库非空列不能被显式写成 null。"""
         non_nullable = {
+            "id",
             "provider",
             "api_key",
             "cost",

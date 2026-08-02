@@ -30,7 +30,12 @@ from app.db import get_db
 from app.deps import get_owned_session
 from app.generation_control import reserve_generation
 from app.generation_runtime import start_generation
-from app.llm import allowed_model_ids, default_model_id, validate_thinking_option
+from app.llm import (
+    allowed_model_ids,
+    default_model_id,
+    models_by_id,
+    validate_thinking_option,
+)
 from app.models.message import Message as DBMessage
 from app.models.session import Session
 
@@ -72,6 +77,8 @@ async def _resume_stream(session_id: str, body: AskResult, db: AsyncSession, use
         elif model not in allowed_model_ids():
             raise HTTPException(status_code=400, detail=f"不支持的模型：{model}")
         validate_thinking_option(model, body.thinking)
+        # 注册表会被管理后台热刷新；在构造 agent 前固定本轮倍率，避免收尾时旧 ID 已失效。
+        model_cost = models_by_id()[model]["cost"]
 
         # thread_id 与「这一轮」绑定（见 app.agents.loop 里的说明），取这个 session
         # 最新一条用户消息的 id 就能算出触发当前这轮的 thread_id。
@@ -157,6 +164,7 @@ async def _resume_stream(session_id: str, body: AskResult, db: AsyncSession, use
             session_id=session_id,
             summary_text=summary_text,
             model=model,
+            model_cost=model_cost,
             db=db,
             db_lock=db_lock,
             user_id=user_id,

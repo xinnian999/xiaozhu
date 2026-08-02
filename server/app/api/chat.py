@@ -115,7 +115,7 @@ async def chat(
         req.session_id,
         lease,
         lambda task_db: with_heartbeat(
-            agent_loop(req, task_db, current_user.id)
+            agent_loop(req, task_db, current_user.id, model_cost=cost)
         ),
     )
     if stream is None:

@@ -23,6 +23,7 @@ import {
   exportModels,
   importModels,
   createModel,
+  copyModel,
   updateModel,
   deleteModel,
   setModelsEnabled,
@@ -223,6 +224,8 @@ export default function Models() {
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<AdminModel | null>(null)
   const [isCopy, setIsCopy] = useState(false)
+  // ref 在事件触发时同步写入，提交逻辑不依赖 React 异步 state 的旧快照。
+  const copySourceIdRef = useRef<string | null>(null)
   const [form] = Form.useForm()
   const selectedProviderId = Form.useWatch('provider', form) as string | undefined
   const providerById = useMemo(
@@ -276,6 +279,7 @@ export default function Models() {
   }, [fetchData])
 
   const openCreate = () => {
+    copySourceIdRef.current = null
     setEditing(null)
     setIsCopy(false)
     form.resetFields()
@@ -288,6 +292,7 @@ export default function Models() {
   }
 
   const openEdit = (model: AdminModel) => {
+    copySourceIdRef.current = null
     setEditing(model)
     setIsCopy(false)
     form.setFieldsValue({
@@ -303,6 +308,8 @@ export default function Models() {
 
   // 复制：以当前行为模板打开新建抽屉，主键自动加 -copy 后缀避免冲突
   const openCopy = (model: AdminModel) => {
+    // 必须保留源 ID，后端会据此复制未下发到列表接口的明文 API Key。
+    copySourceIdRef.current = model.id
     setEditing(null)
     setIsCopy(true)
     form.resetFields()
@@ -310,7 +317,7 @@ export default function Models() {
       id: suggestCopyId(model.id),
       provider: normalizeProviderId(model.provider),
       base_url: model.base_url,
-      api_key: '', // 列表里是脱敏值，复制后需重新填写
+      api_key: '', // 留空由复制接口沿用源模型 Key，填写则覆盖
       cost: model.cost,
       enabled: model.enabled,
     })
@@ -318,6 +325,7 @@ export default function Models() {
   }
 
   const closeDrawer = () => {
+    copySourceIdRef.current = null
     setOpen(false)
     setIsCopy(false)
   }
@@ -333,18 +341,41 @@ export default function Models() {
   }
 
   const submit = async () => {
+    // validateFields 会产生异步边界，先同步保存来源，避免关闭等状态更新清掉源 ID。
+    const copySourceId = copySourceIdRef.current
     const values = await form.validateFields()
     if (editing) {
       // 编辑：api_key 留空表示不改，去掉该字段避免把 key 覆盖成空
       const payload = { ...values }
       if (!payload.api_key) delete payload.api_key
-      delete payload.id
-      await updateModel(editing.id, payload)
+      // 查询参数沿用旧 ID 定位记录，body.id 则是用户填写的新 ID。
+      const updated = await updateModel(editing.id, payload)
+      const oldId = editing.id
+      const newId = updated.id
+
+      // ID 同时被列表选择、运行状态和测试结果当作前端 key；改名后同步迁移，
+      // 避免刷新列表前出现重复行，或保留一个永远无法匹配的旧选择项。
+      setData((prev) => prev.map((model) => (model.id === oldId ? updated : model)))
+      setSelectedIds((prev) => prev.map((id) => (id === oldId ? newId : id)))
+      setReorderingId((prev) => (prev === oldId ? newId : prev))
+      setTestTarget((prev) => (prev?.id === oldId ? updated : prev))
+      setBatchStates((prev) => {
+        if (oldId === newId || !(oldId in prev)) return prev
+        const next = { ...prev, [newId]: prev[oldId] }
+        delete next[oldId]
+        return next
+      })
       message.success('已保存')
+    } else if (copySourceId !== null) {
+      // 复制时不提交空 Key，让后端从源模型复制；填写的新 Key 则覆盖源值。
+      const payload = { ...values, sort_order: nextSortOrder() }
+      if (!payload.api_key) delete payload.api_key
+      await copyModel(copySourceId, payload)
+      message.success('已复制创建')
     } else {
-      // 新建/复制默认排到列表末尾，不再手填 sort_order
+      // 新建默认排到列表末尾，不再手填 sort_order
       await createModel({ ...values, sort_order: nextSortOrder() })
-      message.success(isCopy ? '已复制创建' : '已创建')
+      message.success('已创建')
     }
     closeDrawer()
     fetchData()
@@ -1015,10 +1046,12 @@ export default function Models() {
           <Form.Item
             label="模型 ID"
             name="id"
-            rules={[{ required: true, message: '请填写模型 ID（主键）' }]}
+            rules={[
+              { required: true, whitespace: true, message: '请填写模型 ID（主键）' },
+            ]}
+            extra="模型 ID 是唯一标识，也会作为真实上游模型名；不可与已有 ID 重复。"
           >
-            {/* 编辑时主键不可改 */}
-            <Input disabled={!!editing} placeholder="如 qwen3-coder-next" />
+            <Input placeholder="如 qwen3-coder-next" />
           </Form.Item>
           <Form.Item
             label="Base URL（空=官方）"
@@ -1038,7 +1071,7 @@ export default function Models() {
             name="api_key"
             rules={[
               {
-                required: !editing,
+                required: !editing && !isCopy,
                 message: '请填写 API Key',
               },
             ]}
@@ -1046,11 +1079,11 @@ export default function Models() {
               editing
                 ? '留空表示不修改；切换厂商也会保留已保存的 Key'
                 : isCopy
-                  ? '复制不会带入原 Key，请重新填写'
+                  ? '留空表示沿用原 Key；填写则使用新的 Key'
                   : '新建模型需要填写对应厂商的 API Key'
             }
           >
-            <Input.Password placeholder="API Key" />
+            <Input.Password placeholder={isCopy ? '留空沿用原 Key' : 'API Key'} />
           </Form.Item>
           <Space size="large">
             <Form.Item label="倍率" name="cost">

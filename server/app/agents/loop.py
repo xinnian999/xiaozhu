@@ -317,17 +317,24 @@ def _reasoning_payload(
 _PATH_RE = re.compile(r'"path"\s*:\s*"((?:[^"\\]|\\.)*)"')
 
 
-async def _charge_user(db: AsyncSession, user_id: str, model: str) -> None:
+async def _charge_user(
+    db: AsyncSession,
+    user_id: str,
+    model: str,
+    model_cost: int,
+) -> None:
     """一轮「干净跑完」后按模型倍率扣点。只在成功路径调用（见 agent_loop 收尾）。
 
     扣费时机是「成功才扣」：报错 / 截断 / 用户中断都不会走到这里，所以没扣过、也无需返还。
     隔天重置就在这里发生：daily_date 不是今天 → 先把 daily_used 清零、再累加本轮 cost。
 
+    model_cost 在构造本轮 agent 前从注册表捕获。这里不能再按 model 查询可变注册表：
+    管理员可能在生成期间改名或调整倍率，收尾必须仍按本轮开始时的快照计费。
+
     自己吞掉异常：计费环节出问题也不该污染「已经成功」的 SSE 流——宁可这轮漏扣，
     也不要在 done 之前抛错、把一次成功的生成变成给用户看的报错。
     """
     try:
-        cost = models_by_id()[model]["cost"]
         user = await db.get(User, user_id)
         if user is None:
             return
@@ -335,9 +342,12 @@ async def _charge_user(db: AsyncSession, user_id: str, model: str) -> None:
         if user.daily_date != today:
             user.daily_used = 0
             user.daily_date = today
-        user.daily_used += cost
+        user.daily_used += model_cost
         await db.commit()
-        print(f"[扣费] user={user_id} model={model} cost={cost} → daily_used={user.daily_used}")
+        print(
+            f"[扣费] user={user_id} model={model} cost={model_cost}"
+            f" → daily_used={user.daily_used}"
+        )
     except Exception as e:
         print(f"[扣费失败] user={user_id} model={model}: {type(e).__name__}: {e}")
 
@@ -1056,6 +1066,7 @@ async def _consume(
     session_id: str,
     summary_text: str,
     model: str,
+    model_cost: int,
     db: AsyncSession,
     db_lock: asyncio.Lock,
     user_id: str,
@@ -1713,7 +1724,7 @@ async def _consume(
                 yield sse(event)
 
         if not truncated:
-            await _charge_user(db, user_id, model)
+            await _charge_user(db, user_id, model, model_cost)
 
         # 这一轮真正跑完(没有 pending interrupt),清掉这次的 checkpoint。
         await _cleanup_thread(thread_id)
@@ -1746,7 +1757,11 @@ async def _consume(
 
 
 async def agent_loop(
-    req: ChatRequest, db: AsyncSession, user_id: str
+    req: ChatRequest,
+    db: AsyncSession,
+    user_id: str,
+    *,
+    model_cost: int | None = None,
 ) -> AsyncGenerator[str, None]:
     """喂入历史 → 委托 _consume 消费图的事件流。
 
@@ -1827,6 +1842,10 @@ async def agent_loop(
     # 避免任何异常在 StreamingResponse 内部裸抛,把前端卡在「思考中」出不来。
     build_reuse_state = BuildCheckReuseState()
     try:
+        # /api/chat 会把额度校验时读取的倍率传进来；默认分支仅兼容内部直接调用。
+        # 无论哪条路径，都必须在构造 agent 前固定本轮倍率。
+        if model_cost is None:
+            model_cost = models_by_id()[req.model]["cost"]
         agent = build_round_agent(
             db,
             req.session_id,
@@ -1859,6 +1878,7 @@ async def agent_loop(
         session_id=req.session_id,
         summary_text=req.message,
         model=req.model,
+        model_cost=model_cost,
         db=db,
         db_lock=db_lock,
         user_id=user_id,

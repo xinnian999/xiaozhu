@@ -212,7 +212,10 @@ export type ModelCreatePayload = {
   sort_order?: number
 }
 
-export type ModelUpdatePayload = Partial<Omit<ModelCreatePayload, 'id'>>
+/**
+ * PATCH 使用查询参数里的旧 ID 定位记录；body.id 可选，填写时用于修改模型 ID。
+ */
+export type ModelUpdatePayload = Partial<ModelCreatePayload>
 
 /**
  * 导出/导入用的单条模型配置（含明文 api_key）。
@@ -304,6 +307,14 @@ export async function testModelCapability(id: string, capability: ModelTestCapab
 
 export async function createModel(body: ModelCreatePayload) {
   const res = await http.post<AdminModel>('/api/admin/models', body)
+  return res.data
+}
+
+/** 复制模型配置；api_key 未提供时由后端沿用源模型的密钥。 */
+export async function copyModel(sourceId: string, body: ModelCreatePayload) {
+  const res = await http.post<AdminModel>('/api/admin/models/operations/model/copy', body, {
+    params: { model_id: sourceId },
+  })
   return res.data
 }
 

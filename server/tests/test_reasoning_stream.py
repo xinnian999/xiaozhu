@@ -344,6 +344,7 @@ class ReasoningStreamTests(IsolatedAsyncioTestCase):
                     session_id="session-1",
                     summary_text="做一个作品主页",
                     model="test-model",
+                    model_cost=1,
                     db=db,  # type: ignore[arg-type]
                     db_lock=asyncio.Lock(),
                     user_id="user-1",
@@ -454,6 +455,7 @@ class ReasoningStreamTests(IsolatedAsyncioTestCase):
                     session_id="session-1",
                     summary_text="测试流式思考",
                     model="test-model",
+                    model_cost=1,
                     db=object(),  # type: ignore[arg-type]
                     db_lock=asyncio.Lock(),
                     user_id="user-1",
@@ -511,6 +513,7 @@ class ReasoningStreamTests(IsolatedAsyncioTestCase):
                     session_id="session-1",
                     summary_text="关闭思考",
                     model="test-model",
+                    model_cost=1,
                     db=object(),  # type: ignore[arg-type]
                     db_lock=asyncio.Lock(),
                     user_id="user-1",
@@ -554,6 +557,7 @@ class ReasoningStreamTests(IsolatedAsyncioTestCase):
                     session_id="session-1",
                     summary_text="简单问题不展示空思考卡",
                     model="test-model",
+                    model_cost=1,
                     db=object(),  # type: ignore[arg-type]
                     db_lock=asyncio.Lock(),
                     user_id="user-1",

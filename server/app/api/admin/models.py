@@ -14,6 +14,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Response
 from langchain_core.messages import HumanMessage
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import llm
@@ -363,6 +364,52 @@ async def create_model(
     return _to_read(model)
 
 
+@router.post(
+    "/operations/model/copy",
+    response_model=LlmModelAdminRead,
+    status_code=201,
+)
+async def copy_model(
+    model_id: str,
+    body: LlmModelAdminCreate,
+    db: AsyncSession = Depends(get_db),
+) -> LlmModelAdminRead:
+    """以指定模型为模板新建模型；Key 留空时仅在服务端继承源模型密钥。"""
+    source = await db.get(LlmModel, model_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="模型不存在")
+    if await db.get(LlmModel, body.id) is not None:
+        raise HTTPException(status_code=409, detail="该模型 ID 已存在")
+
+    data = body.model_dump()
+    data = _canonical_config(
+        data,
+        provider=body.provider,
+        base_url=body.base_url,
+    )
+    # 管理后台拿到的源 Key 是脱敏值，复制时由服务端读取原值；管理员在复制
+    # 表单里填写新 Key 时则明确覆盖。能力结论与模型 ID/配置绑定，不能继承。
+    data.update(
+        api_key=body.api_key or source.api_key,
+        vision=False,
+        thinking=False,
+        thinking_toggle=False,
+        vision_status="unknown",
+        thinking_status="unknown",
+    )
+    model = LlmModel(**data)
+    db.add(model)
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        # 预检查与提交之间仍可能有并发复制，以主键唯一约束兜底。
+        raise HTTPException(status_code=409, detail="该模型 ID 已存在") from exc
+    await db.refresh(model)
+    await llm.refresh()
+    return _to_read(model)
+
+
 @router.patch(
     "/{model_id}",
     response_model=LlmModelAdminRead,
@@ -374,11 +421,16 @@ async def update_model(
     body: LlmModelAdminUpdate,
     db: AsyncSession = Depends(get_db),
 ) -> LlmModelAdminRead:
-    """编辑模型，字段都可选（partial update）。"""
+    """编辑模型，字段都可选；body.id 可把路径指定的旧 ID 改成新 ID。"""
     model = await db.get(LlmModel, model_id)
     if model is None:
         raise HTTPException(status_code=404, detail="模型不存在")
     data = body.model_dump(exclude_unset=True)
+    old_id = model.id
+    new_id = data.get("id", old_id)
+    id_changed = new_id != old_id
+    if id_changed and await db.get(LlmModel, new_id) is not None:
+        raise HTTPException(status_code=409, detail="该模型 ID 已存在")
     selected_provider = data.get("provider", model.provider)
     selected_base_url = data.get("base_url", model.base_url)
     data = _canonical_config(
@@ -386,9 +438,8 @@ async def update_model(
         provider=selected_provider,
         base_url=selected_base_url,
     )
-    capability_config_changed = any(
-        field in body.model_fields_set
-        and data.get(field) != getattr(model, field)
+    capability_config_changed = id_changed or any(
+        field in body.model_fields_set and data.get(field) != getattr(model, field)
         for field in ("provider", "base_url", "api_key")
     )
     if capability_config_changed:
@@ -402,7 +453,14 @@ async def update_model(
         )
     for field, value in data.items():
         setattr(model, field, value)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        # 预检查与提交之间仍可能有并发写入，最终以主键唯一约束兜底。
+        if id_changed:
+            raise HTTPException(status_code=409, detail="该模型 ID 已存在") from exc
+        raise
     await db.refresh(model)
     await llm.refresh()
     return _to_read(model)

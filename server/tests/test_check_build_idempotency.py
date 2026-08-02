@@ -343,6 +343,7 @@ class CheckBuildIdempotencyTests(IsolatedAsyncioTestCase):
                     session_id="session-1",
                     summary_text="测试重复自检",
                     model="test-model",
+                    model_cost=1,
                     db=db,  # type: ignore[arg-type]
                     db_lock=asyncio.Lock(),
                     user_id="user-1",
@@ -930,6 +931,10 @@ class ResumeBuildCheckTests(IsolatedAsyncioTestCase):
 
         with (
             patch("app.api.resume.default_model_id", return_value="test-model"),
+            patch(
+                "app.api.resume.models_by_id",
+                return_value={"test-model": {"cost": 3}},
+            ),
             patch("app.api.resume.validate_thinking_option"),
             patch(
                 "app.api.resume.latest_round_thread_id",
@@ -1013,6 +1018,10 @@ class ResumeBuildCheckTests(IsolatedAsyncioTestCase):
 
         with (
             patch("app.api.resume.default_model_id", return_value="test-model"),
+            patch(
+                "app.api.resume.models_by_id",
+                return_value={"test-model": {"cost": 3}},
+            ),
             patch("app.api.resume.validate_thinking_option"),
             patch(
                 "app.api.resume.latest_round_thread_id",
@@ -1087,11 +1096,18 @@ class ResumeBuildCheckTests(IsolatedAsyncioTestCase):
         db_result = SimpleNamespace(scalar_one_or_none=lambda: "继续任务")
         db = SimpleNamespace(execute=AsyncMock(return_value=db_result))
 
-        async def fake_consume(*_args, **_kwargs):
+        consume_kwargs = {}
+
+        async def fake_consume(*_args, **kwargs):
+            consume_kwargs.update(kwargs)
             yield sse({"type": "done"})
 
         with (
             patch("app.api.resume.default_model_id", return_value="test-model"),
+            patch(
+                "app.api.resume.models_by_id",
+                return_value={"test-model": {"cost": 3}},
+            ),
             patch("app.api.resume.validate_thinking_option"),
             patch(
                 "app.api.resume.latest_round_thread_id",
@@ -1128,4 +1144,5 @@ class ResumeBuildCheckTests(IsolatedAsyncioTestCase):
             ["tool_call", "tool_result", "done"],
         )
         self.assertEqual(events[1]["screenshot"]["id"], "shot-1")
+        self.assertEqual(consume_kwargs["model_cost"], 3)
         arm.assert_not_called()
